@@ -1,0 +1,9 @@
+﻿{
+	"name": "https-server-example",
+	"description": "Uses the HTTPS protocol for serving requests.",
+	"authors": [ "Sönke Ludwig" ],
+	"dependencies": {
+		"vibe-d": {"version": "~master", "path": "../../"}
+	},
+	"versions": ["VibeDefaultMain"]
+}
