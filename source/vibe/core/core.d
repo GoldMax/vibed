@@ -17,6 +17,7 @@ import vibe.utils.array;
 import std.algorithm;
 import std.conv;
 import std.encoding;
+import core.exception;
 import std.exception;
 import std.functional;
 import std.range : empty, front, popFront;
@@ -138,7 +139,7 @@ void exitEventLoop(bool shutdown_all_threads = false)
 
 	Checks if events are ready to trigger immediately, and run their callbacks if so.
 
-	Returns: Returns false iff exitEventLoop was called in the process.
+	Returns: Returns false $(I iff) exitEventLoop was called in the process.
 */
 bool processEvents()
 {
@@ -172,7 +173,7 @@ void setIdleHandler(bool delegate() del)
 	continue to run until vibeYield() or any of the I/O or wait functions is
 	called.
 
-	Note that the maximum size of all args must not exceed MaxTaskParameterSize.
+	Note that the maximum size of all args must not exceed `maxTaskParameterSize`.
 */
 Task runTask(ARGS...)(void delegate(ARGS) task, ARGS args)
 {
@@ -194,7 +195,7 @@ private Task runTask_internal(ref TaskFuncInfo tfi)
 	if (f is null) {
 		// if there is no fiber available, create one.
 		if (s_availableFibers.capacity == 0) s_availableFibers.capacity = 1024;
-		logDebug("Creating new fiber...");
+		logDebugV("Creating new fiber...");
 		s_fiberCount++;
 		f = new CoreTask;
 	}
@@ -256,6 +257,7 @@ Task runWorkerTaskH(FT, ARGS...)(FT func, auto ref ARGS args)
 
 	alias PrivateTask = Typedef!(Task, Task.init, __PRETTY_FUNCTION__);
 	Task caller = Task.getThis();
+	assert(caller != Task.init, "runWorkderTaskH can currently only be called from within a task.");
 	static void taskFun(Task caller, FT func, ARGS args) {
 		PrivateTask callee = Task.getThis();
 		caller.prioritySend(callee);
@@ -275,6 +277,7 @@ Task runWorkerTaskH(alias method, T, ARGS...)(shared(T) object, auto ref ARGS ar
 
 	alias PrivateTask = Typedef!(Task, Task.init, __PRETTY_FUNCTION__);
 	Task caller = Task.getThis();
+	assert(caller != Task.init, "runWorkderTaskH can currently only be called from within a task.");
 	static void taskFun(Task caller, FT func, ARGS args) {
 		PrivateTask callee = Task.getThis();
 		caller.prioritySend(callee);
@@ -450,7 +453,7 @@ private TaskFuncInfo makeTaskFuncInfo(CALLABLE, ARGS...)(ref CALLABLE callable, 
 	static assert(CALLABLE.sizeof <= TaskFuncInfo.callable.length);
 	static assert(TARGS.sizeof <= maxTaskParameterSize,
 		"The arguments passed to run(Worker)Task must not exceed "~
-		MaxTaskParameterSize.to!string~" bytes in total size.");
+		maxTaskParameterSize.to!string~" bytes in total size.");
 
 	static void callDelegate(TaskFuncInfo* tfi) {
 		assert(tfi.func is &callDelegate);
@@ -696,7 +699,7 @@ void setTaskEventCallback(TaskEventCb func)
 /**
 	A version string representing the current vibe version
 */
-enum vibeVersionString = "0.7.23";
+enum vibeVersionString = "0.7.25";
 
 
 /**
@@ -1305,7 +1308,7 @@ shared static this()
 	// COMPILER BUG: Must be some kind of module constructor order issue:
 	//    without this, the stdout/stderr handles are not initialized before
 	//    the log module is set up.
-	import std.stdio; write("");
+	import std.stdio; File f; f.close();
 
 	initializeLogModule();
 
@@ -1368,14 +1371,16 @@ shared static ~this()
 {
 	deleteEventDriver();
 
-	bool tasks_left = false;
+	size_t tasks_left;
 
 	synchronized (st_threadsMutex) {
-		if( !st_workerTasks.empty ) tasks_left = true;
+		if( !st_workerTasks.empty ) tasks_left = st_workerTasks.length;
 	}
 
-	if (!s_yieldedTasks.empty) tasks_left = true;
-	if (tasks_left) logWarn("There are still tasks running at exit.");
+	if (!s_yieldedTasks.empty) tasks_left += s_yieldedTasks.length;
+	if (tasks_left > 0) {
+		logWarn("There were still %d tasks running at exit.", tasks_left);
+	}
 
 	destroy(s_core);
 	s_core = null;
@@ -1485,6 +1490,12 @@ nothrow {
 		scope (failure) exit(-1);
 		logFatal("Worker thread terminated due to uncaught exception: %s", e.msg);
 		logDebug("Full error: %s", e.toString().sanitize());
+	} catch (InvalidMemoryOperationError e) {
+		import std.stdio;
+		scope(failure) assert(false);
+		writeln("Error message: ", e.msg);
+		writeln("Full error: ", e.toString().sanitize());
+		exit(-1);
 	} catch (Throwable th) {
 		logFatal("Worker thread terminated due to uncaught error: %s", th.msg);
 		logDebug("Full error: %s", th.toString().sanitize());
@@ -1674,28 +1685,20 @@ private string callWithMove(ARGS...)(string func, string args)
 
 private template needsMove(T)
 {
-	private T testCopy()()
+	template isCopyable(T)
 	{
-		T a = void;
-		T b = void;
-		T fun(T x) { T y = x; return y; }
-		b = fun(a);
-		return b;
+		enum isCopyable = __traits(compiles, (T a) { return a; });
 	}
 
-	private void testMove()()
+	template isMoveable(T)
 	{
-		T a = void;
-		void test(T) {}
-		test(a.move);
+		enum isMoveable = __traits(compiles, (T a) { return a.move; });
 	}
 
-	static if (is(typeof(testCopy!()()) == T)) enum needsMove = false;
-	else {
-		enum needsMove = true;
-		void test() { testMove!()(); }
-		static assert(is(typeof(testMove!()())), "Non-copyable type "~T.stringof~" must be movable with a .move property."~ typeof(testMove!()()));
-	}
+	enum needsMove = !isCopyable!T;
+
+	static assert(isCopyable!T || isMoveable!T,
+				  "Non-copyable type "~T.stringof~" must be movable with a .move property.");
 }
 
 unittest {
@@ -1721,11 +1724,4 @@ unittest {
 	static assert(!needsMove!U);
 	static assert(needsMove!V);
 	static assert(!needsMove!W);
-}
-
-version(VibeLibasyncDriver) {
-	shared static ~this() {
-		import libasync.threads : destroyAsyncThreads;
-		destroyAsyncThreads(); // destroy threads
-	}
 }

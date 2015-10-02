@@ -39,7 +39,7 @@ NullOutputStream nullSink()
 	Interface for all classes implementing readable streams.
 */
 interface InputStream {
-	/** Returns true iff the end of the input stream has been reached.
+	/** Returns true $(I iff) the end of the input stream has been reached.
 	*/
 	@property bool empty();
 
@@ -53,11 +53,14 @@ interface InputStream {
 	*/
 	@property bool dataAvailableForRead();
 
-	/** Returns a temporary reference to the data that is currently buffered, typically has the size
-		leastSize() or 0 if dataAvailableForRead() returns false.
+	/** Returns a temporary reference to the data that is currently buffered.
 
-		Note that any method invocation on the same stream invalidates the contents of the returned
-		buffer.
+		The returned slice typically has the size `leastSize()` or `0` if
+		`dataAvailableForRead()` returns false. Streams that don't have an
+		internal buffer will always return an empty slice.
+
+		Note that any method invocation on the same stream potentially
+		invalidates the contents of the returned buffer.
 	*/
 	const(ubyte)[] peek();
 

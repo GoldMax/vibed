@@ -231,7 +231,8 @@ final class MongoConnection {
 		// is implemented here to allow to check errors upon every request
 		// on conncetion level.
 
-		Bson[string] command_and_options = [ "getLastError": Bson(1.0) ];
+		Bson command_and_options = Bson.emptyObject;
+		command_and_options["getLastError"] = Bson(1.0);
 
 		if(m_settings.w != m_settings.w.init)
 			command_and_options["w"] = m_settings.w; // Already a Bson struct
@@ -245,7 +246,7 @@ final class MongoConnection {
 		_MongoErrorDescription ret;
 
 		query!Bson(db ~ ".$cmd", QueryFlags.NoCursorTimeout | m_settings.defQueryFlags,
-			0, -1, serializeToBson(command_and_options), Bson(null),
+			0, -1, command_and_options, Bson(null),
 			(cursor, flags, first_doc, num_docs) {
 				logTrace("getLastEror(%s) flags: %s, cursor: %s, documents: %s", db, flags, cursor, num_docs);
 				enforce(!(flags & ReplyFlags.QueryFailure),
@@ -261,7 +262,7 @@ final class MongoConnection {
 					ret = MongoErrorDescription(
 						error.err.opt!string(""),
 						error.code.opt!int(-1),
-						error.connectionId.get!int(),
+						error.connectionId.opt!int(-1),
 						error.n.get!int(),
 						error.ok.get!double()
 					);
@@ -438,6 +439,7 @@ final class MongoConnection {
 
 		cmd = Bson.emptyObject;
 		cmd["authenticate"] = Bson(1);
+		cmd["mechanism"] = Bson("MONGODB-CR");
 		cmd["nonce"] = Bson(nonce);
 		cmd["user"] = Bson(m_settings.username);
 		cmd["key"] = Bson(key);

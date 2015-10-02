@@ -68,6 +68,7 @@ struct HashMap(TKey, TValue, Traits = DefaultHashMapTraits!TKey)
 
 	~this()
 	{
+		clear();
 		if (m_table.ptr !is null) freeArray(m_allocator, m_table);
 	}
 
@@ -160,7 +161,7 @@ struct HashMap(TKey, TValue, Traits = DefaultHashMapTraits!TKey)
 		foreach (i; 0 .. m_table.length)
 			if (!Traits.equals(m_table[i].key, Traits.clearValue)) {
 				static assert(arity!del >= 1 && arity!del <= 2,
-					      "isOpApplyDg should have prevented this");
+						  "isOpApplyDg should have prevented this");
 				static if (arity!del == 1) {
 					if (int ret = del(m_table[i].value))
 						return ret;
@@ -314,7 +315,7 @@ unittest { // test for proper use of constructor/post-blit/destructor
 		assert(Test.constructedCounter == 1);
 	}
 	assert(Test.constructedCounter == 0);
-	
+
 	{ // basic insertion and hash map resizing
 		HashMap!(int, Test) map;
 		foreach (i; 1 .. 67) {

@@ -188,18 +188,18 @@ void setVibeDistHost(string host, ushort port)
 
 
 /**
-	Renders the given template and makes all ALIASES available to the template.
+	Renders the given Diet template and makes all ALIASES available to the template.
 
-	This currently suffers from multiple DMD bugs - use renderCompat() instead for the time being.
+	You can call this function as a pseudo-member of `HTTPServerResponse` using
+	D's uniform function call syntax.
 
-	You can call this function as a member of HTTPServerResponse using D's uniform function
-	call syntax.
+	See_also: `vibe.templ.diet.compileDietFile`
 
 	Examples:
 		---
 		string title = "Hello, World!";
 		int pageNumber = 1;
-		res.render!("mytemplate.jd", title, pageNumber);
+		res.render!("mytemplate.dt", title, pageNumber);
 		---
 */
 @property void render(string template_file, ALIASES...)(HTTPServerResponse res)
@@ -812,6 +812,12 @@ final class HTTPServerResponse : HTTPResponse {
 		statusCode = status;
 		writeBody(data, content_type);
 	}
+	/// ditto
+	void writeBody(scope InputStream data, string content_type = null)
+	{
+		if (content_type != "") headers["Content-Type"] = content_type;
+		bodyWriter.write(data);
+	}
 
 	/** Writes the whole response body at once, without doing any further encoding.
 
@@ -941,10 +947,10 @@ final class HTTPServerResponse : HTTPResponse {
 		}
 
 		if (auto pce = "Content-Encoding" in headers) {
-			if (*pce == "gzip") {
+			if (icmp2(*pce, "gzip") == 0) {
 				m_gzipOutputStream = FreeListRef!GzipOutputStream(m_bodyWriter);
 				m_bodyWriter = m_gzipOutputStream;
-			} else if (*pce == "deflate") {
+			} else if (icmp2(*pce, "deflate") == 0) {
 				m_deflateOutputStream = FreeListRef!DeflateOutputStream(m_bodyWriter);
 				m_bodyWriter = m_deflateOutputStream;
 			} else {
@@ -1064,11 +1070,9 @@ final class HTTPServerResponse : HTTPResponse {
 	@property ulong bytesWritten() { return m_countingWriter.bytesWritten; }
 
 	/**
-		Compatibility version of render() that takes a list of explicit names and types instead
-		of variable aliases.
+		Scheduled for deprecation - use `render` instead.
 
-		This version of render() works around a compiler bug in DMD (Issue 2962). You should use
-		this method instead of render() as long as this bug is not fixed.
+		This version of render() works around an old compiler bug in DMD < 2.064 (Issue 2962).
 
 		The first template argument is the name of the template file. All following arguments
 		must be pairs of a type and a string, each specifying one parameter. Parameter values
@@ -1129,15 +1133,16 @@ final class HTTPServerResponse : HTTPResponse {
 		// ignore exceptions caused by an already closed connection - the client
 		// may have closed the connection already and this doesn't usually indicate
 		// a problem.
-		try m_conn.flush();
-		catch (Exception e) logDebug("Failed to flush connection after finishing HTTP response: %s", e.msg);
+		if (m_rawConnection && m_rawConnection.connected) {
+			try if (m_conn) m_conn.flush();
+			catch (Exception e) logDebug("Failed to flush connection after finishing HTTP response: %s", e.msg);
+			if (!isHeadResponse && bytesWritten < headers.get("Content-Length", "0").to!long) {
+				logDebug("HTTP response only written partially before finalization. Terminating connection.");
+				m_rawConnection.close();
+			}
+		}
 
 		m_timeFinalized = Clock.currTime(UTC());
-
-		if (!isHeadResponse && bytesWritten < headers.get("Content-Length", "0").to!long) {
-			logDebug("HTTP response only written partially before finalization. Terminating connection.");
-			m_rawConnection.close();
-		}
 
 		m_conn = null;
 		m_rawConnection = null;
@@ -1191,7 +1196,7 @@ final class HTTPServerResponse : HTTPResponse {
 /**
 	Represents the request listener for a specific `listenHTTP` call.
 
-	This struct can be used to stop listening for HTTP requests at runtime. 
+	This struct can be used to stop listening for HTTP requests at runtime.
 */
 struct HTTPListener {
 	private {
@@ -1320,12 +1325,14 @@ private {
 	// accessed for every request, needs to be kept thread-safe by only atomically assigning new
 	// arrays (COW). shared immutable(HTTPServerContext)[] would be the right candidate here, but
 	// is impractical due to type system limitations.
-	shared HTTPServerContext[] g_contexts;
-	
+	align(16) shared HTTPServerContext[] g_contexts;
+
 	HTTPServerContext[] getContexts()
 	{
-		static if (__VERSION__ >= 2067)
-			return cast(HTTPServerContext[])atomicLoad(g_contexts);
+		static if (__VERSION__ >= 2067) {
+			version (Win64) return cast(HTTPServerContext[])g_contexts;
+			else return cast(HTTPServerContext[])atomicLoad(g_contexts);
+		}
 		else
 			return cast(HTTPServerContext[])g_contexts;
 	}
@@ -1491,8 +1498,6 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 {
 	import std.algorithm : canFind;
 
-	auto peer_address_string = tcp_connection.peerAddress;
-	auto peer_address = tcp_connection.remoteAddress;
 	SysTime reqtime = Clock.currTime(UTC());
 
 	//auto request_allocator = scoped!(PoolAllocator)(1024, defaultAllocator());
@@ -1504,6 +1509,13 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 	FreeListRef!TimeoutHTTPInputStream timeout_http_input_stream;
 	FreeListRef!LimitedHTTPInputStream limited_http_input_stream;
 	FreeListRef!ChunkedInputStream chunked_input_stream;
+
+	// store the IP address (IPv4 addresses forwarded over IPv6 are stored in IPv4 format)
+	auto peer_address_string = tcp_connection.peerAddress;
+	if (peer_address_string.startsWith("::ffff:") && peer_address_string[7 .. $].indexOf(":") < 0)
+		req.peer = peer_address_string[7 .. $];
+	else req.peer = peer_address_string;
+	req.clientAddress = tcp_connection.remoteAddress;
 
 	// Default to the first virtual host for this listener
 	HTTPServerRequestDelegate request_task;
@@ -1568,12 +1580,6 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 			reqReader = timeout_http_input_stream;
 		}
 
-		// store the IP address (IPv4 addresses forwarded over IPv6 are stored in IPv4 format)
-		if (peer_address_string.startsWith("::ffff:") && peer_address_string[7 .. $].indexOf(":") < 0)
-			req.peer = peer_address_string[7 .. $];
-		else req.peer = peer_address_string;
-		req.clientAddress = peer_address;
-
 		// basic request parsing
 		parseRequestHeader(req, reqReader, request_allocator, settings.maxRequestHeaderSize);
 		logTrace("Got request header.");
@@ -1633,7 +1639,7 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 
 		// handle Expect header
 		if (auto pv = "Expect" in req.headers) {
-			if (*pv == "100-continue") {
+			if (icmp2(*pv, "100-continue") == 0) {
 				logTrace("sending 100 continue");
 				http_stream.write("HTTP/1.1 100 Continue\r\n\r\n");
 			}
@@ -1681,7 +1687,7 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 		}
 
 		if (settings.options & HTTPServerOption.parseJsonBody) {
-			if (req.contentType == "application/json") {
+			if (icmp2(req.contentType, "application/json") == 0) {
 				auto bodyStr = cast(string)req.bodyReader.readAll();
 				if (!bodyStr.empty) req.json = parseJson(bodyStr);
 			}
@@ -1709,7 +1715,7 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 			string dbg_msg;
 			logDiagnostic("No response written for %s", req.requestURL);
 			if (settings.options & HTTPServerOption.errorStackTraces)
-				dbg_msg = format("Not routes match path '%s'", req.requestURL);
+				dbg_msg = format("No routes match path '%s'", req.requestURL);
 			errorOut(HTTPStatus.notFound, httpStatusText(HTTPStatus.notFound), dbg_msg, null);
 		}
 	} catch (HTTPStatusException err) {
@@ -1739,10 +1745,10 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 			nullWriter.write(req.bodyReader);
 			logTrace("dropped body");
 		}
-
-		// finalize (e.g. for chunked encoding)
-		res.finalize();
 	}
+
+	// finalize (e.g. for chunked encoding)
+	res.finalize();
 
 	foreach (k, v ; req.files) {
 		if (existsFile(v.tempPath)) {

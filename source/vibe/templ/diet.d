@@ -39,12 +39,8 @@ import std.variant;
 
 
 /**
-	Parses the given diet template at compile time and writes the resulting
-	HTML code into 'stream'.
-
-	Note that this function suffers from multiple compiler bugsin conjunction with local
-	variables passed as alias template parameters up to DMD 2.063.2. DMD 2.064 supposedly
-	has these fixed.
+	Parses the given Diet template at compile time and writes the resulting
+	HTML code into `stream__`.
 */
 void compileDietFile(string template_file, ALIASES...)(OutputStream stream__)
 {
@@ -84,10 +80,9 @@ void compileDietFileIndent(string template_file, size_t indent, ALIASES...)(Outp
 alias parseDietFile = compileDietFile;
 
 /**
-	Compatibility version of parseDietFile().
+	Compatibility version of `parseDietFile` - scheduled for deprecation.
 
-	This function should only be called indirectly through HTTPServerResponse.renderCompat().
-
+	This function should only be called indirectly through `HTTPServerResponse.renderCompat()`.	
 */
 void compileDietFileCompat(string template_file, TYPES_AND_NAMES...)(OutputStream stream__, ...)
 {
@@ -261,7 +256,7 @@ private string dietStringParser(TEXT_NAME_PAIRS_AND_TRANSLATE...)(size_t base_in
 			files ~= blk;
 		}
 	}
-	
+
 	readFilesRec!(extractDependencies(ROOT_LINES), extractNames!TEXT_NAME_PAIRS)(files);
 
 	auto compiler = DietCompiler!TRANSLATE(&files[0], &files, new BlockStore);
@@ -652,7 +647,7 @@ private struct DietCompiler(TRANSLATE...)
 							size_t unindent_count = level + start_indent_level - base_level + 1;
 							size_t last_line_number = curline.number;
 							while( next_tag < lineCount &&
-							      indentLevel(line(next_tag).text, indentStyle, false) - start_indent_level > level-base_level )
+								  indentLevel(line(next_tag).text, indentStyle, false) - start_indent_level > level-base_level )
 							{
 								// TODO: output all empty lines between this and the previous one
 								foreach (i; last_line_number+1 .. line(next_tag).number) output.writeString("\n");
@@ -1481,7 +1476,7 @@ unittest {
 	assert(compile!("pre.test. foo") == "<pre class=\"test\"></pre>");
 	assert(compile!("pre().\n\tfoo") == "<pre>\nfoo</pre>");
 	assert(compile!("pre#foo.test(data-img=\"sth\",class=\"meh\"). something\n\tmeh") ==
-	       "<pre id=\"foo\" data-img=\"sth\" class=\"meh test\">\nmeh</pre>");
+		   "<pre id=\"foo\" data-img=\"sth\" class=\"meh test\">\nmeh</pre>");
 
 	assert(compile!("input(autofocus)").length);
 

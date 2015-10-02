@@ -141,10 +141,10 @@ struct Bson {
 			case Type.null_: m_data = null; break;
 			case Type.regex:
 				auto tmp = m_data;
-    			tmp.skipCString();
-    			tmp.skipCString();
-    			m_data = m_data[0 .. $ - tmp.length];
-    			break;
+				tmp.skipCString();
+				tmp.skipCString();
+				m_data = m_data[0 .. $ - tmp.length];
+				break;
 			case Type.dbRef: m_data = m_data[0 .. 0]; assert(false, "Not implemented.");
 			case Type.code: m_data = m_data[0 .. 4 + fromBsonData!int(m_data)]; break;
 			case Type.symbol: m_data = m_data[0 .. 4 + fromBsonData!int(m_data)]; break;
@@ -575,7 +575,7 @@ struct Bson {
 		entries ~= Bson(1);
 		entries ~= Bson(true);
 		entries ~= Bson("foo");
-		
+
 		Bson value = Bson(entries);
 		assert(value[0] == Bson(1));
 		assert(value[1] == Bson(true));
@@ -730,8 +730,9 @@ struct BsonObjectID {
 	*/
 	static BsonObjectID fromString(string str)
 	{
-		static const lengthex = new Exception("BSON Object ID string must be 24 characters.");
-		static const charex = new Exception("Not a valid hex string.");
+		import std.conv : ConvException;
+		static const lengthex = new ConvException("BSON Object ID string must be 24 characters.");
+		static const charex = new ConvException("Not a valid hex string.");
 
 		if (str.length != 24) throw lengthex;
 		BsonObjectID ret = void;
@@ -1021,11 +1022,12 @@ Bson serializeToBson(T)(T value, ubyte[] buffer = null)
 }
 
 /// private
+deprecated("VibeOldSerialization is deprecated, please migrate to the new serialization framework.")
 Bson serializeToBsonOld(T)(T value)
 {
 	import vibe.internal.meta.traits;
 
-    alias Unqualified = Unqual!T;
+	alias Unqualified = Unqual!T;
 	static if (is(Unqualified == Bson)) return value;
 	else static if (is(Unqualified == Json)) return Bson.fromJson(value);
 	else static if (is(Unqualified == BsonBinData)) return Bson(value);
@@ -1096,26 +1098,26 @@ Bson serializeToBsonOld(T)(T value)
 
 template deserializeBson(T)
 {
-    /**
-        Deserializes a BSON value into the destination variable.
+	/**
+		Deserializes a BSON value into the destination variable.
 
-        The same types as for `serializeToBson()` are supported and handled inversely.
+		The same types as for `serializeToBson()` are supported and handled inversely.
 
-        See_Also: `serializeToBson`
-    */
-    void deserializeBson(ref T dst, Bson src)
-    {
-        dst = deserializeBson!T(src);
-    }
-    /// ditto
-    T deserializeBson(Bson src)
-    {
-        version (VibeOldSerialization) {
-            return deserializeBsonOld!T(src);
-        } else {
-            return deserialize!(BsonSerializer, T)(src);
-        }
-    }
+		See_Also: `serializeToBson`
+	*/
+	void deserializeBson(ref T dst, Bson src)
+	{
+		dst = deserializeBson!T(src);
+	}
+	/// ditto
+	T deserializeBson(Bson src)
+	{
+		version (VibeOldSerialization) {
+			return deserializeBsonOld!T(src);
+		} else {
+			return deserialize!(BsonSerializer, T)(src);
+		}
+	}
 }
 
 /// private
@@ -1224,8 +1226,8 @@ unittest {
 
 unittest
 {
-    assert(uint.max == serializeToBson(uint.max).deserializeBson!uint);
-    assert(ulong.max == serializeToBson(ulong.max).deserializeBson!ulong);
+	assert(uint.max == serializeToBson(uint.max).deserializeBson!uint);
+	assert(ulong.max == serializeToBson(ulong.max).deserializeBson!ulong);
 }
 
 unittest {
@@ -1312,7 +1314,7 @@ unittest {
 			string[C] stringableIndexedMap;
 			this() {
 				enumIndexedMap = [ Color.Red : "magenta", Color.Blue : "deep blue" ];
-                                stringableIndexedMap = [ C(42) : "forty-two" ];
+								stringableIndexedMap = [ C(42) : "forty-two" ];
 			}
 		}
 
@@ -1331,7 +1333,7 @@ unittest {
 		S original;
 		original.enumIndexedMap = [ Color.Red : "magenta", Color.Blue : "deep blue" ];
 		original.enumIndexedMap[Color.Green] = "olive";
-                original.stringableIndexedMap = [ C(42) : "forty-two" ];
+				original.stringableIndexedMap = [ C(42) : "forty-two" ];
 		S other;
 		deserializeBson(other, serializeToBson(original));
 		assert(serializeToBson(other) == serializeToBson(original));
@@ -1602,6 +1604,7 @@ private Bson.Type jsonTypeToBsonType(Json.Type tp)
 		Bson.Type.null_,
 		Bson.Type.bool_,
 		Bson.Type.long_,
+		Bson.Type.long_,
 		Bson.Type.double_,
 		Bson.Type.string,
 		Bson.Type.array,
@@ -1624,6 +1627,9 @@ private Bson.Type writeBson(R)(ref R dst, in Json value)
 		case Json.Type.int_:
 			dst.put(toBsonData(cast(long)value));
 			return Bson.Type.long_;
+		case Json.Type.bigInt:
+			dst.put(toBsonData(cast(long)value));
+			return Bson.Type.long_;
 		case Json.Type.float_:
 			dst.put(toBsonData(cast(double)value));
 			return Bson.Type.double_;
@@ -1640,7 +1646,7 @@ private Bson.Type writeBson(R)(ref R dst, in Json value)
 				writeBson(app, v);
 			}
 
-            dst.put(toBsonData(cast(int)(app.data.length + int.sizeof + 1)));
+			dst.put(toBsonData(cast(int)(app.data.length + int.sizeof + 1)));
 			dst.put(app.data);
 			dst.put(cast(ubyte)0);
 			return Bson.Type.array;
@@ -1661,14 +1667,14 @@ private Bson.Type writeBson(R)(ref R dst, in Json value)
 
 unittest
 {
-    Json jsvalue = parseJsonString("{\"key\" : \"Value\"}");
-    assert(serializeToBson(jsvalue).toJson() == jsvalue);
+	Json jsvalue = parseJsonString("{\"key\" : \"Value\"}");
+	assert(serializeToBson(jsvalue).toJson() == jsvalue);
 
-    jsvalue = parseJsonString("{\"key\" : [{\"key\" : \"Value\"}, {\"key2\" : \"Value2\"}] }");
-    assert(serializeToBson(jsvalue).toJson() == jsvalue);
+	jsvalue = parseJsonString("{\"key\" : [{\"key\" : \"Value\"}, {\"key2\" : \"Value2\"}] }");
+	assert(serializeToBson(jsvalue).toJson() == jsvalue);
 
-    jsvalue = parseJsonString("[ 1 , 2 , 3]");
-    assert(serializeToBson(jsvalue).toJson() == jsvalue);
+	jsvalue = parseJsonString("[ 1 , 2 , 3]");
+	assert(serializeToBson(jsvalue).toJson() == jsvalue);
 }
 
 private string skipCString(ref bdata_t data)

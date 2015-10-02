@@ -64,7 +64,7 @@ class WebSocketException: Exception
 }
 
 /**
-    Establishes a web socket conection and passes it to the $(D on_handshake) delegate.
+	Establishes a web socket conection and passes it to the $(D on_handshake) delegate.
 */
 void handleWebSocket(scope WebSocketHandshakeDelegate on_handshake, scope HTTPServerRequest req, scope HTTPServerResponse res)
 {
@@ -73,9 +73,9 @@ void handleWebSocket(scope WebSocketHandshakeDelegate on_handshake, scope HTTPSe
 	auto pKey = "Sec-WebSocket-Key" in req.headers;
 	//auto pProtocol = "Sec-WebSocket-Protocol" in req.headers;
 	auto pVersion = "Sec-WebSocket-Version" in req.headers;
-	
+
 	auto isUpgrade = false;
-	
+
 	if( pConnection ) {
 		auto connectionTypes = split(*pConnection, ",");
 		foreach( t ; connectionTypes ) {
@@ -86,9 +86,9 @@ void handleWebSocket(scope WebSocketHandshakeDelegate on_handshake, scope HTTPSe
 		}
 	}
 	if( !(isUpgrade &&
-	      pUpgrade && icmp(*pUpgrade, "websocket") == 0 &&
-	      pKey &&
-	      pVersion && *pVersion == "13") )
+		  pUpgrade && icmp(*pUpgrade, "websocket") == 0 &&
+		  pKey &&
+		  pVersion && *pVersion == "13") )
 	{
 		logDebug("Browser sent invalid WebSocket request.");
 		res.statusCode = HTTPStatus.badRequest;
@@ -296,14 +296,23 @@ final class WebSocket {
 
 	/**
 		Actively closes the connection.
+
+		Params:
+			code = Numeric code indicating a termination reason.
+			reason = Message describing why the connection was terminated.
 	*/
-	void close()
+	void close(short code = 0, string reason = "")
 	{
+		//control frame payloads are limited to 125 bytes
+		assert(reason.length <= 123);
+
 		if (connected) {
 			m_writeMutex.performLocked!({
 				m_sentCloseFrame = true;
 				Frame frame;
 				frame.opcode = FrameOpcode.close;
+				if(code != 0)
+					frame.payload = std.bitmanip.nativeToBigEndian(code) ~ cast(ubyte[])reason;
 				frame.fin = true;
 				frame.writeFrame(m_conn);
 			});

@@ -7,6 +7,7 @@
 import vibe.appmain;
 import vibe.core.core;
 import vibe.core.log;
+import vibe.data.json;
 import vibe.http.rest;
 import vibe.http.router;
 import vibe.http.server;
@@ -119,8 +120,8 @@ class Example2 : Example2API
 			import std.algorithm;
 			// Some sweet functional D
 			return reduce!(
-                (a, b) => Aggregate(a.name ~ b.name, a.count + b.count, Aggregate.Type.Type3)
-            )(Aggregate.init, input);
+				(a, b) => Aggregate(a.name ~ b.name, a.count + b.count, Aggregate.Type.Type3)
+			)(Aggregate.init, input);
 		}
 }
 
@@ -339,6 +340,16 @@ unittest
  * - @headerParam : Get a parameter from the query header;
  * - @queryParam : Get a parameter from the query URL;
  * - @bodyParam : Get a parameter from the body;
+ *
+ * In addition, @headerParam have a special handling of 'out' and
+ * 'ref' parameters:
+ * - 'out' are neither send by the client nor read by the server, but
+ *	their value (except for null string) is returned by the server.
+ * - 'ref' are send by the client, read by the server, returned by
+ *	the server, and read by the client.
+ * This is to be consistent with the way D 'out' and 'ref' works.
+ * However, it makes no sense to have 'ref' or 'out' parameters on
+ * body or query parameter, so those are treated as error at compile time.
  */
 @rootPathFromName
 interface Example6API
@@ -346,7 +357,12 @@ interface Example6API
 	// The first parameter of @headerParam is the identifier (must match one of the parameter name).
 	// The second is the name of the field in the header, such as "Accept", "Content-Type", "User-Agent"...
 	@headerParam("auth", "Authorization")
-	string getResponse(string auth);
+	@headerParam("tester", "X-Custom-Tester")
+	@headerParam("www", "WWW-Authenticate")
+	string getPortal(string auth,
+					 ref string tester,
+					 out Nullable!string www);
+
 	// As with @headerParam, the first parameter of @queryParam is the identifier.
 	// The second being the field name, e.g for a query such as: 'GET /root/node?foo=bar', "foo" will be the second parameter.
 	@queryParam("fortyTwo", "qparam")
@@ -366,19 +382,31 @@ interface Example6API
 class Example6 : Example6API
 {
 override:
-	string getResponse(string auth)
+	string getPortal(string auth, ref string tester,
+					 out Nullable!string www)
 	{
+		// For a string parameter, null means 'not returned'
+		// If you want to return something empty, use "".
+		if (tester == "Chell")
+			tester = "The cake is a lie";
+		else
+			tester = null;
+
 		// If the user provided credentials Aladdin / 'open sesame'
 		if (auth == "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==")
-			return "The response is 42";
-		return "The cake is a lie";
+			return "Hello, Caroline";
+
+		www = `Basic realm="Aperture"`;
+		throw new HTTPStatusException(401);
 	}
+
 	string postAnswer(string fortyTwo)
 	{
 		if (fortyTwo == "Life_universe_and_the_rest")
 			return "True";
 		return "False";
 	}
+
 	string getConcat(FooType myFoo)
 	{
 		return to!string(myFoo.a)~myFoo.s~to!string(myFoo.d);
@@ -391,9 +419,23 @@ unittest
 	registerRestInterface(router, new Example6());
 	auto routes = router.getAllRoutes();
 
-	assert (routes[0].method == HTTPMethod.GET && routes[0].pattern == "/example6_api/response");
+	assert (routes[0].method == HTTPMethod.GET && routes[0].pattern == "/example6_api/portal");
 	assert (routes[1].method == HTTPMethod.POST && routes[1].pattern == "/example6_api/answer");
 	assert (routes[0].method == HTTPMethod.GET && routes[2].pattern == "/example6_api/concat");
+}
+
+@rootPathFromName
+interface Example7API {
+	// GET /example7_api/
+	// returns a custom JSON response
+	Json get();
+}
+
+class Example7 : Example7API {
+	Json get()
+	{
+		return serializeToJson(["foo": 42, "bar": 13]);
+	}
 }
 
 
@@ -409,6 +451,7 @@ shared static this()
 	registerRestInterface(routes, new Example4());
 	registerRestInterface(routes, new Example5());
 	registerRestInterface(routes, new Example6());
+	registerRestInterface(routes, new Example7());
 
 	auto settings = new HTTPServerSettings();
 	settings.port = 8080;
@@ -474,17 +517,28 @@ shared static this()
 
 			auto api = new RestInterfaceClient!Example6API("http://127.0.0.1:8080");
 			// First we make sure parameters are transmitted via headers.
-			auto res = requestHTTP("http://127.0.0.1:8080/example6_api/response",
+			auto res = requestHTTP("http://127.0.0.1:8080/example6_api/portal",
 			                       (scope r) {
 				r.method = HTTPMethod.GET;
 				r.headers["Authorization"] = "Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==";
+				r.headers["X-Custom-Tester"] = "GladOS";
 			});
 
 			assert(res.statusCode == 200);
-			assert(res.bodyReader.readAllUTF8() == `"The response is 42"`);
+			assert(!res.headers["X-Custom-Tester"].length, res.headers["X-Custom-Tester"]);
+			assert(!("WWW-Authenticate" in res.headers), res.headers["WWW-Authenticate"]);
+			assert(res.bodyReader.readAllUTF8() == `"Hello, Caroline"`);
 			// Then we check that both can communicate together.
-			auto answer = api.getResponse("Hello there");
-			assert(answer == "The cake is a lie");
+			string tester = "Chell";
+			Nullable!string www;
+			try {
+				// We shouldn't reach the assert, this will throw
+				auto answer = api.getPortal("Oops", tester, www);
+				assert(0, answer);
+			} catch (RestException e) {
+				assert(tester == "The cake is a lie", tester);
+				assert(www == `Basic realm="Aperture"`, www);
+			}
 		}
 
 		// Example 6 -- Query
@@ -494,13 +548,20 @@ shared static this()
 
 			// First we make sure parameters are transmitted via query.
 			auto res = requestHTTP("http://127.0.0.1:8080/example6_api/answer?qparam=Life_universe_and_the_rest",
-			                       (scope r) { r.method = HTTPMethod.POST; });
+								   (scope r) { r.method = HTTPMethod.POST; });
 			assert(res.statusCode == 200);
 			assert(res.bodyReader.readAllUTF8() == `"True"`);
 			// Then we check that both can communicate together.
 			auto api = new RestInterfaceClient!Example6API("http://127.0.0.1:8080");
 			auto answer = api.postAnswer("IDK");
 			assert(answer == "False");
+		}
+
+		// Example 7 -- Custom JSON response
+		{
+			auto api = new RestInterfaceClient!Example7API("http://127.0.0.1:8080");
+			auto result = api.get();
+			assert(result["foo"] == 42 && result["bar"] == 13);
 		}
 
 		// Example 6 -- Body
@@ -513,13 +574,13 @@ shared static this()
 			auto api = new RestInterfaceClient!Example6API("http://127.0.0.1:8080");
 			// First we make sure parameters are transmitted via query.
 			auto res = requestHTTP("http://127.0.0.1:8080/example6_api/concat",
-			                       (scope r) {
-						       import vibe.data.json;
-						       r.method = HTTPMethod.GET;
-						       Json obj = Json.emptyObject;
-						       obj["parameter"] = serializeToJson(Example6API.FooType(42, "fortySomething", 51.42));
-						       r.writeJsonBody(obj);
-					       });
+								   (scope r) {
+							   import vibe.data.json;
+							   r.method = HTTPMethod.GET;
+							   Json obj = Json.emptyObject;
+							   obj["parameter"] = serializeToJson(Example6API.FooType(42, "fortySomething", 51.42));
+							   r.writeJsonBody(obj);
+						   });
 
 			assert(res.statusCode == 200);
 			assert(res.bodyReader.readAllUTF8() == `"`~expected~`"`);

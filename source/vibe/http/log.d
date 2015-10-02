@@ -24,7 +24,7 @@ class HTTPLogger {
 		string m_format;
 		const(HTTPServerSettings) m_settings;
 		InterruptibleTaskMutex m_mutex;
-		FixedAppender!(const(char)[], 2048) m_lineAppender;
+		Appender!(char[]) m_lineAppender;
 	}
 
 	this(in HTTPServerSettings settings, string format)
@@ -32,6 +32,7 @@ class HTTPLogger {
 		m_format = format;
 		m_settings = settings;
 		m_mutex = new InterruptibleTaskMutex;
+		m_lineAppender.reserve(2048);
 	}
 
 	void close() {}
@@ -39,7 +40,7 @@ class HTTPLogger {
 	final void log(scope HTTPServerRequest req, scope HTTPServerResponse res)
 	{
 		m_mutex.performLocked!({
-			m_lineAppender.reset();
+			m_lineAppender.clear();
 			formatApacheLog(m_lineAppender, m_format, req, res, m_settings);
 			writeLine(m_lineAppender.data);
 		});
@@ -113,7 +114,7 @@ void formatApacheLog(R)(ref R ln, string format, scope HTTPServerRequest req, sc
 					state = State.Directive;
 				}
 				break;
-			case State.Directive: 
+			case State.Directive:
 				if( format[0] == '!' ) {
 					conditional = true;
 					negate = true;
@@ -185,7 +186,7 @@ void formatApacheLog(R)(ref R ln, string format, scope HTTPServerRequest req, sc
 						formattedWrite(&ln, "%s", d.total!"msecs"());
 						break;
 					//case 'e': //Environment variable {variable}
-					//case 'f': //Filename 
+					//case 'f': //Filename
 					case 'h': //Remote host
 						ln.put(req.peer);
 						break;

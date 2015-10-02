@@ -3,7 +3,6 @@
 *.lib
 *.dll
 .*.sw*
-*.user
 
 docs.json
 /docs/index.html

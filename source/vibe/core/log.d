@@ -28,8 +28,8 @@ import std.traits : isSomeString;
 */
 void setLogLevel(LogLevel level)
 nothrow @safe {
-	assert(ss_stdoutLogger !is null, "Console logging disabled due to missing console.");
-	ss_stdoutLogger.lock().minLevel = level;
+	if (ss_stdoutLogger)
+		ss_stdoutLogger.lock().minLevel = level;
 }
 
 
@@ -37,13 +37,18 @@ nothrow @safe {
 	Sets the log format used for the default console logger.
 
 	This level applies to the default stdout/stderr logger only.
+
+	Params:
+		fmt = The log format for the stderr (default is `FileLogger.Format.thread`)
+		infoFmt = The log format for the stdout (default is `FileLogger.Format.plain`)
 */
 void setLogFormat(FileLogger.Format fmt, FileLogger.Format infoFmt = FileLogger.Format.plain)
 nothrow @safe {
-	assert(ss_stdoutLogger !is null, "Console logging disabled du to missing console.");
-	auto l = ss_stdoutLogger.lock();
-	l.format = fmt;
-	l.infoFormat = infoFmt;
+	if (ss_stdoutLogger) {
+		auto l = ss_stdoutLogger.lock();
+		l.format = fmt;
+		l.infoFormat = infoFmt;
+	}
 }
 
 
@@ -200,10 +205,11 @@ class Logger {
 	Plain-text based logger for logging to regular files or stdout/stderr
 */
 final class FileLogger : Logger {
+	/// The log format used by the FileLogger
 	enum Format {
-		plain,
-		thread,
-		threadTime
+		plain,      /// Output only the plain log message
+		thread,     /// Prefix "[thread-id:fiber-id loglevel]"
+		threadTime  /// Prefix "[thread-id:fiber-id timestamp loglevel]"
 	}
 
 	private {
@@ -212,7 +218,7 @@ final class FileLogger : Logger {
 	}
 
 	Format format = Format.thread;
-    Format infoFormat = Format.plain;
+	Format infoFormat = Format.plain;
 
 	this(File info_file, File diag_file)
 	{
@@ -550,7 +556,7 @@ final class SyslogLogger : Logger {
 		auto text = msg.text;
 		import std.string : format;
 		m_ostream.write(SYSLOG_MESSAGE_FORMAT_VERSION1.format(
-		              priVal, timestamp, m_hostName, BOM ~ m_appName, procId, msgId, structuredData, BOM ~ text) ~ "\n");
+					  priVal, timestamp, m_hostName, BOM ~ m_appName, procId, msgId, structuredData, BOM ~ text) ~ "\n");
 		m_ostream.flush();
 	}
 

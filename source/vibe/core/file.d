@@ -157,15 +157,30 @@ FileStream createTempFile(string suffix = null)
 
 /**
 	Moves or renames a file.
+
+	Params:
+		from = Path to the file/directory to move/rename.
+		to = The target path
+		copy_fallback = Determines if copy/remove should be used in case of the
+			source and destination path pointing to different devices.
 */
-void moveFile(Path from, Path to)
+void moveFile(Path from, Path to, bool copy_fallback = false)
 {
-	moveFile(from.toNativeString(), to.toNativeString());
+	moveFile(from.toNativeString(), to.toNativeString(), copy_fallback);
 }
 /// ditto
-void moveFile(string from, string to)
+void moveFile(string from, string to, bool copy_fallback = false)
 {
-	std.file.rename(from, to);
+	if (!copy_fallback) {
+		std.file.rename(from, to);
+	} else {
+		try {
+			std.file.rename(from, to);
+		} catch (FileException e) {
+			std.file.copy(from, to);
+			std.file.remove(from);
+		}
+	}
 }
 
 /**
@@ -233,13 +248,11 @@ bool existsFile(string path) nothrow
 
 /** Stores information about the specified file/directory into 'info'
 
-	Returns false if the file does not exist.
+	Throws: A `FileException` is thrown if the file does not exist.
 */
 FileInfo getFileInfo(Path path)
 {
-	DirEntry ent;
-	static if (!is(typeof({ DirEntry de = {}; }))) ent = DirEntry(path.toNativeString()); // DMD 2.064 and up
-	else ent = std.file.dirEntry(path.toNativeString());
+	auto ent = DirEntry(path.toNativeString());
 	return makeFileInfo(ent);
 }
 /// ditto
@@ -434,4 +447,3 @@ private FileInfo makeFileInfo(DirEntry ent)
 	ret.isDirectory = ent.isDir;
 	return ret;
 }
-

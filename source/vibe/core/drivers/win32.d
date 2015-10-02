@@ -115,7 +115,10 @@ final class Win32EventDriver : EventDriver {
 		MSG msg;
 		//uint cnt = 0;
 		while (PeekMessageW(&msg, null, 0, 0, PM_REMOVE)) {
-			if( msg.message == WM_QUIT ) return false;
+			if( msg.message == WM_QUIT ) {
+				m_exit = true;
+				return false;
+			}
 			if( msg.message == WM_USER_SIGNAL )
 				msg.hwnd = m_hwnd;
 			TranslateMessage(&msg);
@@ -458,7 +461,7 @@ final class Win32ManualEvent : ManualEvent {
 
 	void acquire()
 	nothrow {
-		static if (__VERSION__ <= 2067) scope (failure) assert(false); // synchronized is not nothrow on DMD 2.066 and below
+		static if (__VERSION__ <= 2068) scope (failure) assert(false); // synchronized is not nothrow on DMD 2.066 and below
 		synchronized(m_mutex)
 		{
 			m_listeners[Task.getThis()] = cast(Win32EventDriver)getEventDriver();
@@ -467,7 +470,7 @@ final class Win32ManualEvent : ManualEvent {
 
 	void release()
 	nothrow {
-		static if (__VERSION__ <= 2067) scope (failure) assert(false); // synchronized is not nothrow on DMD 2.066 and below
+		static if (__VERSION__ <= 2068) scope (failure) assert(false); // synchronized is not nothrow on DMD 2.066 and below
 		auto self = Task.getThis();
 		synchronized(m_mutex)
 		{
@@ -478,7 +481,7 @@ final class Win32ManualEvent : ManualEvent {
 
 	bool amOwner()
 	nothrow {
-		static if (__VERSION__ <= 2067) scope (failure) assert(false); // synchronized is not nothrow on DMD 2.066 and below
+		static if (__VERSION__ <= 2068) scope (failure) assert(false); // synchronized is not nothrow on DMD 2.066 and below
 		synchronized(m_mutex)
 		{
 			return (Task.getThis() in m_listeners) !is null;
@@ -569,7 +572,7 @@ final class Win32FileStream : FileStream {
 		{
 			// truncate file
 			// TODO: seek to start pos?
-			BOOL ret = SetEndOfFile(m_handle);
+			BOOL ret = vibe.internal.win32.SetEndOfFile(m_handle);
 			errorcode = GetLastError();
 			enforce(ret, "Failed to call SetFileEndPos for path "~path.toNativeString()~", Error: " ~ to!string(errorcode));
 		}

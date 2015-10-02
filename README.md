@@ -17,18 +17,17 @@ Support
 
 Vibe.d aims to support the 3 latest minor releases of D.
 At the moment, it means that the following compilers are supported and tested:
-- DMD 2.065
-- DMD 2.066
+- DMD 2.068
 - DMD 2.067
-- GDC 4.9.0 (FE: 2.065)
-- LDC 0.14.0 (FE: 2.065)
+- DMD 2.066
+- GDC 4.9.2 (FE: 2.066)
 - LDC 0.15.1 (FE: 2.066)
 
 
 Installation
 ------------
 
-Instead of explicitly installing vibe.d, it is recommended to use 
+Instead of explicitly installing vibe.d, it is recommended to use
 [DUB](https://github.com/rejectedsoftware/dub) for building vibe.d based
 applications. Once DUB is installed, you can create and run a new project
 using the following shell commands:
@@ -63,7 +62,7 @@ If you don't have brew installed, install it according to their [install
 instructions](<http://www.brew.sh>) and
 install libevent.
 
-    ruby -e "$(curl -fsSL https://raw.github.com/Homebrew/homebrew/go/install)"
+    ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)"
     brew install libevent
 
 You can then also install DUB using brew:
@@ -73,7 +72,7 @@ You can then also install DUB using brew:
 (Note: Install brew only if you do not have macports, as they will conflict)
 
 Install DMD using the installer on <http://dlang.org/download.html>.
- 
+
 Optionally, run `./setup-mac.sh` to create a user/group pair for privilege lowering.
 
 
