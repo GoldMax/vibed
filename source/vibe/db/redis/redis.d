@@ -1,7 +1,7 @@
 /**
 	Redis database client implementation.
 
-	Copyright: © 2012-2014 RejectedSoftware e.K.
+	Copyright: © 2012-2016 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Jan Krüger, Sönke Ludwig, Michael Eisendle, Etienne Cimon
 */
@@ -20,13 +20,14 @@ import std.format;
 import std.range : isInputRange, isOutputRange;
 import std.string;
 import std.traits;
+import std.typecons : Nullable;
 import std.utf;
 
 
 /**
 	Returns a RedisClient that can be used to communicate to the specified database server.
 */
-RedisClient connectRedis(string host, ushort port = 6379)
+RedisClient connectRedis(string host, ushort port = RedisClient.defaultPort)
 {
 	return new RedisClient(host, port);
 }
@@ -42,7 +43,9 @@ final class RedisClient {
 		long m_selectedDB;
 	}
 
-	this(string host = "127.0.0.1", ushort port = 6379)
+	enum defaultPort = 6379;
+
+	this(string host = "127.0.0.1", ushort port = defaultPort)
 	{
 		m_connections = new ConnectionPool!RedisConnection({
 			return new RedisConnection(host, port);
@@ -116,12 +119,6 @@ final class RedisClient {
 		See_also: $(LINK2 http://redis.io/commands/flushall, FLUSHALL)
 	*/
 	void deleteAll() { request("FLUSHALL"); }
-
-	/// Compatibility alias - use $(D deleteAll) instead.
-	deprecated("Use deleteAll instead.") alias flushAll = deleteAll;
-
-	/// Compatibility alias - use $(D RedisDatabase.deleteAll) instead.
-	deprecated("Use RedisDatabase.deleteAll instead.") void flushDB() { request("FLUSHDB"); }
 
 	/// Get information and statistics about the server
 	string info() { return request!string("INFO"); }
@@ -351,7 +348,16 @@ struct RedisDatabase {
 	T lpop(T = string)(string key) if(isValidRedisValueReturn!T) { return request!T("LPOP", key); }
 	/// BLPOP is a blocking list pop primitive. It is the blocking version of LPOP because it blocks
 	/// the connection when there are no elements to pop from any of the given lists.
-	T blpop(T = string)(string key, long seconds) if(isValidRedisValueReturn!T) { return request!T("BLPOP", key, seconds); }
+	Nullable!(Tuple!(string, T)) blpop(T = string)(string key, long seconds) if(isValidRedisValueReturn!T)
+	{
+		auto reply = request!(RedisReply!(ubyte[]))("BLPOP", key, seconds);
+		Nullable!(Tuple!(string, T)) ret;
+		if (reply.empty || reply.frontIsNull) return ret;
+		string rkey = reply.front.convertToType!string();
+		reply.popFront();
+		ret = tuple(rkey, reply.front.convertToType!T());
+		return ret;
+	}
 	/// Atomically returns and removes the last element (tail) of the list stored at source,
 	/// and pushes the element at the first element (head) of the list stored at destination.
 	T rpoplpush(T = string)(string key, string destination) if(isValidRedisValueReturn!T) { return request!T("RPOPLPUSH", key, destination); }
@@ -385,8 +391,9 @@ struct RedisDatabase {
 	T spop(T = string)(string key) if(isValidRedisValueReturn!T) { return request!T("SPOP", key ); }
 	/// Returns a random element from the set stored at key.
 	T srandMember(T = string)(string key) if(isValidRedisValueReturn!T) { return request!T("SRANDMEMBER", key ); }
+	///returns count random elements from the set stored at key
+	RedisReply!T srandMember(T = string)(string key, long count) if(isValidRedisValueReturn!T) { return request!(RedisReply!T)("SRANDMEMBER", key, count ); }
 
-	// TODO: SRANDMEMBER key [count]
 
 	/// Remove the specified members from the set stored at key.
 	long srem(ARGS...)(string key, ARGS args) { return request!long("SREM", key, args); }
@@ -498,6 +505,31 @@ struct RedisDatabase {
 	{
 		return request!(RedisReply!T)("ZSCORE", key, member);
 	}
+
+	/*
+		Hyperloglog
+	*/
+
+	/// Adds one or more Keys to a HyperLogLog data structure .
+	long pfadd(ARGS...)(string key, ARGS args) { return request!long("PFADD", key, args); }
+
+	/** Returns the approximated cardinality computed by the HyperLogLog data
+		structure stored at the specified key.
+
+		When called with a single key, returns the approximated cardinality
+		computed by the HyperLogLog data structure stored at the specified
+		variable, which is 0 if the variable does not exist.
+
+		When called with multiple keys, returns the approximated cardinality
+		of the union of the HyperLogLogs passed, by internally merging the
+		HyperLogLogs stored at the provided keys into a temporary HyperLogLog.
+	*/
+	long pfcount(scope string[] keys...) { return request!long("PFCOUNT", keys); }
+
+	/// Merge multiple HyperLogLog values into a new one.
+	void pfmerge(ARGS...)(string destkey, ARGS args) { request("PFMERGE", destkey, args); }
+
+
 	//TODO: zunionstore
 
 	/*
@@ -654,7 +686,7 @@ final class RedisSubscriberImpl {
 
 				bool stopped;
 				do {
-					if (!receiveTimeout(3.seconds, (Action act) { if (act == Action.STOP) stopped = true;  }))
+					if (!receiveTimeoutCompat(3.seconds, (Action act) { if (act == Action.STOP) stopped = true;  }))
 						break;
 				} while (!stopped);
 
@@ -673,7 +705,7 @@ final class RedisSubscriberImpl {
 		void impl() {
 			m_mutex.performLocked!({
 				m_stop = true;
-				m_listener.send(Action.STOP);
+				m_listener.sendCompat(Action.STOP);
 				// send a message to wake up the listenerHelper from the reply
 				if (m_subscriptions.length > 0) {
 					m_connMutex.performLocked!({
@@ -734,7 +766,7 @@ final class RedisSubscriberImpl {
 						_request_void(m_lockedConnection, "SUBSCRIBE", args);
 					});
 					while(!m_subscriptions.keys.canFind(args)) {
-						if (!receiveTimeout(2.seconds, (Action act) { enforce(act == Action.SUBSCRIBE);  }))
+						if (!receiveTimeoutCompat(2.seconds, (Action act) { enforce(act == Action.SUBSCRIBE);  }))
 							break;
 
 						subscribed = true;
@@ -773,7 +805,7 @@ final class RedisSubscriberImpl {
 					_request_void(m_lockedConnection, "UNSUBSCRIBE", args);
 				});
 				while(m_subscriptions.keys.canFind(args)) {
-					if (!receiveTimeout(2.seconds, (Action act) { enforce(act == Action.UNSUBSCRIBE);  })) {
+					if (!receiveTimeoutCompat(2.seconds, (Action act) { enforce(act == Action.UNSUBSCRIBE);  })) {
 						unsubscribed = false;
 						break;
 					}
@@ -804,7 +836,7 @@ final class RedisSubscriberImpl {
 					_request_void(m_lockedConnection, "PSUBSCRIBE", args);
 				});
 
-				if (!receiveTimeout(2.seconds, (Action act) { enforce(act == Action.SUBSCRIBE);  }))
+				if (!receiveTimeoutCompat(2.seconds, (Action act) { enforce(act == Action.SUBSCRIBE);  }))
 					subscribed = false;
 				else
 					subscribed = true;
@@ -832,7 +864,7 @@ final class RedisSubscriberImpl {
 				m_connMutex.performLocked!({
 					_request_void(m_lockedConnection, "PUNSUBSCRIBE", args);
 				});
-				if (!receiveTimeout(2.seconds, (Action act) { enforce(act == Action.UNSUBSCRIBE);  }))
+				if (!receiveTimeoutCompat(2.seconds, (Action act) { enforce(act == Action.UNSUBSCRIBE);  }))
 					unsubscribed = false;
 				else
 					unsubscribed = true;
@@ -885,7 +917,7 @@ final class RedisSubscriberImpl {
 			catch (Exception e) {
 				throw new Exception(format("Failed to connect to Redis server at %s:%s.", m_lockedConnection.m_host, m_lockedConnection.m_port), __FILE__, __LINE__, e);
 			}
-
+			m_lockedConnection.conn.tcpNoDelay = true;
 			m_lockedConnection.setAuth(m_client.m_authPassword);
 			m_lockedConnection.setDB(m_client.m_selectedDB);
 		}
@@ -900,14 +932,14 @@ final class RedisSubscriberImpl {
 			logTrace("Callback subscribe(%s)", channel);
 			m_subscriptions[channel] = true;
 			if (m_waiter != Task())
-				m_waiter.send(Action.SUBSCRIBE);
+				m_waiter.sendCompat(Action.SUBSCRIBE);
 		}
 
 		void onUnsubscribe(string channel) {
 			logTrace("Callback unsubscribe(%s)", channel);
 			m_subscriptions.remove(channel);
 			if (m_waiter != Task())
-				m_waiter.send(Action.UNSUBSCRIBE);
+				m_waiter.sendCompat(Action.UNSUBSCRIBE);
 		}
 
 		void teardown() { // teardown
@@ -917,7 +949,7 @@ final class RedisSubscriberImpl {
 			Action act;
 			// wait for the listener helper to send its stop message
 			while (act != Action.STOP)
-				act = receiveOnly!Action();
+				act = receiveOnlyCompat!Action();
 			m_lockedConnection.conn.close();
 			m_lockedConnection.destroy();
 			m_listening = false;
@@ -1032,21 +1064,21 @@ final class RedisSubscriberImpl {
 					logTrace("Notify data arrival");
 
 					Task.getThis().messageQueue.clear();
-					m_listener.send(Action.DATA);
-					if (!receiveTimeout(5.seconds, (Action act) { assert(act == Action.DATA); }))
+					m_listener.sendCompat(Action.DATA);
+					if (!receiveTimeoutCompat(5.seconds, (Action act) { assert(act == Action.DATA); }))
 						assert(false);
 
 				} else if (m_stop || !m_lockedConnection.conn) break;
 				logTrace("No data arrival in 100 ms...");
 			}
 			logTrace("Listener Helper exit.");
-			m_listener.send(Action.STOP);
+			m_listener.sendCompat(Action.STOP);
 		} );
 
 		m_listening = true;
 		logTrace("Redis listener now listening");
 		if (m_waiter != Task())
-			m_waiter.send(Action.STARTED);
+			m_waiter.sendCompat(Action.STARTED);
 
 		if (timeout == 0.seconds)
 			timeout = 365.days; // make sure 0.seconds is considered as big.
@@ -1060,7 +1092,7 @@ final class RedisSubscriberImpl {
 			teardown();
 
 			if (m_waiter != Task())
-				m_waiter.send(Action.STOP);
+				m_waiter.sendCompat(Action.STOP);
 
 			m_listenerHelper = Task();
 			m_listener = Task();
@@ -1077,10 +1109,10 @@ final class RedisSubscriberImpl {
 				m_connMutex.performLocked!({
 					pubsub_handler(); // handles one command at a time
 				});
-				m_listenerHelper.send(Action.DATA);
+				m_listenerHelper.sendCompat(Action.DATA);
 			};
 
-			if (!receiveTimeout(timeout, handler) || m_stop) {
+			if (!receiveTimeoutCompat(timeout, handler) || m_stop) {
 				logTrace("Redis Listener stopped");
 				break;
 			}
@@ -1106,7 +1138,7 @@ final class RedisSubscriberImpl {
 				catch(Throwable e) {
 					ex = e;
 					if (m_waiter != Task() && !m_listening) {
-						m_waiter.send(Action.STARTED);
+						m_waiter.sendCompat(Action.STARTED);
 						return;
 					}
 					callback("Error", e.toString());
@@ -1114,7 +1146,7 @@ final class RedisSubscriberImpl {
 			});
 			m_mutex.performLocked!({
 				import std.datetime : usecs;
-				receiveTimeout(2.seconds, (Action act) { assert( act == Action.STARTED); });
+				receiveTimeoutCompat(2.seconds, (Action act) { assert( act == Action.STARTED); });
 				if (ex) throw ex;
 				enforce(m_listening, "Failed to start listening, timeout of 2 seconds expired");
 			});
@@ -1147,14 +1179,13 @@ struct RedisReply(T = ubyte[]) {
 
 	alias ElementType = T;
 
-	this(RedisConnection conn)
+	private this(RedisConnection conn)
 	{
 		m_conn = conn;
 		auto ctx = &conn.m_replyContext;
 		assert(ctx.refCount == 0);
 		*ctx = RedisReplyContext.init;
 		ctx.refCount++;
-		initialize();
 	}
 
 	this(this)
@@ -1192,16 +1223,7 @@ struct RedisReply(T = ubyte[]) {
 
 		ubyte[] ret = ctx.data;
 
-		static if (isSomeString!T) validate(cast(T)ret);
-
-		static if (is(T == ubyte[])) return ret;
-		else static if (is(T == string)) return cast(T)ret.idup;
-		else static if (is(T == bool)) return ret[0] == '1';
-		else static if (is(T == int) || is(T == long) || is(T == size_t) || is(T == double)) {
-			auto str = cast(string)ret;
-			return parse!T(str);
-		}
-		else static assert(false, "Unsupported Redis reply type: " ~ T.stringof);
+		return convertToType!T(ret);
 	}
 
 	@property bool frontIsNull()
@@ -1281,7 +1303,9 @@ struct RedisReply(T = ubyte[]) {
 		auto ln = cast(string)m_conn.conn.readLine();
 
 		switch (ln[0]) {
-			default: throw new Exception(format("Unknown reply type: %s", ln[0]));
+			default:
+				m_conn.conn.close();
+				throw new Exception(format("Unknown reply type: %s", ln[0]));
 			case '+': ctx.data = cast(ubyte[])ln[1 .. $]; ctx.hasData = true; break;
 			case '-': throw new Exception(ln[1 .. $]);
 			case ':': ctx.data = cast(ubyte[])ln[1 .. $]; ctx.hasData = true; break;
@@ -1293,6 +1317,7 @@ struct RedisReply(T = ubyte[]) {
 					ctx.length = 0; // TODO: make this NIL reply distinguishable from a 0-length array
 				} else {
 					ctx.multi = true;
+					scope (failure) m_conn.conn.close();
 					ctx.length = to!long(ln[ 1 .. $ ]);
 				}
 				break;
@@ -1339,6 +1364,13 @@ template isValidRedisValueReturn(T)
 template isValidRedisValueType(T)
 {
 	enum isValidRedisValueType = is(T : const(char)[]) || is(T : const(ubyte)[]) || is(T == long) || is(T == double) || is(T == bool);
+}
+
+private RedisReply!T getReply(T = ubyte)(RedisConnection conn)
+{
+	auto repl = RedisReply!T(conn);
+	repl.initialize();
+	return repl;
 }
 
 private struct RedisReplyContext {
@@ -1455,6 +1487,7 @@ private void _request_void(ARGS...)(RedisConnection conn, string command, scope 
 		catch (Exception e) {
 			throw new Exception(format("Failed to connect to Redis server at %s:%s.", conn.m_host, conn.m_port), __FILE__, __LINE__, e);
 		}
+		conn.conn.tcpNoDelay = true;
 	}
 
 	auto nargs = conn.countArgs(args);
@@ -1472,6 +1505,7 @@ private RedisReply!T _request_reply(T = ubyte[], ARGS...)(RedisConnection conn, 
 		catch (Exception e) {
 			throw new Exception(format("Failed to connect to Redis server at %s:%s.", conn.m_host, conn.m_port), __FILE__, __LINE__, e);
 		}
+		conn.conn.tcpNoDelay = true;
 	}
 
 	auto nargs = conn.countArgs(args);
@@ -1480,7 +1514,7 @@ private RedisReply!T _request_reply(T = ubyte[], ARGS...)(RedisConnection conn, 
 	RedisConnection.writeArgs(&rng, args);
 	rng.flush();
 
-	return RedisReply!T(conn);
+	return conn.getReply!T;
 }
 
 private T _request(T, ARGS...)(LockedConnection!RedisConnection conn, string command, scope ARGS args)
@@ -1502,6 +1536,20 @@ private T _request(T, ARGS...)(LockedConnection!RedisConnection conn, string com
 		auto reply = _request_reply!T(conn, command, args);
 		return reply.front;
 	}
+}
+
+private T convertToType(T)(ubyte[] data)
+{
+	static if (isSomeString!T) validate(cast(T)data);
+
+	static if (is(T == ubyte[])) return data;
+	else static if (is(T == string)) return cast(T)data.idup;
+	else static if (is(T == bool)) return data[0] == '1';
+	else static if (is(T == int) || is(T == long) || is(T == size_t) || is(T == double)) {
+		auto str = cast(string)data;
+		return parse!T(str);
+	}
+	else static assert(false, "Unsupported Redis reply type: " ~ T.stringof);
 }
 
 private template typeFormatString(T)

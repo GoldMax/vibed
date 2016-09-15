@@ -28,8 +28,8 @@ version (VibeUseNativeDriverType) {
 /**
 	Returns the active event driver
 */
-StoredEventDriver getEventDriver(bool ignore_unloaded = false) nothrow
-{
+StoredEventDriver getEventDriver(bool ignore_unloaded = false)
+@safe nothrow {
 	assert(ignore_unloaded || s_driver !is null, "No event driver loaded. Did the vibe.core.core module constructor run?");
 	return s_driver;
 }
@@ -45,9 +45,11 @@ package void setupEventDriver(DriverCore core_)
 
 package void deleteEventDriver()
 {
-	s_driver.dispose();
-	destroy(s_driver);
-	s_driver = null;
+	if (s_driver) {
+		s_driver.dispose();
+		destroy(s_driver);
+		s_driver = null;
+	}
 }
 
 
@@ -106,7 +108,7 @@ interface EventDriver {
 
 	/** Establiches a tcp connection on the specified host/port.
 	*/
-	TCPConnection connectTCP(NetworkAddress address);
+	TCPConnection connectTCP(NetworkAddress address, NetworkAddress bind_address);
 
 	/** Listens on the specified port and interface for TCP connections.
 
@@ -125,7 +127,7 @@ interface EventDriver {
 
 	/** Creates a new manually triggered event.
 	*/
-	ManualEvent createManualEvent();
+	ManualEvent createManualEvent() nothrow;
 
 	/** Creates an event for waiting on a non-bocking file handle.
 	*/
@@ -179,7 +181,7 @@ interface DriverCore {
 			exception that is passed to the $(D resumeTask) call that wakes
 			up the task.
 	*/
-	void yieldForEvent();
+	void yieldForEvent() @safe;
 
 	/** Yields execution until the event loop receives an event.
 
@@ -189,7 +191,7 @@ interface DriverCore {
 			are stored and thrown on the next call to $(D yieldForEvent).
 
 	*/
-	void yieldForEventDeferThrow() nothrow;
+	void yieldForEventDeferThrow() nothrow @safe;
 
 	/** Resumes the given task.
 
@@ -199,7 +201,7 @@ interface DriverCore {
 
 		See_also: $(D yieldAndResumeTask)
 	*/
-	void resumeTask(Task task, Exception event_exception = null);
+	void resumeTask(Task task, Exception event_exception = null) @safe nothrow;
 
 	/** Yields the current task and resumes another one.
 
@@ -207,9 +209,13 @@ interface DriverCore {
 		If called from a task, that task will be yielded first before resuming
 		the other one.
 
+		Throws:
+			May throw an `InterruptException` if the calling task gets
+			interrupted using `Task.interrupt()`.
+
 		See_also: $(D resumeTask)
 	*/
-	void yieldAndResumeTask(Task task, Exception event_exception = null);
+	void yieldAndResumeTask(Task task, Exception event_exception = null) @safe;
 
 	/** Notifies the core that all events have been processed.
 
@@ -217,6 +223,8 @@ interface DriverCore {
 		fully processed.
 	*/
 	void notifyIdle();
+
+	bool isScheduledForResume(Task t);
 }
 
 

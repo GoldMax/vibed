@@ -55,11 +55,6 @@ void compileDietFileIndent(string template_file, size_t indent, ALIASES...)(Outp
 	import vibe.utils.string;
 
 	pragma(msg, "Compiling diet template '"~template_file~"'...");
-	static if (ALIASES.length > 0 && __VERSION__ < 2064) {
-		pragma(msg, "Warning: using render!() or parseDietFile!() with aliases is unsafe,");
-		pragma(msg, "         please consider using renderCompat!()/parseDietFileCompat!()");
-		pragma(msg, "         on DMD versions prior to 2.064.");
-	}
 	//pragma(msg, localAliases!(0, ALIASES));
 	mixin(localAliases!(0, ALIASES));
 
@@ -76,42 +71,6 @@ void compileDietFileIndent(string template_file, size_t indent, ALIASES...)(Outp
 		mixin(dietParser!template_file(indent));
 }
 
-/// compatibility alias
-alias parseDietFile = compileDietFile;
-
-/**
-	Compatibility version of `parseDietFile` - scheduled for deprecation.
-
-	This function should only be called indirectly through `HTTPServerResponse.renderCompat()`.	
-*/
-void compileDietFileCompat(string template_file, TYPES_AND_NAMES...)(OutputStream stream__, ...)
-{
-	compileDietFileCompatV!(template_file, TYPES_AND_NAMES)(stream__, _argptr, _arguments);
-}
-/// ditto
-void compileDietFileCompatV(string template_file, TYPES_AND_NAMES...)(OutputStream stream__, va_list _argptr, TypeInfo[] _arguments)
-{
-	// some imports to make available by default inside templates
-	import vibe.http.common;
-	import vibe.stream.wrapper;
-	import vibe.utils.string;
-
-	pragma(msg, "Compiling diet template '"~template_file~"' (compat)...");
-	//pragma(msg, localAliasesCompat!(0, TYPES_AND_NAMES));
-	mixin(localAliasesCompat!(0, TYPES_AND_NAMES));
-
-	static if (is(typeof(diet_translate__))) alias TRANSLATE = TypeTuple!(diet_translate__);
-	else alias TRANSLATE = TypeTuple!();
-
-	auto output__ = StreamOutputRange(stream__);
-
-	// Generate the D source code for the diet template
-	//pragma(msg, dietParser!template_file());
-	mixin(dietParser!template_file(0));
-}
-
-/// compatibility alias
-alias parseDietFileCompat = compileDietFileCompat;
 
 /**
 	Generates a diet template compiler to use as a mixin.
@@ -318,10 +277,12 @@ private void readFilesRec(alias FILES, ALREADY_READ...)(ref TemplateBlock[] dst)
 /// private
 private bool isPartOf(string str, STRINGS...)()
 {
-	foreach( s; STRINGS )
-		if( str == s )
-			return true;
-	return false;
+	template impl(size_t i) {
+		static if (i >= STRINGS.length) enum impl = false;
+		else static if (STRINGS[i] == str) enum impl = true;
+		else enum impl = impl!(i+1);
+	}
+	return impl!0;
 }
 
 private string[] extractDependencies(in Line[] lines)
@@ -330,6 +291,7 @@ private string[] extractDependencies(in Line[] lines)
 	foreach (ref ln; lines) {
 		auto lnstr = ln.text.ctstrip();
 		if (lnstr.startsWith("extends ")) ret ~= lnstr[8 .. $].ctstrip() ~ ".dt";
+		if (lnstr.length) break;
 	}
 	return ret;
 }
@@ -405,6 +367,7 @@ private class OutputContext {
 	void writeRawString(string str) { enterState(State.String); m_result ~= str; }
 	void writeString(string str) { writeRawString(dstringEscape(str)); }
 	void writeStringHtmlEscaped(string str) { writeString(htmlEscape(str)); }
+	void writeStringHtmlAttribEscaped(string str) { writeString(htmlAttribEscape(str)); }
 	void writeIndent(size_t stack_depth = size_t.max)
 	{
 		import std.algorithm : min;
@@ -1048,43 +1011,66 @@ private struct DietCompiler(TRANSLATE...)
 			output.writeIndent(level);
 		}
 		output.writeString("<" ~ tag);
+
+		string extra_class;
+		foreach (a; attribs)
+			if (a.key == "$class") {
+				extra_class = a.value;
+				break;
+			}
+
+
 		foreach( att; attribs ){
 			if( att.key[0] == '$' ) continue; // ignore special attributes
+
+			void handleExtraClasses()
+			{
+				// output extra classes given as .class
+				if (att.key == "class" && extra_class.length)
+					output.writeStringHtmlAttribEscaped(" " ~ extra_class);
+			}
+
 			if( isStringLiteral(att.value) ){
 				output.writeString(" "~att.key~"=\"");
 				if( !hasInterpolations(att.value) ) output.writeString(htmlAttribEscape(dstringUnescape(att.value[1 .. $-1])));
 				else buildInterpolatedString(output, att.value[1 .. $-1], true);
 
-				// output extra classes given as .class
-				if( att.key == "class" ){
-					foreach( a; attribs )
-						if( a.key == "$class" ){
-							output.writeString(" " ~ a.value);
-							break;
-						}
-				}
-
+				handleExtraClasses();
 				output.writeString("\"");
 			} else {
+				// Boolean value
 				output.writeCodeLine("static if(is(typeof("~att.value~") == bool)){ if("~att.value~"){");
-				if (!output.m_isHTML5)
-					output.writeString(` `~att.key~`="`~att.key~`"`);
-				else
-					output.writeString(` `~att.key);
+					if (!output.m_isHTML5)
+						output.writeString(` `~att.key~`="`~att.key~`"`);
+					else
+						output.writeString(` `~att.key);
+				// String array value
 				output.writeCodeLine("}} else static if(is(typeof("~att.value~") == string[])){\n");
-				output.writeString(` `~att.key~`="`);
-				output.writeExprHtmlAttribEscaped(`join(`~att.value~`, " ")`);
-				output.writeString(`"`);
+					output.writeString(` `~att.key~`="`);
+					output.writeExprHtmlAttribEscaped(`join(`~att.value~`, " ")`);
+					handleExtraClasses();
+					output.writeString(`"`);
+				// String value
 				output.writeCodeLine("} else static if(is(typeof("~att.value~") == string)) {");
-				output.writeCodeLine("if (("~att.value~") != \"\"){");
-				output.writeString(` `~att.key~`="`);
-				output.writeExprHtmlAttribEscaped(att.value);
-				output.writeString(`"`);
-				output.writeCodeLine("}");
+					output.writeCodeLine("if (("~att.value~") != \"\"){");
+					output.writeString(` `~att.key~`="`);
+					output.writeExprHtmlAttribEscaped(att.value);
+					handleExtraClasses();
+					output.writeString(`"`);
+					output.writeCodeLine("}");
+					if (att.key == "class" && extra_class.length) {
+						output.writeCodeLine("else {");
+						output.writeString(` `~att.key~`="`);
+						output.writeStringHtmlAttribEscaped(extra_class);
+						output.writeString(`"`);
+						output.writeCodeLine("}");
+					}
+				// Any other type of value
 				output.writeCodeLine("} else {");
-				output.writeString(` `~att.key~`="`);
-				output.writeExprHtmlAttribEscaped(att.value);
-				output.writeString(`"`);
+					output.writeString(` `~att.key~`="`);
+					output.writeExprHtmlAttribEscaped(att.value);
+					handleExtraClasses();
+					output.writeString(`"`);
 				output.writeCodeLine("}");
 			}
 		}
@@ -1460,6 +1446,14 @@ unittest {
 	assert(compile!(`div(class="foo")`) == `<div class="foo"></div>`);
 	assert(compile!(`div#foo(class='')`) == `<div id="foo"></div>`);
 
+	// issue 1312
+	assert(compile!(`div.foo(class=true?"bar":"")`) == `<div class="bar foo"></div>`);
+	assert(compile!(`div.foo(class=true?12:13)`) == `<div class="12 foo"></div>`);
+	assert(compile!(`div.foo(class=true?["bar", "baz"]:[])`) == `<div class="bar baz foo"></div>`);
+	assert(compile!(`div.foo(class=false?"bar":"")`) == `<div class="foo"></div>`);
+	assert(compile!(`div(class="")`) == `<div></div>`);
+	assert(compile!(`div.foo(class="")`) == `<div class="foo"></div>`);
+
 	// issue 520
 	assert(compile!("- auto cond = true;\ndiv(someattr=cond ? \"foo\" : null)") == "<div someattr=\"foo\"></div>");
 	assert(compile!("- auto cond = false;\ndiv(someattr=cond ? \"foo\" : null)") == "<div></div>");
@@ -1541,12 +1535,12 @@ private string filterJavaScript(string text, size_t indent)
 	auto lines = splitLines(text);
 
 	string indent_string = "\n";
-	while( indent-- > 0 ) indent_string ~= '\t';
+	while (indent-- > 0) indent_string ~= '\t';
 
-	string ret = indent_string[0 .. $-1]~"<script type=\"text/javascript\">";
-	ret ~= indent_string~"//<![CDATA[";
-	foreach( ln; lines ) ret ~= indent_string ~ ln;
-	ret ~= indent_string ~ "//]]>"~indent_string[0 .. $-1]~"</script>";
+	string ret = indent_string~"<script type=\"application/javascript\">";
+	ret ~= indent_string~'\t' ~ "//<![CDATA[";
+	foreach (ln; lines) ret ~= indent_string ~ '\t' ~ ln;
+	ret ~= indent_string ~ '\t' ~ "//]]>" ~ indent_string ~ "</script>";
 
 	return ret;
 }

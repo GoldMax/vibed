@@ -13,10 +13,10 @@ module vibe.data.json;
 
 ///
 unittest {
-	import vibe.core.log : logInfo;
-
 	void manipulateJson(Json j)
 	{
+		import std.stdio;
+
 		// retrieving the values is done using get()
 		assert(j["name"].get!string == "Example");
 		assert(j["id"].get!int == 1);
@@ -27,12 +27,11 @@ unittest {
 		// prints:
 		// name: "Example"
 		// id: 1
-		foreach (string key, value; j) {
-			logInfo("%s: %s", key, value);
-		}
+		foreach (string key, value; j)
+			writefln("%s: %s", key, value);
 
 		// print out as JSON: {"name": "Example", "id": 1}
-		logInfo("JSON: %s", j.toString());
+		writefln("JSON: %s", j.toString());
 
 		// DEPRECATED: object members can be accessed using member syntax, just like in JavaScript
 		//j = Json.emptyObject;
@@ -40,6 +39,32 @@ unittest {
 		//j.id = 1;
 	}
 }
+
+/// Constructing `Json` objects
+unittest {
+	// construct a JSON object {"field1": "foo", "field2": 42, "field3": true}
+
+	// using the constructor
+	Json j1 = Json(["field1": Json("foo"), "field2": Json(42), "field3": Json(true)]);
+
+	// using piecewise construction
+	Json j2 = Json.emptyObject;
+	j2["field1"] = "foo";
+	j2["field2"] = 42.0;
+	j2["field3"] = true;
+
+	// using serialization
+	struct S {
+		string field1;
+		double field2;
+		bool field3;
+	}
+	Json j3 = S("foo", 42, true).serializeToJson();
+
+	// using serialization, converting directly to a JSON string
+	string j4 = S("foo", 32, true).serializeToJsonString();
+}
+
 
 public import vibe.data.serialization;
 
@@ -69,7 +94,7 @@ import std.bigint;
 	a JSONException. Additionally, an explicit cast or using get!() or to!() is
 	required to convert a JSON value to the corresponding static D type.
 */
-
+align(8) // ensures that pointers stay on 64-bit boundaries on x64 so that they get scanned by the GC
 struct Json {
 	static assert(!hasElaborateDestructor!BigInt && !hasElaborateCopyConstructor!BigInt,
 		"struct Json is missing required ~this and/or this(this) members for BigInt.");
@@ -79,8 +104,19 @@ struct Json {
 		// memory leaks and, worse, std.algorithm.swap triggering an assertion
 		// because of internal pointers. This crude workaround seems to fix
 		// the issues.
-		void*[max((BigInt.sizeof+(void*).sizeof-1)/(void*).sizeof, 2)] m_data;
-		ref inout(T) getDataAs(T)() inout { static assert(T.sizeof <= m_data.sizeof); return *cast(inout(T)*)m_data.ptr; }
+		enum m_size = max((BigInt.sizeof+(void*).sizeof), 2);
+		// NOTE : DMD 2.067.1 doesn't seem to init void[] correctly on its own.
+		// Explicity initializing it works around this issue. Using a void[]
+		// array here to guarantee that it's scanned by the GC.
+		void[m_size] m_data = (void[m_size]).init;
+
+		static assert(m_data.offsetof == 0, "m_data must be the first struct member.");
+		static assert(BigInt.alignof <= 8, "Json struct alignment of 8 isn't sufficient to store BigInt.");
+
+		ref inout(T) getDataAs(T)() inout {
+			static assert(T.sizeof <= m_data.sizeof);
+			return (cast(inout(T)[1])m_data[0 .. T.sizeof])[0];
+		}
 
 		@property ref inout(BigInt) m_bigInt() inout { return getDataAs!BigInt(); }
 		@property ref inout(long) m_int() inout { return getDataAs!long(); }
@@ -135,9 +171,9 @@ struct Json {
 	/**
 		Constructor for a JSON object.
 	*/
-	this(typeof(null)) { m_type = Type.null_; }
+	this(typeof(null)) @trusted { m_type = Type.null_; }
 	/// ditto
-	this(bool v) { m_type = Type.bool_; m_bool = v; }
+	this(bool v) @trusted { m_type = Type.bool_; m_bool = v; }
 	/// ditto
 	this(byte v) { this(cast(long)v); }
 	/// ditto
@@ -151,17 +187,17 @@ struct Json {
 	/// ditto
 	this(uint v) { this(cast(long)v); }
 	/// ditto
-	this(long v) { m_type = Type.int_; m_int = v; }
+	this(long v) @trusted { m_type = Type.int_; m_int = v; }
 	/// ditto
-	this(BigInt v) { m_type = Type.bigInt; initBigInt(); m_bigInt = v; }
+	this(BigInt v) @trusted { m_type = Type.bigInt; initBigInt(); m_bigInt = v; }
 	/// ditto
-	this(double v) { m_type = Type.float_; m_float = v; }
+	this(double v) @trusted { m_type = Type.float_; m_float = v; }
 	/// ditto
-	this(string v) { m_type = Type.string; m_string = v; }
+	this(string v) @trusted { m_type = Type.string; m_string = v; }
 	/// ditto
-	this(Json[] v) { m_type = Type.array; m_array = v; }
+	this(Json[] v) @trusted { m_type = Type.array; m_array = v; }
 	/// ditto
-	this(Json[string] v) { m_type = Type.object; m_object = v; }
+	this(Json[string] v) @trusted { m_type = Type.object; m_object = v; }
 
 	/**
 		Allows assignment of D values to a JSON value.
@@ -241,7 +277,7 @@ struct Json {
 	/**
 		The current type id of this JSON object.
 	*/
-	@property Type type() const { return m_type; }
+	@property Type type() const @safe { return m_type; }
 
 	/**
 		Clones a JSON value recursively.
@@ -339,7 +375,7 @@ struct Json {
 		Returns the number of entries of string, array or object typed JSON values.
 	*/
 	@property size_t length()
-	const {
+	const @trusted {
 		checkType!(string, Json[], Json[string])("property length");
 		switch(m_type){
 			case Type.string: return m_string.length;
@@ -353,7 +389,7 @@ struct Json {
 		Allows foreach iterating over JSON objects and arrays.
 	*/
 	int opApply(int delegate(ref Json obj) del)
-	{
+	@trusted {
 		checkType!(Json[], Json[string])("opApply");
 		if( m_type == Type.array ){
 			foreach( ref v; m_array )
@@ -370,7 +406,7 @@ struct Json {
 	}
 	/// ditto
 	int opApply(int delegate(ref const Json obj) del)
-	const {
+	const @trusted {
 		checkType!(Json[], Json[string])("opApply");
 		if( m_type == Type.array ){
 			foreach( ref v; m_array )
@@ -387,7 +423,7 @@ struct Json {
 	}
 	/// ditto
 	int opApply(int delegate(ref size_t idx, ref Json obj) del)
-	{
+	@trusted {
 		checkType!(Json[])("opApply");
 		foreach( idx, ref v; m_array )
 			if( auto ret = del(idx, v) )
@@ -396,7 +432,7 @@ struct Json {
 	}
 	/// ditto
 	int opApply(int delegate(ref size_t idx, ref const Json obj) del)
-	const {
+	const @trusted {
 		checkType!(Json[])("opApply");
 		foreach( idx, ref v; m_array )
 			if( auto ret = del(idx, v) )
@@ -405,7 +441,7 @@ struct Json {
 	}
 	/// ditto
 	int opApply(int delegate(ref string idx, ref Json obj) del)
-	{
+	@trusted {
 		checkType!(Json[string])("opApply");
 		foreach( idx, ref v; m_object )
 			if( v.type != Type.undefined )
@@ -415,7 +451,7 @@ struct Json {
 	}
 	/// ditto
 	int opApply(int delegate(ref string idx, ref const Json obj) del)
-	const {
+	const @trusted {
 		checkType!(Json[string])("opApply");
 		foreach( idx, ref v; m_object )
 			if( v.type != Type.undefined )
@@ -444,7 +480,7 @@ struct Json {
 	inout(T) opCast(T)() inout { return get!T; }
 	/// ditto
 	@property inout(T) get(T)()
-	inout {
+	inout @trusted {
 		static if (!is(T : bool) && is(T : long))
 			checkType!(long, BigInt)();
 		else
@@ -828,13 +864,28 @@ struct Json {
 		m_array ~= element;
 	}
 
-	/** Scheduled for deprecation, please use `opIndex` instead.
+	// If VibeDataNoOpDispatch is declared, don't include the depracted functions. This allows UFCS to be used on a Json object
+	version (VibeDataNoOpDispatch) {
+	}
+	else {
+		/** Deprecated, please use `opIndex` instead.
 
-		Allows to access existing fields of a JSON object using dot syntax.
-	*/
-	@property const(Json) opDispatch(string prop)() const { return opIndex(prop); }
-	/// ditto
-	@property ref Json opDispatch(string prop)() { return opIndex(prop); }
+			Allows to access existing fields of a JSON object using dot syntax.
+		*/
+		deprecated("Use opIndex instead")
+		@property const(Json) opDispatch(string prop, string file = __FILE__, int line = __LINE__)() const {
+			static if (!file.endsWith("/std/range/primitives.d") && !file.endsWith("/std/array.d"))
+				pragma(msg, file~"("~line.stringof~"): Json.opDispatch is deprecated, use opIndex instead.");
+			return opIndex(prop);
+		}
+		/// ditto
+		deprecated("Use opIndex instead")
+		@property ref Json opDispatch(string prop, string file = __FILE__, int line = __LINE__)() {
+			static if (!file.endsWith("/std/range/primitives.d") && !file.endsWith("/std/array.d"))
+				pragma(msg, file~"("~line.stringof~"): Json.opDispatch is deprecated, use opIndex instead.");
+			return opIndex(prop);
+		}
+	}
 
 	/**
 		Compares two JSON values for equality.
@@ -931,10 +982,38 @@ struct Json {
 		See_Also: writeJsonString, toPrettyString
 	*/
 	string toString()
-	const {
+	const @trusted {
+		// DMD BUG: this should actually be all @safe, but for some reason
+		// @safe inference for writeJsonString doesn't work.
 		auto ret = appender!string();
 		writeJsonString(ret, this);
 		return ret.data;
+	}
+	/// ditto
+	void toString(scope void delegate(const(char)[]) @safe sink, FormatSpec!char fmt)
+	@trusted {
+		// DMD BUG: this should actually be all @safe, but for some reason
+		// @safe inference for writeJsonString doesn't work.
+		static struct DummyRange {
+			void delegate(const(char)[]) @safe sink;
+			void put(const(char)[] str) @safe { sink(str); }
+			void put(char ch) @trusted { sink((&ch)[0 .. 1]); }
+		}
+		auto r = DummyRange(sink);
+		writeJsonString(r, this);
+	}
+	/// ditto
+	void toString(scope void delegate(const(char)[]) @system sink, FormatSpec!char fmt)
+	{
+		// DMD BUG: this should actually be all @safe, but for some reason
+		// @safe inference for writeJsonString doesn't work.
+		static struct DummyRange {
+			void delegate(const(char)[]) sink;
+			void put(const(char)[] str) { sink(str); }
+			void put(char ch) { sink((&ch)[0 .. 1]); }
+		}
+		auto r = DummyRange(sink);
+		writeJsonString(r, this);
 	}
 
 	/**
@@ -990,11 +1069,11 @@ struct Json {
 
 	private void initBigInt()
 	{
-		// BigInt is a struct, and it have a special BigInt.init value,  differs the null.
-		// m_data has no special initializer and when we tries to first access to BigInt
+		BigInt[1] init_;
+		// BigInt is a struct, and it has a special BigInt.init value, which differs from null.
+		// m_data has no special initializer and when it tries to first access to BigInt
 		// via m_bigInt(), we should explicitly initialize m_data with BigInt.init
-		BigInt init_;
-		(cast(ubyte*)m_data.ptr)[0 .. BigInt.sizeof] = (cast(ubyte*)&init_)[0 .. BigInt.sizeof];
+		m_data[0 .. BigInt.sizeof] = cast(void[])init_;
 	}
 
 	private void runDestructors()
@@ -1022,6 +1101,12 @@ struct Json {
 	}*/
 }
 
+@safe unittest { // issue #1234 - @safe toString
+	auto j = Json(true);
+	j.toString((str) @safe {}, FormatSpec!char("s"));
+	assert(j.toString() == "true");
+}
+
 
 /******************************************************************************/
 /* public functions                                                           */
@@ -1046,7 +1131,6 @@ Json parseJson(R)(ref R range, int* line = null, string filename = null)
 	enforceJson(!range.empty, "JSON string contains only whitespaces.", filename, 0);
 
 	version(JsonLineNumbers) {
-		import vibe.core.log;
 		int curline = line ? *line : 0;
 	}
 
@@ -1222,11 +1306,7 @@ unittest {
 */
 Json serializeToJson(T)(T value)
 {
-	version (VibeOldSerialization) {
-		return serializeToJsonOld(value);
-	} else {
-		return serialize!JsonSerializer(value);
-	}
+	return serialize!JsonSerializer(value);
 }
 /// ditto
 void serializeToJson(R, T)(R destination, T value)
@@ -1301,74 +1381,6 @@ unittest {
 }
 
 
-/// private
-deprecated("VibeOldSerialization is deprecated, please migrate to the new serialization framework.")
-Json serializeToJsonOld(T)(T value)
-{
-	import vibe.internal.meta.traits;
-
-	alias TU = Unqual!T;
-	static if (is(TU == Json)) return value;
-	else static if (is(TU == typeof(null))) return Json(null);
-	else static if (is(TU == bool)) return Json(value);
-	else static if (is(TU == float)) return Json(cast(double)value);
-	else static if (is(TU == double)) return Json(value);
-	else static if (is(TU == DateTime)) return Json(value.toISOExtString());
-	else static if (is(TU == SysTime)) return Json(value.toISOExtString());
-	else static if (is(TU == Date)) return Json(value.toISOExtString());
-	else static if (is(TU == BigInt)) return Json(value);
-	else static if (is(TU : long)) return Json(cast(long)value);
-	else static if (is(TU : string)) return Json(value);
-	else static if (isArray!T) {
-		auto ret = new Json[value.length];
-		foreach (i; 0 .. value.length)
-			ret[i] = serializeToJson(value[i]);
-		return Json(ret);
-	} else static if (isAssociativeArray!TU) {
-		Json[string] ret;
-		alias TK = KeyType!T;
-		foreach (key, value; value) {
-			static if(is(TK == string)) {
-				ret[key] = serializeToJson(value);
-			} else static if (is(TK == enum)) {
-				ret[to!string(key)] = serializeToJson(value);
-			} else static if (isStringSerializable!(TK)) {
-				ret[key.toString()] = serializeToJson(value);
-			} else static assert("AA key type %s not supported for JSON serialization.");
-		}
-		return Json(ret);
-	} else static if (isJsonSerializable!TU) {
-		return value.toJson();
-	} else static if (isStringSerializable!TU) {
-		return Json(value.toString());
-	} else static if (is(TU == struct)) {
-		Json[string] ret;
-		foreach (m; __traits(allMembers, T)) {
-			static if (isRWField!(TU, m)) {
-				auto mv = __traits(getMember, value, m);
-				ret[underscoreStrip(m)] = serializeToJson(mv);
-			}
-		}
-		return Json(ret);
-	} else static if(is(TU == class)) {
-		if (value is null) return Json(null);
-		Json[string] ret;
-		foreach (m; __traits(allMembers, T)) {
-			static if (isRWField!(TU, m)) {
-				auto mv = __traits(getMember, value, m);
-				ret[underscoreStrip(m)] = serializeToJson(mv);
-			}
-		}
-		return Json(ret);
-	} else static if (isPointer!TU) {
-		if (value is null) return Json(null);
-		return serializeToJson(*value);
-	} else {
-		static assert(false, "Unsupported type '"~T.stringof~"' for JSON serialization.");
-	}
-}
-
-
 /**
 	Deserializes a JSON value into the destination variable.
 
@@ -1383,90 +1395,13 @@ void deserializeJson(T)(ref T dst, Json src)
 /// ditto
 T deserializeJson(T)(Json src)
 {
-	version (VibeOldSerialization) {
-		return deserializeJsonOld!T(src);
-	} else {
-		return deserialize!(JsonSerializer, T)(src);
-	}
+	return deserialize!(JsonSerializer, T)(src);
 }
 /// ditto
 T deserializeJson(T, R)(R input)
-	if (isInputRange!R && !is(R == Json))
+	if (!is(R == Json) && isInputRange!R)
 {
 	return deserialize!(JsonStringSerializer!R, T)(input);
-}
-
-/// private
-T deserializeJsonOld(T)(Json src)
-{
-	import vibe.internal.meta.traits;
-
-	static if( is(T == struct) || isSomeString!T || isIntegral!T || isFloatingPoint!T )
-		if( src.type == Json.Type.null_ ) return T.init;
-	static if (is(T == Json)) return src;
-	else static if (is(T == typeof(null))) { return null; }
-	else static if (is(T == bool)) return src.get!bool;
-	else static if (is(T == float)) return src.to!float;   // since doubles are frequently serialized without
-	else static if (is(T == double)) return src.to!double; // a decimal point, we allow conversions here
-	else static if (is(T == DateTime)) return DateTime.fromISOExtString(src.get!string);
-	else static if (is(T == SysTime)) return SysTime.fromISOExtString(src.get!string);
-	else static if (is(T == Date)) return Date.fromISOExtString(src.get!string);
-	else static if (is(T == BigInt)) return cast(T)src.get!BigInt;
-	else static if (is(T : long)) return cast(T)src.get!long;
-	else static if (is(T : string)) return cast(T)src.get!string;
-	else static if (isArray!T) {
-		alias TV = typeof(T.init[0]) ;
-		auto dst = new Unqual!TV[src.length];
-		foreach (size_t i, v; src)
-			dst[i] = deserializeJson!(Unqual!TV)(v);
-		return cast(T)dst;
-	} else static if( isAssociativeArray!T ) {
-		alias TV = typeof(T.init.values[0]) ;
-		alias TK = KeyType!T;
-		Unqual!TV[TK] dst;
-		foreach (string key, value; src) {
-			static if (is(TK == string)) {
-				dst[key] = deserializeJson!(Unqual!TV)(value);
-			} else static if (is(TK == enum)) {
-				dst[to!(TK)(key)] = deserializeJson!(Unqual!TV)(value);
-			} else static if (isStringSerializable!TK) {
-				auto dsk = TK.fromString(key);
-				dst[dsk] = deserializeJson!(Unqual!TV)(value);
-			} else static assert("AA key type %s not supported for JSON serialization.");
-		}
-		return dst;
-	} else static if (isJsonSerializable!T) {
-		return T.fromJson(src);
-	} else static if (isStringSerializable!T) {
-		return T.fromString(src.get!string);
-	} else static if (is(T == struct)) {
-		T dst;
-		foreach (m; __traits(allMembers, T)) {
-			static if (isRWPlainField!(T, m) || isRWField!(T, m)) {
-				alias TM = typeof(__traits(getMember, dst, m)) ;
-				__traits(getMember, dst, m) = deserializeJson!TM(src[underscoreStrip(m)]);
-			}
-		}
-		return dst;
-	} else static if (is(T == class)) {
-		if (src.type == Json.Type.null_) return null;
-		auto dst = new T;
-		foreach (m; __traits(allMembers, T)) {
-			static if (isRWPlainField!(T, m) || isRWField!(T, m)) {
-				alias TM = typeof(__traits(getMember, dst, m)) ;
-				__traits(getMember, dst, m) = deserializeJson!TM(src[underscoreStrip(m)]);
-			}
-		}
-		return dst;
-	} else static if (isPointer!T) {
-		if (src.type == Json.Type.null_) return null;
-		alias TD = typeof(*T.init) ;
-		dst = new TD;
-		*dst = deserializeJson!TD(src);
-		return dst;
-	} else {
-		static assert(false, "Unsupported type '"~T.stringof~"' for JSON serialization.");
-	}
 }
 
 ///
@@ -1607,8 +1542,8 @@ unittest {
 	s.a = 2;
 
 	auto j = serializeToJson(s);
-	assert(j.a.type == Json.Type.int_);
-	assert(j.b.type == Json.Type.null_);
+	assert(j["a"].type == Json.Type.int_);
+	assert(j["b"].type == Json.Type.null_);
 
 	auto t = deserializeJson!S(j);
 	assert(!t.a.isNull() && t.a == 2);
@@ -1646,7 +1581,7 @@ unittest { // const and mutable json
 	See_Also: vibe.data.serialization.serialize, vibe.data.serialization.deserialize, serializeToJson, deserializeJson
 */
 struct JsonSerializer {
-	template isJsonBasicType(T) { enum isJsonBasicType = isNumeric!T || isBoolean!T || is(T == string) || is(T == typeof(null)) || isJsonSerializable!T; }
+	template isJsonBasicType(T) { enum isJsonBasicType = std.traits.isNumeric!T || isBoolean!T || is(T == string) || is(T == typeof(null)) || isJsonSerializable!T; }
 
 	template isSupportedValueType(T) { enum isSupportedValueType = isJsonBasicType!T || is(T == Json); }
 
@@ -1743,7 +1678,7 @@ struct JsonStringSerializer(R, bool pretty = false)
 		size_t m_level = 0;
 	}
 
-	template isJsonBasicType(T) { enum isJsonBasicType = isNumeric!T || isBoolean!T || is(T == string) || is(T == typeof(null)) || isJsonSerializable!T; }
+	template isJsonBasicType(T) { enum isJsonBasicType = std.traits.isNumeric!T || isBoolean!T || is(T == string) || is(T == typeof(null)) || isJsonSerializable!T; }
 
 	template isSupportedValueType(T) { enum isSupportedValueType = isJsonBasicType!T || is(T == Json); }
 
@@ -1928,10 +1863,6 @@ struct JsonStringSerializer(R, bool pretty = false)
 		{
 			m_range.skipWhitespace(&m_line);
 			if (m_range.front != 'n') return false;
-			static if (is(R == string)) {
-				import vibe.core.log;
-				logInfo("%s", m_range[0 .. min(4, $)]);
-			}
 			foreach (ch; "null") {
 				enforceJson(m_range.front == ch, "Expecting 'null'.");
 				m_range.popFront();
@@ -1965,7 +1896,7 @@ void writeJsonString(R, bool pretty = false)(ref R dst, in Json json, size_t lev
 		case Json.Type.null_: dst.put("null"); break;
 		case Json.Type.bool_: dst.put(cast(bool)json ? "true" : "false"); break;
 		case Json.Type.int_: formattedWrite(dst, "%d", json.get!long); break;
-		case Json.Type.bigInt: formattedWrite(dst, "%d", json.get!BigInt); break;
+		case Json.Type.bigInt: () @trusted { formattedWrite(dst, "%d", json.get!BigInt); } (); break;
 		case Json.Type.float_:
 			auto d = json.get!double;
 			if (d != d)
@@ -2028,10 +1959,10 @@ void writeJsonString(R, bool pretty = false)(ref R dst, in Json json, size_t lev
 
 unittest {
 	auto a = Json.emptyObject;
-	a.a = Json.emptyArray;
-	a.b = Json.emptyArray;
-	a.b ~= Json(1);
-	a.b ~= Json.emptyObject;
+	a["a"] = Json.emptyArray;
+	a["b"] = Json.emptyArray;
+	a["b"] ~= Json(1);
+	a["b"] ~= Json.emptyObject;
 
 	assert(a.toString() == `{"a":[],"b":[1,{}]}` || a.toString() == `{"b":[1,{}],"a":[]}`);
 	assert(a.toPrettyString() ==
@@ -2359,8 +2290,7 @@ package template isJsonSerializable(T) { enum isJsonSerializable = is(typeof(T.i
 
 private void enforceJson(string file = __FILE__, size_t line = __LINE__)(bool cond, lazy string message = "JSON exception")
 {
-	static if (__VERSION__ >= 2065) enforceEx!JSONException(cond, message, file, line);
-	else if (!cond) throw new JSONException(message);
+	enforceEx!JSONException(cond, message, file, line);
 }
 
 private void enforceJson(string file = __FILE__, size_t line = __LINE__)(bool cond, lazy string message, string err_file, int err_line)
@@ -2371,4 +2301,48 @@ private void enforceJson(string file = __FILE__, size_t line = __LINE__)(bool co
 private void enforceJson(string file = __FILE__, size_t line = __LINE__)(bool cond, lazy string message, string err_file, int* err_line)
 {
 	enforceJson!(file, line)(cond, message, err_file, err_line ? *err_line : -1);
+}
+
+// test for vibe.utils.DictionaryList
+unittest {
+	import vibe.utils.dictionarylist;
+
+	static assert(isCustomSerializable!(DictionaryList!int));
+
+	DictionaryList!(int, false) b;
+	b.addField("a", 1);
+	b.addField("A", 2);
+	auto app = appender!string();
+	serializeToJson(app, b);
+	assert(app.data == `[{"key":"a","value":1},{"key":"A","value":2}]`, app.data);
+
+	DictionaryList!(int, true, 2) c;
+	c.addField("a", 1);
+	c.addField("b", 2);
+	c.addField("a", 3);
+	c.remove("b");
+	auto appc = appender!string();
+	serializeToJson(appc, c);
+	assert(appc.data == `[{"key":"a","value":1},{"key":"a","value":3}]`, appc.data);
+}
+
+// make sure Json is usable for CTFE
+unittest {
+	static assert(is(typeof({
+		struct Test {
+			Json object_ = Json.emptyObject;
+			Json array   = Json.emptyArray;
+		}
+	})), "CTFE for Json type failed.");
+
+	static Json test() {
+		Json j;
+		j = Json(42);
+		j = Json([Json(true)]);
+		j = Json(["foo": Json(null)]);
+		j = Json("foo");
+		return j;
+	}
+	enum j = test();
+	static assert(j == Json("foo"));
 }

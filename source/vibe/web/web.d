@@ -26,6 +26,8 @@ import vibe.http.router;
 import vibe.http.server;
 import vibe.http.websockets;
 
+import std.encoding : sanitize;
+
 /*
 	TODO:
 		- conversion errors of path place holder parameters should result in 404
@@ -41,7 +43,9 @@ import vibe.http.websockets;
 	route. Property methods are mapped to GET/PUT and all other methods are
 	mapped according to their prefix verb. If the method has no known prefix,
 	POST is used. The rest of the name is mapped to the path of the route
-	according to the given `method_style`.
+	according to the given `method_style`. Note that the prefix word must be
+	all-lowercase and is delimited by either an upper case character, a
+	non-alphabetic character, or the end of the string.
 
 	The following table lists the mappings from prefix verb to HTTP verb:
 
@@ -364,7 +368,17 @@ void terminateSession()
 
 
 /**
-	Translates a text based on the language of the current web request.
+	Translates text based on the language of the current web request.
+
+	The first overload performs a direct translation of the given translation
+	key/text. The second overload can select from a set of plural forms
+	based on the given integer value (msgid_plural).
+
+	Params:
+		text = The translation key
+		context = Optional context/namespace identifier (msgctxt)
+		plural_text = Plural form of the translation key
+		count = The quantity used to select the proper plural form of a translation
 
 	See_also: $(D vibe.web.i18n.translationContext)
 */
@@ -372,6 +386,12 @@ string trWeb(string text, string context = null)
 {
 	assert(s_requestContext.req !is null, "trWeb() used outside of a web interface request!");
 	return s_requestContext.tr(text, context);
+}
+
+/// ditto
+string trWeb(string text, string plural_text, int count, string context = null) {
+	assert(s_requestContext.req !is null, "trWeb() used outside of a web interface request!");
+	return s_requestContext.tr_plural(text, plural_text, count, context);
 }
 
 ///
@@ -390,7 +410,6 @@ unittest {
 		}
 	}
 }
-
 
 /**
 	Attribute to customize how errors/exceptions are displayed.
@@ -567,6 +586,7 @@ private struct RequestContext {
 	HTTPServerResponse res;
 	string language;
 	string function(string, string) tr;
+	string function(string, string, int, string) tr_plural;
 }
 
 private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequest req, HTTPServerResponse res, C instance, WebInterfaceSettings settings, ERROR error)
@@ -588,8 +608,11 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 	s_requestContext = createRequestContext!overload(req, res);
 
 	// collect all parameter values
-	PARAMS params = void;
+	PARAMS params = void; // FIXME: in case of errors, destructors could be called on uninitialized variables!
 	foreach (i, PT; PARAMS) {
+		bool got_error = false;
+		ParamError err;
+		err.field = param_names[i];
 		try {
 			static if (IsAttributedParameter!(overload, param_names[i])) {
 				params[i].setVoid(computeAttributedParameterCtx!(overload, param_names[i])(instance, req, res));
@@ -608,29 +631,42 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 			else static if (is(PT == HTTPServerResponse) || is(PT == HTTPResponse)) params[i] = res;
 			else static if (is(PT == WebSocket)) {} // handled below
 			else static if (param_names[i].startsWith("_")) {
-				if (auto pv = param_names[i][1 .. $] in req.params) params[i].setVoid((*pv).webConvTo!PT);
-				else static if (!is(default_values[i] == void)) params[i].setVoid(default_values[i]);
+				if (auto pv = param_names[i][1 .. $] in req.params) {
+					got_error = !webConvTo(*pv, params[i], err);
+					// treat errors in route parameters as non-match
+					// FIXME: verify that the parameter is actually a route parameter!
+					if (got_error) return;
+				} else static if (!is(default_values[i] == void)) params[i].setVoid(default_values[i]);
 				else static if (!isNullable!PT) enforceHTTP(false, HTTPStatus.badRequest, "Missing request parameter for "~param_names[i]);
 			} else static if (is(PT == bool)) {
 				params[i] = param_names[i] in req.form || param_names[i] in req.query;
 			} else {
-				static if (!is(default_values[i] == void)) {
-					if (!readFormParamRec(req, params[i], param_names[i], false))
+				enum has_default = !is(default_values[i] == void);
+				ParamResult pres = readFormParamRec(req, params[i], param_names[i], !has_default, err);
+				static if (has_default) {
+					if (pres == ParamResult.skipped)
 						params[i].setVoid(default_values[i]);
-				} else {
-					readFormParamRec(req, params[i], param_names[i], true);
-				}
+				} else assert(pres != ParamResult.skipped);
+
+				if (pres == ParamResult.error)
+					got_error = true;
 			}
 		} catch (HTTPStatusException ex) {
 			throw ex;
 		} catch (Exception ex) {
+			got_error = true;
+			err.text = ex.msg;
+			err.debugText = ex.toString().sanitize;
+		}
+
+		if (got_error) {
 			static if (erruda.found && ERROR.length == 0) {
-				auto err = erruda.value.getError(ex, param_names[i]);
-				handleRequest!(erruda.value.displayMethodName, erruda.value.displayMethod)(req, res, instance, settings, err);
+				auto errnfo = erruda.value.getError(new Exception(err.text), err.field);
+				handleRequest!(erruda.value.displayMethodName, erruda.value.displayMethod)(req, res, instance, settings, errnfo);
 				return;
 			} else {
-				auto hex = new HTTPStatusException(HTTPStatus.badRequest, "Error handling parameter "~param_names[i]~": "~ex.msg);
-				hex.debugMessage = ex.toString().sanitize;
+				auto hex = new HTTPStatusException(HTTPStatus.badRequest, "Error handling field "~err.field~": "~err.text);
+				hex.debugMessage = err.debugText;
 				throw hex;
 			}
 		}
@@ -687,7 +723,7 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 			__traits(getMember, instance, M)(params);
 		} else {
 			auto ret = __traits(getMember, instance, M)(params);
-			ret = evaluateOutputModifiers!overload(ret);
+			ret = evaluateOutputModifiers!overload(ret, req, res);
 
 			static if (is(RET : Json)) {
 				res.writeJsonBody(ret);
@@ -732,15 +768,27 @@ private RequestContext createRequestContext(alias handler)(HTTPServerRequest req
 	static if (is(TranslateContext) && TranslateContext.languages.length) {
 		static if (TranslateContext.languages.length > 1) {
 			switch (ret.language) {
-				default: ret.tr = &tr!(TranslateContext, TranslateContext.languages[0]); break;
+				default:
+					ret.tr = &tr!(TranslateContext, TranslateContext.languages[0]);
+					ret.tr_plural = &tr!(TranslateContext, TranslateContext.languages[0]);
+					break;
 				foreach (lang; TranslateContext.languages[1 .. $]) {
 					case lang:
 						ret.tr = &tr!(TranslateContext, lang);
+						ret.tr_plural = &tr!(TranslateContext, lang);
 						break;
 				}
 			}
-		} else ret.tr = &tr!(TranslateContext, TranslateContext.languages[0]);
-	} else ret.tr = (t,c) => t;
+		} else {
+			ret.tr = &tr!(TranslateContext, TranslateContext.languages[0]);
+			ret.tr_plural = &tr!(TranslateContext, TranslateContext.languages[0]);
+		}
+	} else {
+		ret.tr = (t,c) => t;
+		// Without more knowledge about the requested language, the best we can do is return the msgid as a hint
+		// that either a po file is needed for the language, or that a translation entry does not exist for the msgid.
+		ret.tr_plural = (txt,ptxt,cnt,ctx) => !ptxt.length || cnt == 1 ? txt : ptxt;
+	}
 
 	return ret;
 }

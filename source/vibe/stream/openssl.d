@@ -6,7 +6,7 @@
 	Authors: Sönke Ludwig
 */
 module vibe.stream.openssl;
-
+version(Have_openssl):
 import vibe.core.log;
 import vibe.core.net;
 import vibe.core.stream;
@@ -41,7 +41,9 @@ version (VibePragmaLib) {
 
 version (VibeUseOldOpenSSL) private enum haveECDH = false;
 else private enum haveECDH = OPENSSL_VERSION_NUMBER >= 0x10001000;
-
+version(VibeForceALPN) enum alpn_forced = true;
+else enum alpn_forced = false;
+enum haveALPN = OPENSSL_VERSION_NUMBER >= 0x10200000 || alpn_forced;
 
 
 /**
@@ -62,7 +64,7 @@ final class OpenSSLStream : TLSStream {
 		TLSCertificateInformation m_peerCertificate;
 	}
 
-	this(Stream underlying, OpenSSLContext ctx, TLSStreamState state, string peer_name = null, NetworkAddress peer_address = NetworkAddress.init)
+	this(Stream underlying, OpenSSLContext ctx, TLSStreamState state, string peer_name = null, NetworkAddress peer_address = NetworkAddress.init, string[] alpn = null)
 	{
 		m_stream = underlying;
 		m_state = state;
@@ -94,12 +96,15 @@ final class OpenSSLStream : TLSStream {
 			final switch (state) {
 				case TLSStreamState.accepting:
 					//SSL_set_accept_state(m_tls);
-					enforceSSL(SSL_accept(m_tls), "Failed to accept SSL tunnel");
+					checkSSLRet(SSL_accept(m_tls), "Accepting SSL tunnel");
 					break;
 				case TLSStreamState.connecting:
-					SSL_ctrl(m_tls, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, cast(void*)peer_name.toStringz);
+					// a client stream can override the default ALPN setting for this context
+					if (alpn.length) setClientALPN(alpn);
+					if (peer_name.length)
+						SSL_ctrl(m_tls, SSL_CTRL_SET_TLSEXT_HOSTNAME, TLSEXT_NAMETYPE_host_name, cast(void*)peer_name.toStringz);
 					//SSL_set_connect_state(m_tls);
-					enforceSSL(SSL_connect(m_tls), "Failed to connect SSL tunnel.");
+					checkSSLRet(SSL_connect(m_tls), "Connecting TLS tunnel");
 					break;
 				case TLSStreamState.connected:
 					break;
@@ -118,7 +123,7 @@ final class OpenSSLStream : TLSStream {
 						version(Windows) import std.c.windows.winsock;
 						else import core.sys.posix.netinet.in_;
 
-						logWarn("peer name '%s' couldn't be verified, trying IP address.", vdata.peerName);
+						logDiagnostic("TLS peer name '%s' couldn't be verified, trying IP address.", vdata.peerName);
 						char* addr;
 						int addrlen;
 						switch (vdata.peerAddress.family) {
@@ -134,7 +139,7 @@ final class OpenSSLStream : TLSStream {
 						}
 
 						if (!verifyCertName(peer, GENERAL_NAME.GEN_IPADD, addr[0 .. addrlen])) {
-							logWarn("Error validating peer address");
+							logDiagnostic("Error validating TLS peer address");
 							result = X509_V_ERR_APPLICATION_VERIFICATION;
 						}
 					}
@@ -198,7 +203,7 @@ final class OpenSSLStream : TLSStream {
 	{
 		while( dst.length > 0 ){
 			int readlen = min(dst.length, int.max);
-			auto ret = checkSSLRet("SSL_read", SSL_read(m_tls, dst.ptr, readlen));
+			auto ret = checkSSLRet(SSL_read(m_tls, dst.ptr, readlen), "Reading from TLS stream");
 			//logTrace("SSL read %d/%d", ret, dst.length);
 			dst = dst[ret .. $];
 		}
@@ -209,7 +214,7 @@ final class OpenSSLStream : TLSStream {
 		const(ubyte)[] bytes = bytes_;
 		while( bytes.length > 0 ){
 			int writelen = min(bytes.length, int.max);
-			auto ret = checkSSLRet("SSL_write", SSL_write(m_tls, bytes.ptr, writelen));
+			auto ret = checkSSLRet(SSL_write(m_tls, bytes.ptr, writelen), "Writing to TLS stream");
 			//logTrace("SSL write %s", cast(string)bytes[0 .. ret]);
 			bytes = bytes[ret .. $];
 		}
@@ -225,7 +230,7 @@ final class OpenSSLStream : TLSStream {
 	void finalize()
 	{
 		if( !m_tls ) return;
-		logTrace("SSLStream finalize");
+		logTrace("OpenSSLStream finalize");
 
 		SSL_shutdown(m_tls);
 		SSL_free(m_tls);
@@ -240,22 +245,39 @@ final class OpenSSLStream : TLSStream {
 		writeDefault(stream, nbytes);
 	}
 
-	private int checkSSLRet(string what, int ret)
+	private int checkSSLRet(int ret, string what)
 	{
 		checkExceptions();
-		if (ret <= 0) {
-			const(char)* file = null, data = null;
-			int line;
-			int flags;
-			c_ulong eret;
-			char[120] ebuf;
-			while( (eret = ERR_get_error_line_data(&file, &line, &data, &flags)) != 0 ){
-				ERR_error_string(eret, ebuf.ptr);
-				logDiagnostic("%s error at %s:%d: %s (%s)", what, to!string(file), line, to!string(ebuf.ptr), flags & ERR_TXT_STRING ? to!string(data) : "-");
-			}
+		if (ret > 0) return ret;
+
+		string desc;
+		auto err = SSL_get_error(m_tls, ret);
+		switch (err) {
+			default: desc = format("Unknown error (%s)", err); break;
+			case SSL_ERROR_NONE: desc = "No error"; break;
+			case SSL_ERROR_ZERO_RETURN: desc = "SSL/TLS tunnel closed"; break;
+			case SSL_ERROR_WANT_READ: desc = "Need to block for read"; break;
+			case SSL_ERROR_WANT_WRITE: desc = "Need to block for write"; break;
+			case SSL_ERROR_WANT_CONNECT: desc = "Need to block for connect"; break;
+			case SSL_ERROR_WANT_ACCEPT: desc = "Need to block for accept"; break;
+			case SSL_ERROR_WANT_X509_LOOKUP: desc = "Need to block for certificate lookup"; break;
+			case SSL_ERROR_SYSCALL:
+			case SSL_ERROR_SSL:
+				return enforceSSL(ret, what);
 		}
+
+		const(char)* file = null, data = null;
+		int line;
+		int flags;
+		c_ulong eret;
+		char[120] ebuf;
+		while( (eret = ERR_get_error_line_data(&file, &line, &data, &flags)) != 0 ){
+			ERR_error_string(eret, ebuf.ptr);
+			logDiagnostic("%s error at %s:%d: %s (%s)", what, to!string(file), line, to!string(ebuf.ptr), flags & ERR_TXT_STRING ? to!string(data) : "-");
+		}
+
 		enforce(ret != 0, format("%s was unsuccessful with ret 0", what));
-		enforce(ret >= 0, format("%s returned an error: %s", what, SSL_get_error(m_tls, ret)));
+		enforce(ret >= 0, format("%s returned an error: %s", what, desc));
 		return ret;
 	}
 
@@ -294,6 +316,47 @@ final class OpenSSLStream : TLSStream {
 	{
 		return m_peerCertificate;
 	}
+
+	@property string alpn()
+	const {
+		static if (!haveALPN) assert(false, "OpenSSL support not compiled with ALPN enabled. Use VibeForceALPN.");
+		else {
+			char[32] data;
+			uint datalen;
+
+			SSL_get0_alpn_selected(m_ssl, cast(const char*) data.ptr, &datalen);
+			logDebug("alpn selected: ", data.to!string);
+			if (datalen > 0)
+				return data[0..datalen].idup;
+			else return null;
+		}
+	}
+
+	/// Invoked by client to offer alpn
+	private void setClientALPN(string[] alpn_list)
+	{
+		logDebug("SetClientALPN: ", alpn_list);
+		import vibe.utils.memory : allocArray, freeArray, manualAllocator;
+		ubyte[] alpn;
+		size_t len;
+		foreach (string alpn_val; alpn_list)
+			len += alpn_val.length + 1;
+		alpn = allocArray!ubyte(manualAllocator(), len);
+
+		size_t i;
+		foreach (string alpn_val; alpn_list)
+		{
+			alpn[i++] = cast(ubyte)alpn_val.length;
+			alpn[i .. i+alpn_val.length] = cast(ubyte[])alpn_val;
+			i += alpn_val.length;
+		}
+		assert(i == len);
+
+		static if (haveALPN)
+			SSL_set_alpn_protos(m_ssl, cast(const char*) alpn.ptr, cast(uint) len);
+
+		freeArray(manualAllocator(), alpn);
+	}
 }
 
 
@@ -313,6 +376,7 @@ final class OpenSSLContext : TLSContext {
 		TLSPeerValidationMode m_validationMode;
 		int m_verifyDepth;
 		TLSServerNameCallback m_sniCallback;
+		TLSALPNCallback m_alpnCallback;
 	}
 
 	this(TLSContextKind kind, TLSVersion ver = TLSVersion.any)
@@ -326,18 +390,26 @@ final class OpenSSLContext : TLSContext {
 		final switch (kind) {
 			case TLSContextKind.client:
 				final switch (ver) {
-					case TLSVersion.any: method = SSLv23_client_method(); break;
-					case TLSVersion.ssl3: method = SSLv3_client_method(); break;
+					case TLSVersion.any: method = SSLv23_client_method(); options |= SSL_OP_NO_SSLv3; break;
+					case TLSVersion.ssl3: method = SSLv23_client_method(); options |= SSL_OP_NO_SSLv2|SSL_OP_NO_TLSv1_1|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_2; break;
 					case TLSVersion.tls1: method = TLSv1_client_method(); break;
+					//case TLSVersion.tls1_1: method = TLSv1_1_client_method(); break;
+					//case TLSVersion.tls1_2: method = TLSv1_2_client_method(); break;
+					case TLSVersion.tls1_1: method = SSLv23_client_method(); options |= SSL_OP_NO_SSLv3|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_2; break;
+					case TLSVersion.tls1_2: method = SSLv23_client_method(); options |= SSL_OP_NO_SSLv3|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_1; break;
 					case TLSVersion.dtls1: method = DTLSv1_client_method(); break;
 				}
 				break;
 			case TLSContextKind.server:
 			case TLSContextKind.serverSNI:
 				final switch (ver) {
-					case TLSVersion.any: method = SSLv23_server_method(); break;
-					case TLSVersion.ssl3: method = SSLv3_server_method(); break;
+					case TLSVersion.any: method = SSLv23_server_method(); options |= SSL_OP_NO_SSLv3; break;
+					case TLSVersion.ssl3: method = SSLv23_server_method(); options |= SSL_OP_NO_SSLv2|SSL_OP_NO_TLSv1_1|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_2; break;
 					case TLSVersion.tls1: method = TLSv1_server_method(); break;
+					case TLSVersion.tls1_1: method = SSLv23_server_method(); options |= SSL_OP_NO_SSLv3|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_2; break;
+					case TLSVersion.tls1_2: method = SSLv23_server_method(); options |= SSL_OP_NO_SSLv3|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_1; break;
+					//case TLSVersion.tls1_1: method = TLSv1_1_server_method(); break;
+					//case TLSVersion.tls1_2: method = TLSv1_2_server_method(); break;
 					case TLSVersion.dtls1: method = DTLSv1_server_method(); break;
 				}
 				options |= SSL_OP_CIPHER_SERVER_PREFERENCE;
@@ -396,6 +468,46 @@ final class OpenSSLContext : TLSContext {
 	/// The kind of SSL context (client/server)
 	@property TLSContextKind kind() const { return m_kind; }
 
+	/// Callback function invoked by server to choose alpn
+	@property void alpnCallback(string delegate(string[]) alpn_chooser)
+	{
+		logDebug("Choosing ALPN callback");
+		m_alpnCallback = alpn_chooser;
+		static if (haveALPN) {
+			logDebug("Call select cb");
+			SSL_CTX_set_alpn_select_cb(m_ctx, &chooser, cast(void*)this);
+		}
+	}
+
+	/// Get the current ALPN callback function
+	@property string delegate(string[]) alpnCallback() const { return m_alpnCallback; }
+
+	/// Invoked by client to offer alpn
+	void setClientALPN(string[] alpn_list)
+	{
+		static if (!haveALPN) assert(false, "OpenSSL support not compiled with ALPN enabled. Use VibeForceALPN.");
+		else {
+			import vibe.utils.memory : allocArray, freeArray, manualAllocator;
+			ubyte[] alpn;
+			size_t len;
+			foreach (string alpn_value; alpn_list)
+				len += alpn_value.length + 1;
+			alpn = allocArray!ubyte(manualAllocator(), len);
+
+			size_t i;
+			foreach (string alpn_value; alpn_list)
+			{
+				alpn[i++] = cast(ubyte)alpn_value.length;
+				alpn[i .. i+alpn_value.length] = cast(ubyte[])alpn_value;
+				i += alpn_value.length;
+			}
+			assert(i == len);
+
+			SSL_CTX_set_alpn_protos(m_ctx, cast(const char*) alpn.ptr, cast(uint) len);
+
+			freeArray(manualAllocator(), alpn);
+		}
+	}
 
 	/** Specifies the validation level of remote peers.
 
@@ -838,6 +950,50 @@ private nothrow extern(C)
 {
 	import core.stdc.config;
 
+
+	int chooser(SSL* ssl, const(char)** output, ubyte* outlen, const(char) *input, uint inlen, void* arg) {
+		logDebug("Got chooser input: %s", input[0 .. inlen]);
+		OpenSSLContext ctx = cast(OpenSSLContext) arg;
+		import vibe.utils.array : AllocAppender, AppenderResetMode;
+		size_t i;
+		size_t len;
+		Appender!(string[]) alpn_list;
+		while (i < inlen)
+		{
+			len = cast(size_t) input[i];
+			++i;
+			ubyte[] proto = cast(ubyte[]) input[i .. i+len];
+			i += len;
+			alpn_list ~= cast(string)proto;
+		}
+
+		string alpn;
+
+		try { alpn = ctx.m_alpnCallback(alpn_list.data); } catch { }
+		if (alpn) {
+			i = 0;
+			while (i < inlen)
+			{
+				len = input[i];
+				++i;
+				ubyte[] proto = cast(ubyte[]) input[i .. i+len];
+				i += len;
+				if (cast(string) proto == alpn) {
+					*output = cast(const(char)*)proto.ptr;
+					*outlen = cast(ubyte) proto.length;
+				}
+			}
+		}
+
+		if (!output) {
+			logError("None of the proposed ALPN were selected: %s / falling back on HTTP/1.1", input[0 .. inlen]);
+			*output = cast(const(char)*)("http/1.1".ptr);
+			*outlen = cast(ubyte)("http/1.1".length);
+		}
+
+		return 0;
+	}
+
 	c_ulong onCryptoGetThreadID()
 	{
 		try {
@@ -956,3 +1112,13 @@ private BIO_METHOD s_bio_methods = {
 	&onBioFree,
 	null, // &onBioCallbackCtrl
 };
+
+private nothrow extern(C):
+static if (haveALPN) {
+	alias ALPNCallback = int function(SSL *ssl, const(char) **output, ubyte* outlen, const(char) *input, uint inlen, void *arg);
+	void SSL_CTX_set_alpn_select_cb(SSL_CTX *ctx, ALPNCallback cb, void *arg);
+	int SSL_set_alpn_protos(SSL *ssl, const char *data, uint len);
+	int SSL_CTX_set_alpn_protos(SSL_CTX *ctx, const char* protos, uint protos_len);
+	void SSL_get0_alpn_selected(const SSL *ssl, const char* data, uint *len);
+}
+const(ssl_method_st)* TLSv1_2_server_method();

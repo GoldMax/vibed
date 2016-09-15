@@ -1,8 +1,8 @@
 /**
 	Uses libasync
 
-	Copyright: © 2014 RejectedSoftware e.K.
-	Authors: Sönke Ludwig
+	Copyright: © 2014 RejectedSoftware e.K., GlobecSys Inc
+	Authors: Sönke Ludwig, Etienne Cimon
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 */
 module vibe.core.drivers.libasync;
@@ -12,36 +12,46 @@ version(VibeLibasyncDriver):
 import vibe.core.core;
 import vibe.core.driver;
 import vibe.core.drivers.threadedfile;
+import vibe.core.drivers.timerqueue;
 import vibe.core.log;
 import vibe.inet.path;
+import vibe.utils.array : FixedRingBuffer;
 
 import libasync;
+import libasync.internals.memory;
 import libasync.types : Status;
 
-import std.algorithm : min;
+import std.algorithm : min, max;
 import std.array;
+import std.container : Array;
+import std.conv;
+import std.datetime;
 import std.encoding;
 import std.exception;
-import std.conv;
 import std.string;
+import std.stdio : File;
 import std.typecons;
-import std.datetime;
+import std.c.stdio;
 
 import core.atomic;
 import core.memory;
 import core.thread;
 import core.sync.mutex;
-import std.container : Array;
+import core.sys.posix.netinet.in_;
 
-import vibe.core.drivers.timerqueue;
-import libasync.internals.memory;
-import vibe.utils.array : FixedRingBuffer;
-import std.stdio : File;
+version (Posix) import core.sys.posix.sys.socket;
+version (Windows) import core.sys.windows.winsock2;
 
 private __gshared EventLoop gs_evLoop;
 private EventLoop s_evLoop;
 private DriverCore s_driverCore;
 private shared int s_refCount; // will destroy async threads when 0
+
+version(Windows) extern(C) {
+	FILE* _wfopen(const(wchar)* filename, in wchar* mode);
+	int _wchmod(in wchar*, int);
+}
+
 EventLoop getEventLoop() nothrow
 {
 	if (s_evLoop is null)
@@ -71,12 +81,13 @@ final class LibasyncDriver : EventDriver {
 		debug Thread m_ownerThread;
 		AsyncTimer m_timerEvent;
 		TimerQueue!TimerInfo m_timers;
-		SysTime m_nextSched;
+		SysTime m_nextSched = SysTime.max;
+		shared AsyncSignal m_exitSignal;
 	}
 
 	this(DriverCore core) nothrow
 	{
-		//if (isControlThread) return;
+		assert(!isControlThread, "Libasync driver created in control thread");
 		try {			
 			import core.atomic : atomicOp;
 			s_refCount.atomicOp!"+="(1);
@@ -103,20 +114,25 @@ final class LibasyncDriver : EventDriver {
 		s_evLoop = getThreadEventLoop();
 		if (!gs_evLoop)
 			gs_evLoop = s_evLoop;
+			
+		m_exitSignal = new shared AsyncSignal(getEventLoop());
+		m_exitSignal.run({
+				m_break = true;
+			});
 		logTrace("Loaded libasync backend in thread %s", Thread.getThis().name);
 
 	}
 
-	static @property bool isControlThread() {
-		return Thread.getThis().isDaemon && Thread.getThis().name == "CmdProcessor" ;
+	static @property bool isControlThread() nothrow {
+		scope(failure) assert(false);
+		return Thread.getThis().isDaemon && Thread.getThis().name == "CmdProcessor";
 	}
 
 	void dispose() {
 		logTrace("Deleting event driver");
 		m_break = true;
 		getEventLoop().exit();
-		s_refCount.atomicOp!"-="(1);
-		if (s_refCount.atomicLoad() == 0) {
+		if (s_refCount.atomicOp!"-="(1) == 0) {
 			import libasync.threads : destroyAsyncThreads;
 			destroyAsyncThreads();
 		}
@@ -124,17 +140,19 @@ final class LibasyncDriver : EventDriver {
 
 	int runEventLoop()
 	{
-		while(!m_break && getEventLoop().loop()){
+		while(!m_break && getEventLoop().loop(int.max.msecs)){
+			processTimers();
 			getDriverCore().notifyIdle();
 		}
 		m_break = false;
-		logInfo("Event loop exit", m_break);
+		logDebug("Event loop exit %d", m_break);
 		return 0;
 	}
 
 	int runEventLoopOnce()
 	{
-		getEventLoop().loop(0.seconds);
+		getEventLoop().loop(int.max.msecs);
+		processTimers();
 		getDriverCore().notifyIdle();
 		logTrace("runEventLoopOnce exit");
 		return 0;
@@ -142,8 +160,8 @@ final class LibasyncDriver : EventDriver {
 
 	bool processEvents()
 	{
-		processTimers();
 		getEventLoop().loop(0.seconds);
+		processTimers();
 		if (m_break) {
 			m_break = false;
 			return false;
@@ -153,8 +171,8 @@ final class LibasyncDriver : EventDriver {
 
 	void exitEventLoop()
 	{
-		logInfo("Exiting (%s)", m_break);
-		m_break = true;
+		logDebug("Exiting (%s)", m_break);
+		m_exitSignal.trigger();
 
 	}
 
@@ -171,21 +189,38 @@ final class LibasyncDriver : EventDriver {
 	/** Resolves the given host name or IP address string. */
 	NetworkAddress resolveHost(string host, ushort family = 2, bool use_dns = true)
 	{
-		// todo: force use_dns false if host is an IP to avoid yielding... do this at a lower level?
-
-		NetworkAddress ret;
-
-		enum : ushort {
-			AF_INET = 2,
-			AF_INET6 = 23
-		}
-
 		import libasync.types : isIPv6;
 		isIPv6 is_ipv6;
+
 		if (family == AF_INET6)
 			is_ipv6 = isIPv6.yes;
 		else
 			is_ipv6 = isIPv6.no;
+		
+		import std.regex : regex, Captures, Regex, matchFirst, ctRegex;
+		import std.traits : ReturnType;
+
+		auto IPv4Regex = ctRegex!(`^((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.|$)){4}$`, ``);
+		auto IPv6Regex = ctRegex!(`^([0-9A-Fa-f]{0,4}:){2,7}([0-9A-Fa-f]{1,4}$|((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)(\.|$)){4})$`, ``);
+		auto ipv4 = matchFirst(host, IPv4Regex);
+		auto ipv6 = matchFirst(host, IPv6Regex);
+		if (!ipv4.empty)
+		{
+			if (!ipv4.empty)
+			is_ipv6 = isIPv6.no;
+			use_dns = false;
+		}
+		else if (!ipv6.empty)
+		{ // fixme: match host instead?
+			is_ipv6 = isIPv6.yes;
+			use_dns = false;
+		}
+		else
+		{
+			use_dns = true;
+		}
+		
+		NetworkAddress ret;
 
 		if (use_dns) {
 			bool done;
@@ -235,7 +270,7 @@ final class LibasyncDriver : EventDriver {
 
 	}
 
-	LibasyncTCPConnection connectTCP(NetworkAddress addr)
+	LibasyncTCPConnection connectTCP(NetworkAddress addr, NetworkAddress bind_addr)
 	{
 		AsyncTCPConnection conn = new AsyncTCPConnection(getEventLoop());
 
@@ -250,6 +285,8 @@ final class LibasyncDriver : EventDriver {
 			tcp_connection.acquireWriter();
 
 		tcp_connection.m_tcpImpl.conn = conn;
+		//conn.local = bind_addr;
+		conn.ip(bind_addr.toAddressString(), bind_addr.port);
 		conn.peer = addr;
 
 		enforce(conn.run(&tcp_connection.handler), "An error occured while starting a new connection: " ~ conn.error);
@@ -348,11 +385,12 @@ final class LibasyncDriver : EventDriver {
 	private void processTimers()
 	{
 		if (!m_timers.anyPending) return;
-
 		logTrace("Processing due timers");
 		// process all timers that have expired up to now
 		auto now = Clock.currTime(UTC());
-
+		// event loop timer will need to be rescheduled because we'll process everything until now
+		m_nextSched = SysTime.max;
+		
 		m_timers.consumeTimeouts(now, (timer, periodic, ref data) {
 			Task owner = data.owner;
 			auto callback = data.callback;
@@ -361,7 +399,7 @@ final class LibasyncDriver : EventDriver {
 
 			if (!periodic) releaseTimer(timer);
 			
-			if (owner && owner.running) {
+			if (owner && owner.running && owner != Task.getThis()) {
 				if (Task.getThis == Task.init) getDriverCore().resumeTask(owner);
 				else getDriverCore().yieldAndResumeTask(owner);
 			}
@@ -373,26 +411,22 @@ final class LibasyncDriver : EventDriver {
 
 	private void rescheduleTimerEvent(SysTime now)
 	{
-		// logTrace("Rescheduling timer event %s", Task.getThis());
-
+		logTrace("Rescheduling timer event %s", Task.getThis());
+		
+		// don't bother scheduling, the timers will be processed before leaving for the event loop
+		if (m_nextSched <= Clock.currTime(UTC()))
+			return;
+		
 		bool first;
 		auto next = m_timers.getFirstTimeout();
 		Duration dur;
 		if (next == SysTime.max) return;
-		dur = next - now;
-		if (dur == Duration.zero || dur.isNegative) {
-			processTimers();
-			next = m_timers.getFirstTimeout();
-			dur = next - now;
-		}
-		if (m_nextSched == next) {
-			logDebug("No upcoming timeouts beyond in: %s ms", (next-now).total!"msecs".to!string);
-			return;
-		}
-		else
+		dur = max(1.msecs, next - now);
+		if (m_nextSched != next)
 			m_nextSched = next;
-
-		assert(dur.total!"seconds"() <= int.max);
+		else return;
+		if (dur.total!"seconds"() >= int.max)
+			return; // will never trigger, don't bother
 		if (!m_timerEvent) {
 			//logTrace("creating new async timer");
 			m_timerEvent = new AsyncTimer(getEventLoop());
@@ -404,7 +438,7 @@ final class LibasyncDriver : EventDriver {
 			bool success = m_timerEvent.rearm(dur);
 			assert(success, "Failed to rearm timer");
 		}
-		logTrace("Rescheduled timer event for %s seconds in thread '%s' :: task '%s'", dur.total!"usecs" * 1e-6, Thread.getThis().name, Task.getThis());
+		//logTrace("Rescheduled timer event for %s seconds in thread '%s' :: task '%s'", dur.total!"usecs" * 1e-6, Thread.getThis().name, Task.getThis());
 	}
 
 	private void onTimerTimeout()
@@ -420,17 +454,18 @@ final class LibasyncDriver : EventDriver {
 	}
 }
 
-
+/// Writes or reads asynchronously (in another thread) for sizes > 64kb to benefit from kernel page cache
+/// in lower size operations.
 final class LibasyncFileStream : FileStream {
 	private {
 		Path m_path;
 		ulong m_size;
 		ulong m_offset = 0;
 		FileMode m_mode;
-
 		Task m_task;
+		Exception m_ex;
 		shared AsyncFile m_impl;
-
+		
 		bool m_started;
 		bool m_truncated;
 		bool m_finished;
@@ -443,29 +478,35 @@ final class LibasyncFileStream : FileStream {
 			m_size = getSize(path.toNativeString());
 		else {
 			auto path_str = path.toNativeString();
-			if (!exists(path_str))
+			if (exists(path_str))
+				removeFile(path);
 			{ // touch
-				import std.c.stdio;
 				import std.string : toStringz;
-				FILE * f = fopen(path_str.toStringz, "w");
+				version(Windows) {
+					import std.utf : toUTF16z;
+					auto path_str_utf = path_str.toUTF16z();
+					FILE* f = _wfopen(path_str_utf, "w");
+					_wchmod(path_str_utf, S_IREAD|S_IWRITE);
+				}
+				else FILE * f = fopen(path_str.toStringz, "w");
 				fclose(f);
 				m_truncated = true;
 			}
 		} 
 		m_path = path;
 		m_mode = mode;
-
+		
 		m_impl = new shared AsyncFile(getEventLoop());
 		m_impl.onReady(&handler);
-
+		
 		m_started = true;
 	}
-
+	
 	~this()
 	{
-		close();
+		try close(); catch {}
 	}
-
+	
 	@property Path path() const { return m_path; }
 	@property bool isOpen() const { return m_started; }
 	@property ulong size() const { return m_size; }
@@ -486,6 +527,11 @@ final class LibasyncFileStream : FileStream {
 			m_impl = null;
 		}
 		m_started = false;
+		if (m_task != Task() && Task.getThis() != Task())
+			getDriverCore().yieldAndResumeTask(m_task, new Exception("The file was closed during an operation"));
+		else if (m_task != Task() && Task.getThis() == Task())
+			getDriverCore().resumeTask(m_task, new Exception("The file was closed during an operation"));
+		
 	}
 
 	@property bool empty() const { assert(this.readable); return m_offset >= m_size; }
@@ -499,9 +545,9 @@ final class LibasyncFileStream : FileStream {
 
 	void read(ubyte[] dst)
 	{
+		scope(failure)
+			close();
 		assert(this.readable, "To read a file, it must be opened in a read-enabled mode.");
-		acquire();
-		scope(exit) release();
 		shared ubyte[] bytes = cast(shared) dst;
 		bool truncate_if_exists;
 		if (!m_truncated && m_mode == FileMode.createTrunc) {
@@ -509,44 +555,54 @@ final class LibasyncFileStream : FileStream {
 			m_truncated = true;
 			m_size = 0;
 		}
+		m_finished = false;
 		enforce(dst.length <= leastSize);
 		enforce(m_impl.read(m_path.toNativeString(), bytes, m_offset, true, truncate_if_exists), "Failed to read data from disk: " ~ m_impl.error);
-		while(!m_finished) {
+		
+		if (!m_finished) {
+			acquire();
+			scope(exit) release();
 			getDriverCore().yieldForEvent();
 		}
 		m_finished = false;
+		
+		if (m_ex) throw m_ex;
+		
 		m_offset += dst.length;
 		assert(m_impl.offset == m_offset, "Incoherent offset returned from file reader: " ~ m_offset.to!string ~ "B assumed but the implementation is at: " ~ m_impl.offset.to!string ~ "B");
 	}
 
-	alias write = Stream.write;
+	alias Stream.write write;
 	void write(in ubyte[] bytes_)
 	{
 		assert(this.writable, "To write to a file, it must be opened in a write-enabled mode.");
-		acquire();
-		scope(exit) release();
+		
 		shared const(ubyte)[] bytes = cast(shared const(ubyte)[]) bytes_;
-
+		
 		bool truncate_if_exists;
 		if (!m_truncated && m_mode == FileMode.createTrunc) {
 			truncate_if_exists = true;
 			m_truncated = true;
 			m_size = 0;
 		}
-
+		m_finished = false;
+		
 		if (m_mode == FileMode.append)
 			enforce(m_impl.append(m_path.toNativeString(), cast(shared ubyte[]) bytes, true, truncate_if_exists), "Failed to write data to disk: " ~ m_impl.error);
 		else
 			enforce(m_impl.write(m_path.toNativeString(), bytes, m_offset, true, truncate_if_exists), "Failed to write data to disk: " ~ m_impl.error);
-
-		while(!m_finished) {
+		
+		if (!m_finished) {
+			acquire();
+			scope(exit) release();
 			getDriverCore().yieldForEvent();
 		}
 		m_finished = false;
-
+		
+		if (m_ex) throw m_ex;
+		
 		if (m_mode == FileMode.append) {
 			m_size += bytes.length;
-			import std.file : getSize;
 		}
 		else {
 			m_offset += bytes.length;
@@ -554,8 +610,7 @@ final class LibasyncFileStream : FileStream {
 				m_size += m_offset - m_size;
 			assert(m_impl.offset == m_offset, "Incoherent offset returned from file writer.");
 		}
-		import std.file : getSize;
-		assert(getSize(m_path.toNativeString()) == m_size, "Incoherency between local size and filesize: " ~ m_size.to!string ~ "B assumed for a file of size " ~ getSize(m_path.toNativeString()).to!string ~ "B");
+		//assert(getSize(m_path.toNativeString()) == m_size, "Incoherency between local size and filesize: " ~ m_size.to!string ~ "B assumed for a file of size " ~ getSize(m_path.toNativeString()).to!string ~ "B");
 	}
 
 	void write(InputStream stream, ulong nbytes = 0)
@@ -566,6 +621,7 @@ final class LibasyncFileStream : FileStream {
 	void flush()
 	{
 		assert(this.writable, "To write to a file, it must be opened in a write-enabled mode.");
+		
 	}
 
 	void finalize()
@@ -585,19 +641,17 @@ final class LibasyncFileStream : FileStream {
 		assert(Task.getThis() == Task() || m_task == Task(), "Acquiring FileStream that is already owned.");
 		m_task = Task.getThis();
 	}
-
-	bool amOwner()
-	{
-		return m_task == Task.getThis();
-	}
-
+	
 	private void handler() {
+		// This may be called by the event loop if read/write > 64kb and another thread was delegated
 		Exception ex;
+		
 		if (m_impl.status.code != Status.OK)
 			ex = new Exception(m_impl.error);
 		m_finished = true;
 		if (m_task != Task())
 			getDriverCore().resumeTask(m_task, ex);
+		else m_ex = ex;
 	}
 }
 
@@ -753,23 +807,32 @@ final class LibasyncManualEvent : ManualEvent {
 		Array!(void*) ms_signals;
 
 		core.sync.mutex.Mutex m_mutex;
+
+		@property size_t instanceID() nothrow { return atomicLoad(m_instance); }
+		@property void instanceID(size_t instance) nothrow{ atomicStore(m_instance, instance); }
 	}
 
 	this(LibasyncDriver driver)
-	{
+	nothrow {
+		static if (__VERSION__ <= 2066) scope (failure) assert(false);
 		m_mutex = new core.sync.mutex.Mutex;
-		m_instance = generateID();
-		assert(m_instance != 0);
+		instanceID = generateID();
 	}
 
 	~this()
 	{
-		recycleID(m_instance);
-		foreach (ref signal; ms_signals[]) {
-			if (signal) {
-				(cast(shared AsyncSignal) signal).kill();
-				signal = null;
+		try {
+			recycleID(instanceID);
+
+			foreach (ref signal; ms_signals[]) {
+				if (signal) {
+					(cast(shared AsyncSignal) signal).kill();
+					signal = null;
+				}
 			}
+		} catch (Exception e) {
+			import std.stdio;
+			writefln("Exception thrown while finalizing LibasyncManualEvent: %s", e.msg);
 		}
 	}
 
@@ -800,11 +863,12 @@ final class LibasyncManualEvent : ManualEvent {
 
 		bool signal_exists;
 
-		if (s_eventWaiters.length <= m_instance) {
+		size_t instance = instanceID;
+		if (s_eventWaiters.length <= instance)
 			expandWaiters();
-		}
-		logTrace("Acquire event ID#%d", m_instance);
-		auto taskList = s_eventWaiters[m_instance];
+
+		logTrace("Acquire event ID#%d", instance);
+		auto taskList = s_eventWaiters[instance];
 		if (taskList.length > 0)
 			signal_exists = true;
 
@@ -813,7 +877,7 @@ final class LibasyncManualEvent : ManualEvent {
 			sig.run(&onSignal);
 			synchronized (m_mutex) ms_signals.insertBack(cast(void*)sig);
 		}
-		s_eventWaiters[m_instance].insertBack(Task.getThis());
+		s_eventWaiters[instance].insertBack(Task.getThis());
 	}
 
 	void release()
@@ -821,12 +885,14 @@ final class LibasyncManualEvent : ManualEvent {
 		assert(amOwner(), "Releasing non-acquired signal.");
 
 		import std.algorithm : countUntil;
-		auto taskList = s_eventWaiters[m_instance];
-		auto idx = taskList[].countUntil!((a, b) => a == b)(Task.getThis());
-		logTrace("Release event ID#%d", m_instance);
-		s_eventWaiters[m_instance].linearRemove(taskList[idx .. idx+1]);
 
-		if (s_eventWaiters[m_instance].empty) {
+		size_t instance = instanceID;
+		auto taskList = s_eventWaiters[instance];
+		auto idx = taskList[].countUntil!((a, b) => a == b)(Task.getThis());
+		logTrace("Release event ID#%d", instance);
+		s_eventWaiters[instance].linearRemove(taskList[idx .. idx+1]);
+
+		if (s_eventWaiters[instance].empty) {
 			removeMySignal();
 		}
 	}
@@ -834,8 +900,9 @@ final class LibasyncManualEvent : ManualEvent {
 	bool amOwner()
 	{
 		import std.algorithm : countUntil;
-		if (s_eventWaiters.length <= m_instance) return false;
-		auto taskList = s_eventWaiters[m_instance];
+		size_t instance = instanceID;
+		if (s_eventWaiters.length <= instance) return false;
+		auto taskList = s_eventWaiters[instance];
 		if (taskList.length == 0) return false;
 
 		auto idx = taskList[].countUntil!((a, b) => a == b)(Task.getThis());
@@ -893,9 +960,12 @@ final class LibasyncManualEvent : ManualEvent {
 	private void expandWaiters() {
 		size_t maxID;
 		synchronized(gs_mutex) maxID = gs_maxID;
-		s_eventWaiters.reserve(maxID + 1);
+		s_eventWaiters.reserve(maxID);
 		logTrace("gs_maxID: %d", maxID);
-		foreach (i; s_eventWaiters.length .. s_eventWaiters.capacity) {
+		size_t s_ev_len = s_eventWaiters.length;
+		size_t s_ev_cap = s_eventWaiters.capacity;
+		assert(maxID > s_eventWaiters.length);
+		foreach (i; s_ev_len .. s_ev_cap) {
 			s_eventWaiters.insertBack(Array!Task.init);
 		}
 	}
@@ -907,8 +977,9 @@ final class LibasyncManualEvent : ManualEvent {
 			auto thread = Thread.getThis();
 			auto core = getDriverCore();
 
-			logTrace("Got context: %d", m_instance);
-			foreach (Task task; s_eventWaiters[m_instance][]) {
+			size_t instance = instanceID;
+			logTrace("Got context: %d", instance);
+			foreach (Task task; s_eventWaiters[instance][]) {
 				logTrace("Task Found");
 				core.resumeTask(task);
 			}
@@ -916,7 +987,6 @@ final class LibasyncManualEvent : ManualEvent {
 			logError("Exception while handling signal event: %s", e.msg);
 			try logDebug("Full error: %s", sanitize(e.msg));
 			catch (Exception) {}
-			debug assert(false);
 		}
 	}
 }
@@ -951,6 +1021,8 @@ final class LibasyncTCPListener : TCPListener {
 
 	}
 
+	@property NetworkAddress bindAddress() { return m_local; }
+
 	@property void delegate(TCPConnection) connectionCallback() { return m_connectionCallback; }
 
 	private void delegate(TCPEvent) initConnection(AsyncTCPConnection conn) {
@@ -973,10 +1045,11 @@ final class LibasyncTCPListener : TCPListener {
 	}
 }
 
-final class LibasyncTCPConnection : TCPConnection {
-
+final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 	private {
-		FixedRingBuffer!ubyte m_readBuffer; // todo: use a file failover for tasks too busy to read
+		FixedRingBuffer!ubyte m_readBuffer;
+		ubyte[] m_buffer;
+		ubyte[] m_slice;
 		TCPConnectionImpl m_tcpImpl;
 		Settings m_settings;
 
@@ -989,11 +1062,41 @@ final class LibasyncTCPConnection : TCPConnection {
 		// fd_t socket;
 	}
 
+	ubyte[] readChunk(ubyte[] buffer = null)
+	{
+		logTrace("readBuf TCP: %d", buffer.length);
+		import std.algorithm : swap;
+		ubyte[] ret;
+
+		if (m_slice.length > 0) {
+			swap(ret, m_slice);
+			logTrace("readBuf returned instantly with slice length: %d", ret.length);
+			return ret;
+		}
+
+		if (m_readBuffer.length > 0) {
+			size_t amt = min(buffer.length, m_readBuffer.length);
+			m_readBuffer.read(buffer[0 .. amt]);
+			logTrace("readBuf returned with existing amount: %d", amt);
+			return buffer[0 .. amt];
+		}
+
+		if (buffer) {
+			m_buffer = buffer;
+			m_readBuffer.dispose();
+		}
+
+		leastSize();
+
+		swap(ret, m_slice);
+		logTrace("readBuf returned with buffered length: %d", ret.length);
+		return ret;
+	}
+
 	this(AsyncTCPConnection conn, void delegate(TCPConnection) cb)
 	in { assert(conn !is null); }
 	body {
 		m_settings.onConnect = cb;
-		m_readBuffer.freeOnDestruct = true;
 		m_readBuffer.capacity = 64*1024;
 	}
 
@@ -1033,7 +1136,11 @@ final class LibasyncTCPConnection : TCPConnection {
 		logTrace("dataAvailableForRead");
 		acquireReader();
 		scope(exit) releaseReader();
-		return !m_readBuffer.empty;
+		return !readEmpty;
+	}
+
+	private @property bool readEmpty() {
+		return (m_buffer && !m_slice) || (!m_buffer && m_readBuffer.empty);
 	}
 
 	@property string peerAddress() const { return m_tcpImpl.conn.peer.toString(); }
@@ -1045,7 +1152,7 @@ final class LibasyncTCPConnection : TCPConnection {
 
 	@property ulong leastSize()
 	{
-		logTrace("leastSize()");
+		logTrace("leastSize TCP");
 		acquireReader();
 		scope(exit) releaseReader();
 
@@ -1056,33 +1163,37 @@ final class LibasyncTCPConnection : TCPConnection {
 			getDriverCore().yieldForEvent();
 			m_settings.reader.noExcept = false;
 		}
-		return m_readBuffer.length;
+		return (m_slice.length > 0) ? m_slice.length : m_readBuffer.length;
 	}
 
 	void close()
 	{
-		logTrace("%s", "Close enter");
+		logTrace("Close TCP enter");
 		//logTrace("closing");
 		acquireWriter();
 		scope(exit) releaseWriter();
 
 		// checkConnected();
-
-		onClose();
+		m_readBuffer.dispose();
+		onClose(null, false);
 	}
 
-	bool waitForData(Duration timeout = 0.seconds)
+	bool waitForData(Duration timeout = Duration.max)
 	{
+		// 0 seconds is max. CHanging this would be breaking, might as well use -1 for immediate
+		if (timeout == 0.seconds)
+			timeout = Duration.max;
 		logTrace("WaitForData enter, timeout %s :: Ptr %s",  timeout.toString(), (cast(void*)this).to!string);
 		acquireReader();
 		auto _driver = getEventDriver();
 		auto tm = _driver.createTimer(null);
-		scope(exit) {
+		scope(exit) { 
+			_driver.stopTimer(tm);
 			_driver.releaseTimer(tm);
 			releaseReader();
 		}
 		_driver.m_timers.getUserData(tm).owner = Task.getThis();
-		_driver.rearmTimer(tm, timeout, false);
+		if (timeout != Duration.max) _driver.rearmTimer(tm, timeout, false);
 		logTrace("waitForData TCP");
 		while (m_readBuffer.empty) {
 			if (!connected) return false;
@@ -1095,7 +1206,7 @@ final class LibasyncTCPConnection : TCPConnection {
 				getDriverCore().yieldForEvent();
 				m_settings.reader.noExcept = false;
 			}
-			if (!_driver.isTimerPending(tm)) {
+			if (timeout != Duration.max && !_driver.isTimerPending(tm)) {
 				logTrace("WaitForData TCP: timer signal");
 				return false;
 			}
@@ -1107,20 +1218,21 @@ final class LibasyncTCPConnection : TCPConnection {
 
 	const(ubyte)[] peek()
 	{
-		logTrace("%s", "Peek enter");
+		logTrace("Peek TCP enter");
 		acquireReader();
 		scope(exit) releaseReader();
 
-		if (!m_readBuffer.empty)
-			return m_readBuffer.peek();
+		if (!readEmpty)
+			return (m_slice.length > 0) ? cast(const(ubyte)[]) m_slice : m_readBuffer.peek();
 		else
 			return null;
 	}
 
 	void read(ubyte[] dst)
 	{
-		assert(dst !is null);
-		logTrace("Read enter :: ptr %s",  (cast(void*)this).to!string);
+		if (!dst.length) return;
+		assert(dst !is null && !m_slice);
+		logTrace("Read TCP");
 		acquireReader();
 		scope(exit) releaseReader();
 		while( dst.length > 0 ){
@@ -1241,22 +1353,72 @@ final class LibasyncTCPConnection : TCPConnection {
 		logTrace("Check Connected");
 	}
 
+	private bool tryReadBuf() {
+		//logTrace("TryReadBuf with m_buffer: %s", m_buffer.length);
+		if (m_buffer) {
+			ubyte[] buf = m_buffer[m_slice.length .. $];
+			uint ret = conn.recv(buf);
+			logTrace("Received: %s", buf[0 .. ret]);
+			// check for overflow
+			if (ret == buf.length) {
+				logTrace("Overflow detected, revert to ring buffer");
+				m_slice = null;
+				m_readBuffer.capacity = 64*1024;
+				m_readBuffer.put(buf);
+				m_buffer = null;
+				return false; // cancel slices and revert to the fixed ring buffer
+			}
+
+			if (m_slice.length > 0) { 
+				//logDebug("post-assign m_slice "); 
+				m_slice = m_slice.ptr[0 .. m_slice.length + ret];
+			}
+			else {
+				//logDebug("using m_buffer");
+				m_slice = m_buffer[0 .. ret];
+			}
+			return true;
+		}	
+		logTrace("TryReadBuf exit with %d bytes in m_slice, %d bytes in m_readBuffer ", m_slice.length, m_readBuffer.length);
+
+		return false;
+	}
+
 	private void onRead() {
 		m_mustRecv = true; // assume we didn't receive everything
+
+		if (tryReadBuf()) {
+			m_mustRecv = false;
+			return;
+		}
+
+		assert(!m_slice);
+
 		logTrace("OnRead with %s", m_readBuffer.freeSpace);
+		
 		while( m_readBuffer.freeSpace > 0 ) {
 			ubyte[] dst = m_readBuffer.peekDst();
 			assert(dst.length <= int.max);
 			logTrace("Try to read up to bytes: %s", dst.length);
-			uint ret = conn.recv(dst);
-			if( ret > 0 ){
-				logTrace("received bytes: %s", ret);
-				m_readBuffer.putN(ret);
-				if (ret < dst.length) { // the kernel's buffer is too empty...
-					m_mustRecv = false; // ..so we have everything!
-					break;
+			bool read_more;
+			do {
+				uint ret = conn.recv(dst);
+				if( ret > 0 ){
+					logTrace("received bytes: %s", ret);
+					m_readBuffer.putN(ret);
+				} 
+				read_more = ret == dst.length;
+				// ret == 0! let's look for some errors
+				if (read_more) {
+					if (m_readBuffer.freeSpace == 0) 
+						m_readBuffer.capacity = m_readBuffer.capacity*2;
+					dst = m_readBuffer.peekDst();
 				}
-			}
+			} while( read_more );
+			if (conn.status.code == Status.ASYNC) {
+				m_mustRecv = false; // we'll have to wait
+				break; // the kernel's buffer is empty
+			}			
 			// ret == 0! let's look for some errors
 			else if (conn.status.code == Status.ASYNC) {
 				m_mustRecv = false; // we'll have to wait
@@ -1280,7 +1442,7 @@ final class LibasyncTCPConnection : TCPConnection {
 	/* The AsyncTCPConnection object will be automatically disposed when this returns.
 	 * We're given some time to cleanup.
 	*/
-	private void onClose(in string msg = null) {
+	private void onClose(in string msg = null, bool wake_ex = true) {
 		logTrace("onClose");
 
 		if (msg)
@@ -1291,7 +1453,6 @@ final class LibasyncTCPConnection : TCPConnection {
 
 			if (m_tcpImpl.conn && m_tcpImpl.conn.isConnected) {
 				m_tcpImpl.conn.kill(Task.getThis() != Task.init); // close the connection
-				destroy(m_readBuffer);
 				m_tcpImpl.conn = null;
 			}
 		}
@@ -1299,9 +1460,9 @@ final class LibasyncTCPConnection : TCPConnection {
 			return;
 		}
 		Exception ex;
-		if (!msg)
+		if (!msg && wake_ex)
 			ex = new Exception("Connection closed");
-		else	ex = new Exception(msg);
+		else if (wake_ex)	ex = new Exception(msg);
 
 
 		Task reader = m_settings.reader.task;
@@ -1313,7 +1474,7 @@ final class LibasyncTCPConnection : TCPConnection {
 		if (hasUniqueReader && Task.getThis() != reader) {
 			getDriverCore().resumeTask(reader, m_settings.reader.noExcept?null:ex);
 		}
-		if (hasUniqueWriter && Task.getThis() != writer) {
+		if (hasUniqueWriter && Task.getThis() != writer && wake_ex) {
 			getDriverCore().resumeTask(writer, ex);
 		}
 	}
@@ -1327,14 +1488,14 @@ final class LibasyncTCPConnection : TCPConnection {
 
 			try m_settings.onConnect(this);
 			catch ( Exception e) {
-				logError("%s", e.toString);
+				//logError(e.toString);
 				throw e;
 			}
 			catch ( Throwable e) {
 				logError("%s", e.toString);
 				throw e;
 			}
-			if (inbound) onClose();
+			if (inbound) close();
 		}
 		logTrace("Finished callback");
 	}
@@ -1351,7 +1512,6 @@ final class LibasyncTCPConnection : TCPConnection {
 					runTask(&onConnect);
 				else onConnect();
 				m_settings.onConnect = null;
-
 				break;
 			case TCPEvent.READ:
 				// fill the read buffer and resume any task if waiting
@@ -1359,7 +1519,7 @@ final class LibasyncTCPConnection : TCPConnection {
 				catch (Exception e) ex = e;
 				if (m_settings.reader.isWaiting)
 					getDriverCore().resumeTask(m_settings.reader.task, ex);
-				break;
+				goto case TCPEvent.WRITE; // sometimes the kernel notified write with read events
 			case TCPEvent.WRITE:
 				// The kernel is ready to have some more data written, all we need to do is wake up the writer
 				if (m_settings.writer.isWaiting)
@@ -1581,7 +1741,8 @@ __gshared Array!size_t gs_availID;
 __gshared size_t gs_maxID;
 __gshared core.sync.mutex.Mutex gs_mutex;
 
-private size_t generateID() {
+private size_t generateID()
+nothrow {
 	size_t idx;
 	import std.algorithm : max;
 	try {
@@ -1598,7 +1759,7 @@ private size_t generateID() {
 			idx = getIdx();
 			if (idx == 0) {
 				import std.range : iota;
-				gs_availID.insert( iota(gs_maxID + 1, max(32, gs_maxID * 2), 1) );
+				gs_availID.insert( iota(gs_maxID + 1, max(32, gs_maxID * 2 + 1), 1) );
 				gs_maxID = gs_availID[$-1];
 				idx = getIdx();
 			}
@@ -1607,12 +1768,12 @@ private size_t generateID() {
 		assert(false, "Failed to generate necessary ID for Manual Event waiters: " ~ e.msg);
 	}
 
-	return idx;
+	return idx - 1;
 }
 
 void recycleID(size_t id) {
 	try {
-		synchronized(gs_mutex) gs_availID.insert(id);
+		synchronized(gs_mutex) gs_availID.insert(id+1);
 	}
 	catch (Exception e) {
 		assert(false, "Error destroying Manual Event ID: " ~ id.to!string ~ " [" ~ e.msg ~ "]");

@@ -202,12 +202,15 @@ auto computeAttributedParameter(alias FUNCTION, string NAME, ARGS...)(ARGS args)
 */
 auto computeAttributedParameterCtx(alias FUNCTION, string NAME, T, ARGS...)(T ctx, ARGS args)
 {
-	import std.typetuple : Filter;
+	static if (__VERSION__ >= 2072)
+		import std.typetuple : AliasSeq, Filter;
+	else
+		import std.typetuple : AliasSeq = TypeTuple, Filter;
 	static assert(IsAttributedParameter!(FUNCTION, NAME), "Missing @before attribute for parameter "~NAME);
 	alias input_attributes = Filter!(isInputAttribute, __traits(getAttributes, FUNCTION));
 	foreach (att; input_attributes)
 		static if (att.parameter == NAME) {
-			static if (is(typeof(__traits(parent, att.evaluator).init) == T)) {
+			static if (!__traits(isStaticFunction, att.evaluator)) {
 				static if (is(typeof(ctx.invokeProxy__!(att.evaluator)(args))))
 					return ctx.invokeProxy__!(att.evaluator)(args);
 				else return __traits(getMember, ctx, __traits(identifier, att.evaluator))(args);
@@ -245,9 +248,13 @@ unittest {
 /**
 	Processes the function return value using all @after modifiers.
 */
-ReturnType!FUNCTION evaluateOutputModifiers(alias FUNCTION)(ReturnType!FUNCTION result)
+ReturnType!FUNCTION evaluateOutputModifiers(alias FUNCTION, ARGS...)(ReturnType!FUNCTION result, ARGS args)
 {
+	import std.string : format;
+	import std.traits : ParameterTypeTuple, ReturnType, fullyQualifiedName;
 	import std.typetuple : Filter;
+	import vibe.internal.meta.typetuple : Compare, Group;
+
 	alias output_attributes = Filter!(isOutputAttribute, __traits(getAttributes, FUNCTION));
 	foreach (OA; output_attributes) {
 		import std.typetuple : TypeTuple;
@@ -255,18 +262,18 @@ ReturnType!FUNCTION evaluateOutputModifiers(alias FUNCTION)(ReturnType!FUNCTION 
 		static assert (
 			Compare!(
 				Group!(ParameterTypeTuple!(OA.modificator)),
-				Group!(ReturnType!Function, StoredArgTypes.expand)
+				Group!(ReturnType!FUNCTION, ARGS)
 			),
 			format(
 				"Output attribute function '%s%s' argument list " ~
 				"does not match provided argument list %s",
 				fullyQualifiedName!(OA.modificator),
 				ParameterTypeTuple!(OA.modificator).stringof,
-				TypeTuple!(ReturnType!Function, StoredArgTypes.expand).stringof
+				TypeTuple!(ReturnType!FUNCTION, ARGS).stringof
 			)
 		);
 
-		result = OA.modificator(result, m_storedArgs);
+		result = OA.modificator(result, args);
 	}
 	return result;
 }

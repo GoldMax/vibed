@@ -1,7 +1,7 @@
 /**
 	MongoCollection class
 
-	Copyright: © 2012-2014 RejectedSoftware e.K.
+	Copyright: © 2012-2016 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
@@ -9,6 +9,7 @@ module vibe.db.mongo.collection;
 
 public import vibe.db.mongo.cursor;
 public import vibe.db.mongo.connection;
+public import vibe.db.mongo.flags;
 
 import vibe.core.log;
 import vibe.db.mongo.client;
@@ -85,6 +86,11 @@ struct MongoCollection {
 
 	/**
 	  Inserts new documents into the collection.
+
+	  Note that if the `_id` field of the document(s) is not set, typically
+	  using `BsonObjectID.generate()`, the server will generate IDs
+	  automatically. If you need to know the IDs of the inserted documents,
+	  you need to generate them locally.
 
 	  Throws: Exception if a DB communication error occured.
 	  See_Also: $(LINK http://www.mongodb.org/display/DOCS/Inserting)
@@ -171,10 +177,18 @@ struct MongoCollection {
 	void remove()() { remove(Bson.emptyObject); }
 
 	/**
-	  Combines a modify and find operation to a single atomic operation.
+		Combines a modify and find operation to a single atomic operation.
 
-	  Throws Exception if a DB communication error occured.
-	  See_Also: $(LINK http://docs.mongodb.org/manual/reference/command/findAndModify)
+		Params:
+			query = MongoDB query expression to identify the matched document
+			update = Update expression for the matched document
+			returnFieldSelector = Optional map of fields to return in the response
+
+		Throws:
+			An `Exception` will be thrown if an error occurs in the
+			communication with the database server.
+
+		See_Also: $(LINK http://docs.mongodb.org/manual/reference/command/findAndModify)
 	 */
 	Bson findAndModify(T, U, V)(T query, U update, V returnFieldSelector)
 	{
@@ -201,6 +215,49 @@ struct MongoCollection {
 	}
 
 	/**
+		Combines a modify and find operation to a single atomic operation with generic options support.
+
+		Params:
+			query = MongoDB query expression to identify the matched document
+			update = Update expression for the matched document
+			options = Generic BSON object that contains additional options
+				fields, such as `"new": true`
+
+		Throws:
+			An `Exception` will be thrown if an error occurs in the
+			communication with the database server.
+
+		See_Also: $(LINK http://docs.mongodb.org/manual/reference/command/findAndModify)
+	 */
+	Bson findAndModifyExt(T, U, V)(T query, U update, V options)
+	{
+		auto bopt = serializeToBson(options);
+		assert(bopt.type == Bson.Type.object,
+			"The options parameter to findAndModifyExt must be a BSON object.");
+		
+		Bson cmd = Bson.emptyObject;
+		cmd["findAndModify"] = m_name;
+		cmd["query"] = serializeToBson(query);
+		cmd["update"] = serializeToBson(update);
+		foreach (string key, value; bopt)
+			cmd[key] = value;
+		auto ret = database.runCommand(cmd);
+		enforce(ret["ok"].get!double != 0, "findAndModifyExt failed.");
+		return ret["value"];
+	}
+
+	///
+	unittest {
+		import vibe.db.mongo.mongo;
+
+		void test()
+		{
+			auto coll = connectMongoDB("127.0.0.1").getCollection("test");
+			coll.findAndModifyExt(["name": "foo"], ["$set": ["value": "bar"]], ["new": true]);
+		}
+	}
+
+	/**
 		Counts the results of the specified query expression.
 
 		Throws Exception if a DB communication error occured.
@@ -219,12 +276,12 @@ struct MongoCollection {
 		cmd.count = m_name;
 		cmd.query = query;
 		auto reply = database.runCommand(cmd);
-		enforce(reply.ok.opt!double == 1 || reply.ok.opt!int == 1, "Count command failed.");
-		switch (reply.n.type) with (Bson.Type) {
+		enforce(reply["ok"].opt!double == 1 || reply["ok"].opt!int == 1, "Count command failed.");
+		switch (reply["n"].type) with (Bson.Type) {
 			default: assert(false, "Unsupported data type in BSON reply for COUNT");
-			case double_: return cast(ulong)reply.n.get!double; // v2.x
-			case int_: return reply.n.get!int; // v3.x
-			case long_: return reply.n.get!long; // just in case
+			case double_: return cast(ulong)reply["n"].get!double; // v2.x
+			case int_: return reply["n"].get!int; // v3.x
+			case long_: return reply["n"].get!long; // just in case
 		}
 	}
 
@@ -299,8 +356,8 @@ struct MongoCollection {
 	/**
 		Creates or updates an index.
 
-		Note that the overload taking an associative array of field orders is
-		scheduled for deprecation. Since the order of fields matters, it is
+		Note that the overload taking an associative array of field orders
+		will be removed. Since the order of fields matters, it is
 		only suitable for single-field indices.
 	*/
 	void ensureIndex(scope const(Tuple!(string, int))[] field_orders, IndexFlags flags = IndexFlags.None, Duration expire_time = 0.seconds)
@@ -332,6 +389,7 @@ struct MongoCollection {
 		database["system.indexes"].insert(doc);
 	}
 	/// ditto
+	deprecated("Use the overload taking an array of field_orders instead.")
 	void ensureIndex(int[string] field_orders, IndexFlags flags = IndexFlags.None, ulong expireAfterSeconds = 0)
 	{
 		Tuple!(string, int)[] orders;
@@ -351,7 +409,7 @@ struct MongoCollection {
 		cmd.dropIndexes = m_name;
 		cmd.index = name;
 		auto reply = database.runCommand(cmd);
-		enforce(reply.ok.get!double == 1, "dropIndex command failed.");
+		enforce(reply["ok"].get!double == 1, "dropIndex command failed.");
 	}
 
 	void drop() {
@@ -362,7 +420,7 @@ struct MongoCollection {
 		CMD cmd;
 		cmd.drop = m_name;
 		auto reply = database.runCommand(cmd);
-		enforce(reply.ok.get!double == 1, "drop command failed.");
+		enforce(reply["ok"].get!double == 1, "drop command failed.");
 	}
 }
 
@@ -391,6 +449,52 @@ unittest {
 		// JSON is another possibility
 		Json jusr = parseJsonString(`{"name": "admin", "password": "secret"}`);
 		users.insert(jusr);
+	}
+}
+
+/// Using the type system to define a document "schema"
+unittest {
+	import vibe.db.mongo.mongo;
+	import vibe.data.serialization : name;
+	import std.typecons : Nullable;
+
+	// Nested object within a "User" document
+	struct Address {
+		string name;
+		string street;
+		int zipCode;
+	}
+
+	// The document structure of the "myapp.users" collection
+	struct User {
+		@name("_id") BsonObjectID id; // represented as "_id" in the database
+		string loginName;
+		string password;
+		Address address;
+	}
+
+	void test()
+	{
+		MongoClient client = connectMongoDB("127.0.0.1");
+		MongoCollection users = client.getCollection("myapp.users");
+
+		// D values are automatically serialized to the internal BSON format
+		// upon insertion - see also vibe.data.serialization
+		User usr;
+		usr.id = BsonObjectID.generate();
+		usr.loginName = "admin";
+		usr.password = "secret";
+		users.insert(usr);
+
+		// find supports direct de-serialization of the returned documents
+		foreach (usr; users.find!User()) {
+			logInfo("User: %s", usr.loginName);
+		}
+
+		// the same goes for findOne
+		Nullable!User qusr = users.findOne!User(["_id": usr.id]);
+		if (!qusr.isNull)
+			logInfo("User: %s", qusr.loginName);
 	}
 }
 

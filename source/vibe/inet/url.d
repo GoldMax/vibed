@@ -68,6 +68,8 @@ struct URL {
 				case "ftp":
 				case "spdy":
 				case "sftp":
+				case "ws":
+				case "wss":
 				case "file":
 					// proto://server/path style
 					enforce(str.startsWith("//"), "URL must start with proto://...");
@@ -92,11 +94,31 @@ struct URL {
 					}
 
 					m_host = str[hs .. si];
-					auto pi = m_host.indexOfCT(':');
-					if(pi > 0) {
-						enforce(pi < m_host.length-1, "Empty port in URL.");
-						m_port = to!ushort(m_host[pi+1..$]);
-						m_host = m_host[0 .. pi];
+
+					auto findPort ( string src )
+					{
+						auto pi = src.indexOfCT(':');
+						if(pi > 0) {
+							enforce(pi < src.length-1, "Empty port in URL.");
+							m_port = to!ushort(src[pi+1..$]);
+						}
+						return pi;
+					}
+
+
+					auto ip6 = m_host.indexOfCT('[');
+					if (ip6 == 0) { // [ must be first char
+						auto pe = m_host.indexOfCT(']');
+						if (pe > 0) {
+							findPort(m_host[pe..$]);
+							m_host = m_host[1 .. pe];
+						}
+					}
+					else {
+						auto pi = findPort(m_host);
+						if(pi > 0) {
+							m_host = m_host[0 .. pi];
+						}
 					}
 
 					enforce(!requires_host || m_schema == "file" || m_host.length > 0,
@@ -115,7 +137,7 @@ struct URL {
 
 	invariant()
 	{
-		assert(isURLEncoded(m_pathString), "Wrong encoding of '"~m_pathString~"'");
+		assert(isURLEncoded(m_pathString), "Wrong URL encoding of '"~m_pathString~"'");
 	}
 
 	/// The schema/protocol part of the URL
@@ -129,7 +151,7 @@ struct URL {
 	/// Set the path part of the URL. It should be properly encoded.
 	@property void pathString(string s)
 	{
-		enforce(isURLEncoded(m_pathString), "Wrong encoding of '"~m_pathString~"'");
+		enforce(isURLEncoded(s), "Wrong URL encoding of the path string '"~s~"'");
 		m_pathString = s;
 	}
 
@@ -151,6 +173,23 @@ struct URL {
 	@property ushort port() const { return m_port; }
 	/// ditto
 	@property port(ushort v) { m_port = v; }
+
+	/// Get the default port for the given schema or 0
+	static ushort defaultPort(string schema) {
+		switch(schema){
+			default:
+			case "file": return 0;
+			case "http": return 80;
+			case "https": return 443;
+			case "ftp": return 21;
+			case "spdy": return 443;
+			case "sftp": return 22;
+		}
+	}
+	/// ditto
+	ushort defaultPort() {
+		return defaultPort(m_schema);
+	}
 
 	/// The user name part of the URL (optional)
 	@property string username() const { return m_username; }
@@ -240,7 +279,14 @@ struct URL {
 			dst.put(password);
 			dst.put('@');
 		}
+
+		import std.algorithm : canFind;
+		auto ipv6 = host.canFind(":");
+
+		if ( ipv6 ) dst.put('[');
 		dst.put(host);
+		if ( ipv6 ) dst.put(']');
+
 		if( m_port > 0 ) formattedWrite(dst, ":%d", m_port);
 		dst.put(localURI);
 		return dst.data;
@@ -274,6 +320,20 @@ struct URL {
 		if( m_pathString != rhs.m_pathString ) return cmp(m_pathString, rhs.m_pathString);
 		return true;
 	}
+}
+
+unittest { // IPv6
+	auto urlstr = "http://[2003:46:1a7b:6c01:64b:80ff:fe80:8003]:8091/abc";
+	auto url = URL.parse(urlstr);
+	assert(url.schema == "http", url.schema);
+	assert(url.host == "2003:46:1a7b:6c01:64b:80ff:fe80:8003", url.host);
+	assert(url.port == 8091);
+	assert(url.path == Path("/abc"), url.path.toString());
+	assert(url.toString == urlstr);
+
+	url.host = "abcd:46:1a7b:6c01:64b:80ff:fe80:8abc";
+	urlstr = "http://[abcd:46:1a7b:6c01:64b:80ff:fe80:8abc]:8091/abc";
+	assert(url.toString == urlstr);
 }
 
 
@@ -325,17 +385,25 @@ unittest { // issue #1044
 	assert(url.pathString == "/q");
 }
 
+//websocket unittest
+unittest {
+	URL url = URL("ws://127.0.0.1:8080/echo");
+	assert(url.host == "127.0.0.1");
+	assert(url.port == 8080);
+	assert(url.localURI == "/echo");
+}
+
 unittest {
 	Path p = Path("/foo bar/boo oom/");
-    URL url = URL("http", "example.com", 0, p); // constructor test
-    assert(url.path == p);
-    url.path = p;
-    assert(url.path == p);                       // path assignement test
-    assert(url.pathString == "/foo%20bar/boo%20oom/");
-    assert(url.toString() == "http://example.com/foo%20bar/boo%20oom/");
-    url.pathString = "/foo%20bar/boo%2foom/";
-    assert(url.pathString == "/foo%20bar/boo%2foom/");
-    assert(url.toString() == "http://example.com/foo%20bar/boo%2foom/");
+	URL url = URL("http", "example.com", 0, p); // constructor test
+	assert(url.path == p);
+	url.path = p;
+	assert(url.path == p);					   // path assignement test
+	assert(url.pathString == "/foo%20bar/boo%20oom/");
+	assert(url.toString() == "http://example.com/foo%20bar/boo%20oom/");
+	url.pathString = "/foo%20bar/boo%2foom/";
+	assert(url.pathString == "/foo%20bar/boo%2foom/");
+	assert(url.toString() == "http://example.com/foo%20bar/boo%2foom/");
 }
 
 unittest {
@@ -350,4 +418,11 @@ unittest {
 	assert(URL("file://test").path.toString() == "test");
 	assert(URL("file://./test").pathString == "./test");
 	assert(URL("file://./test").path.toString() == "./test");
+}
+
+unittest { // issue #1318
+	try {
+		URL("http://something/inval%id");
+		assert(false, "Expected to throw an exception.");
+	} catch (Exception e) {}
 }

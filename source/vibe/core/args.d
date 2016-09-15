@@ -71,9 +71,6 @@ bool readOption(T)(string names, T* pvalue, string help_text)
 	return false;
 }
 
-/// Compatibility alias
-deprecated("Use readOption instead.") alias getOption = readOption;
-
 
 /**
 	The same as readOption, but throws an exception if the given option is missing.
@@ -197,6 +194,8 @@ private string[] getConfigPaths()
 // this is invoked by the first readOption call (at least vibe.core will perform one)
 private void init()
 {
+	import vibe.utils.string : stripUTF8Bom;
+
 	version (VibeDisableCommandLineParsing) {}
 	else g_args = Runtime.args;
 
@@ -208,7 +207,7 @@ private void init()
 		auto cpath = buildPath(spath, configName);
 		if (cpath.exists) {
 			scope(failure) logError("Failed to parse config file %s.", cpath);
-			auto text = cpath.readText();
+			auto text = stripUTF8Bom(cpath.readText());
 			g_config = text.parseJson();
 			g_haveConfig = true;
 			break;

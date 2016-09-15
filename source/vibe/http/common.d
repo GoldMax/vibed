@@ -1,7 +1,7 @@
 /**
 	Common classes for HTTP clients and servers.
 
-	Copyright: © 2012 RejectedSoftware e.K.
+	Copyright: © 2012-2015 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig, Jan Krüger
 */
@@ -13,6 +13,7 @@ import vibe.core.log;
 import vibe.core.net;
 import vibe.inet.message;
 import vibe.stream.operations;
+import vibe.textfilter.urlencode : urlEncode, urlDecode;
 import vibe.utils.array;
 import vibe.utils.memory;
 import vibe.utils.string;
@@ -23,6 +24,7 @@ import std.conv;
 import std.datetime;
 import std.exception;
 import std.format;
+import std.range : isOutputRange;
 import std.string;
 import std.typecons;
 
@@ -426,11 +428,13 @@ final class ChunkedInputStream : InputStream {
 	Outputs data to an output stream in HTTP chunked format.
 */
 final class ChunkedOutputStream : OutputStream {
+	alias ChunkExtensionCallback = string delegate(in ubyte[] data);
 	private {
 		OutputStream m_out;
 		AllocAppender!(ubyte[]) m_buffer;
-		size_t m_maxBufferSize = 512*1024;
+		size_t m_maxBufferSize = 4*1024;
 		bool m_finalized = false;
+		ChunkExtensionCallback m_chunkExtensionCallback = null;
 	}
 
 	this(OutputStream stream, Allocator alloc = defaultAllocator())
@@ -448,18 +452,51 @@ final class ChunkedOutputStream : OutputStream {
 	/// ditto
 	@property void maxBufferSize(size_t bytes) { m_maxBufferSize = bytes; if (m_buffer.data.length >= m_maxBufferSize) flush(); }
 
+	/** A delegate used to specify the extensions for each chunk written to the underlying stream.
+	 	
+	 	The delegate has to be of type `string delegate(in const(ubyte)[] data)` and gets handed the
+	 	data of each chunk before it is written to the underlying stream. If it's return value is non-empty,
+	 	it will be added to the chunk's header line.
+
+	 	The returned chunk extension string should be of the format `key1=value1;key2=value2;[...];keyN=valueN`
+	 	and **not contain any carriage return or newline characters**.
+
+	 	Also note that the delegate should accept the passed data through a scoped argument. Thus, **no references
+	 	to the provided data should be stored in the delegate**. If the data has to be stored for later use,
+	 	it needs to be copied first.
+	 */
+	@property ChunkExtensionCallback chunkExtensionCallback() const { return m_chunkExtensionCallback; }
+	/// ditto
+	@property void chunkExtensionCallback(ChunkExtensionCallback cb) { m_chunkExtensionCallback = cb; }
+
+	private void append(scope void delegate(scope ubyte[] dst) del, size_t nbytes)
+	{
+		assert(del !is null);
+		auto sz = nbytes;
+		if (m_maxBufferSize > 0 && m_maxBufferSize < m_buffer.data.length + sz)
+			sz = m_maxBufferSize - min(m_buffer.data.length, m_maxBufferSize);
+
+		if (sz > 0)
+		{
+			m_buffer.reserve(sz);
+			m_buffer.append((scope ubyte[] dst) {
+					debug assert(dst.length >= sz);
+					del(dst[0..sz]);
+					return sz;
+				});
+		}
+	}
+
 	void write(in ubyte[] bytes_)
 	{
 		assert(!m_finalized);
 		const(ubyte)[] bytes = bytes_;
 		while (bytes.length > 0) {
-			auto sz = bytes.length;
-			if (m_maxBufferSize > 0 && m_maxBufferSize < m_buffer.data.length + sz)
-				sz = m_maxBufferSize - min(m_buffer.data.length, m_maxBufferSize);
-			if (sz > 0) {
-				m_buffer.put(bytes[0 .. sz]);
-				bytes = bytes[sz .. $];
-			}
+			append((scope ubyte[] dst) {
+					auto n = dst.length;
+					dst[] = bytes[0..n];
+					bytes = bytes[n..$];
+				}, bytes.length);
 			if (bytes.length > 0)
 				flush();
 		}
@@ -469,20 +506,22 @@ final class ChunkedOutputStream : OutputStream {
 	{
 		assert(!m_finalized);
 		if( m_buffer.data.length > 0 ) flush();
-		if( nbytes == 0 ){
-			while( !data.empty ){
+		if( nbytes == 0 ) {
+			while( !data.empty ) {
 				auto sz = data.leastSize;
 				assert(sz > 0);
-				writeChunkSize(sz);
-				m_out.write(data, sz);
-				m_out.write("\r\n");
-				m_out.flush();
+				write(data,sz);
 			}
 		} else {
-			writeChunkSize(nbytes);
-			m_out.write(data, nbytes);
-			m_out.write("\r\n");
-			m_out.flush();
+			while(nbytes > 0)
+			{
+				append((scope ubyte[] dst) {
+						nbytes -= dst.length;
+						data.read(dst);
+					}, min(nbytes, size_t.max));
+				if (nbytes > 0)
+					flush();
+			}
 		}
 	}
 
@@ -491,9 +530,7 @@ final class ChunkedOutputStream : OutputStream {
 		assert(!m_finalized);
 		auto data = m_buffer.data();
 		if( data.length ){
-			writeChunkSize(data.length);
-			m_out.write(data);
-			m_out.write("\r\n");
+			writeChunk(data);
 		}
 		m_out.flush();
 		m_buffer.reset(AppenderResetMode.reuseData);
@@ -505,14 +542,27 @@ final class ChunkedOutputStream : OutputStream {
 		flush();
 		m_buffer.reset(AppenderResetMode.freeData);
 		m_finalized = true;
-		m_out.write("0\r\n\r\n");
+		writeChunk([]);
 		m_out.flush();
 	}
-	private void writeChunkSize(long length)
+
+	private void writeChunk(in ubyte[] data)
 	{
 		import vibe.stream.wrapper;
 		auto rng = StreamOutputRange(m_out);
-		formattedWrite(&rng, "%x\r\n", length);
+		formattedWrite(&rng, "%x", data.length);
+		if (m_chunkExtensionCallback !is null)
+		{
+			rng.put(';');
+			auto extension = m_chunkExtensionCallback(data);
+			assert(!extension.startsWith(';'));
+			debug assert(extension.indexOf('\r') < 0);
+			debug assert(extension.indexOf('\n') < 0);
+			rng.put(extension);
+		}
+		rng.put("\r\n");
+		rng.put(data);
+		rng.put("\r\n");
 	}
 }
 
@@ -527,8 +577,17 @@ final class Cookie {
 		bool m_httpOnly;
 	}
 
-	@property void value(string value) { m_value = value; }
-	@property string value() const { return m_value; }
+	enum Encoding {
+		url,
+		raw,
+		none = raw
+	}
+
+	@property void value(string value) { m_value = urlEncode(value); }
+	@property string value() const { return urlDecode(m_value); }
+
+	@property void rawValue(string value) { m_value = value; }
+	@property string rawValue() const { return m_value; }
 
 	@property void domain(string value) { m_domain = value; }
 	@property string domain() const { return m_domain; }
@@ -548,14 +607,23 @@ final class Cookie {
 	@property void httpOnly(bool value) { m_httpOnly = value; }
 	@property bool httpOnly() const { return m_httpOnly; }
 
+	void setValue(string value, Encoding encoding)
+	{
+		final switch (encoding) {
+			case Encoding.url: m_value = urlEncode(value); break;
+			case Encoding.none: validateValue(value); m_value = value; break;
+		}
+	}
+
 	void writeString(R)(R dst, string name)
 		if (isOutputRange!(R, char))
 	{
 		import vibe.textfilter.urlencode;
 		dst.put(name);
 		dst.put('=');
-		filterURLEncode(dst, this.value);
-		if (this.domain != "") {
+		validateValue(this.value);
+		dst.put(this.value);
+		if (this.domain && this.domain != "") {
 			dst.put("; Domain=");
 			dst.put(this.domain);
 		}
@@ -571,6 +639,34 @@ final class Cookie {
 		if (this.secure) dst.put("; Secure");
 		if (this.httpOnly) dst.put("; HttpOnly");
 	}
+
+	private static void validateValue(string value)
+	{
+		enforce(!value.canFind(';') && !value.canFind('"'));
+	}
+}
+
+unittest {
+	import std.exception : assertThrown;
+
+	auto c = new Cookie;
+	c.value = "foo";
+	assert(c.value == "foo");
+	assert(c.rawValue == "foo");
+
+	c.value = "foo$";
+	assert(c.value == "foo$");
+	assert(c.rawValue == "foo%24", c.rawValue);
+
+	c.value = "foo&bar=baz?";
+	assert(c.value == "foo&bar=baz?");
+	assert(c.rawValue == "foo%26bar%3Dbaz%3F", c.rawValue);
+
+	c.setValue("foo%", Cookie.Encoding.raw);
+	assert(c.rawValue == "foo%");
+	assertThrown(c.value);
+
+	assertThrown(c.setValue("foo;bar", Cookie.Encoding.raw));
 }
 
 
@@ -578,19 +674,47 @@ final class Cookie {
 */
 struct CookieValueMap {
 	struct Cookie {
+		/// Name of the cookie
 		string name;
-		string value;
+
+		/// The raw cookie value as transferred over the wire
+		string rawValue;
+
+		this(string name, string value, .Cookie.Encoding encoding = .Cookie.Encoding.url)
+		{
+			this.name = name;
+			this.setValue(value, encoding);
+		}
+
+		/// Treats the value as URL encoded
+		string value() const { return urlDecode(rawValue); }
+		/// ditto
+		void value(string val) { rawValue = urlEncode(val); }
+
+		/// Sets the cookie value, applying the specified encoding.
+		void setValue(string value, .Cookie.Encoding encoding = .Cookie.Encoding.url)
+		{
+			final switch (encoding) {
+				case .Cookie.Encoding.none: this.rawValue = value; break;
+				case .Cookie.Encoding.url: this.rawValue = urlEncode(value); break;
+			}
+		}
 	}
 
 	private {
 		Cookie[] m_entries;
 	}
 
+	auto length(){ 
+		return m_entries.length;
+	}
+
 	string get(string name, string def_value = null)
 	const {
-		auto pv = name in this;
-		if( !pv ) return def_value;
-		return *pv;
+		foreach (ref c; m_entries)
+			if (c.name == name)
+				return c.value;
+		return def_value;
 	}
 
 	string[] getAll(string name)
@@ -602,6 +726,10 @@ struct CookieValueMap {
 		return ret;
 	}
 
+	void add(string name, string value, .Cookie.Encoding encoding = .Cookie.Encoding.url){
+		m_entries ~= Cookie(name, value, encoding);
+	}
+
 	void opIndexAssign(string value, string name)
 	{
 		m_entries ~= Cookie(name, value);
@@ -610,9 +738,10 @@ struct CookieValueMap {
 	string opIndex(string name)
 	const {
 		import core.exception : RangeError;
-		auto pv = name in this;
-		if( !pv ) throw new RangeError("Non-existent cookie: "~name);
-		return *pv;
+		foreach (ref c; m_entries)
+			if (c.name == name)
+				return c.value;
+		throw new RangeError("Non-existent cookie: "~name);
 	}
 
 	int opApply(scope int delegate(ref Cookie) del)
@@ -631,7 +760,7 @@ struct CookieValueMap {
 		return 0;
 	}
 
-	int opApply(scope int delegate(ref string name, ref string value) del)
+	int opApply(scope int delegate(string name, string value) del)
 	{
 		foreach(ref c; m_entries)
 			if( auto ret = del(c.name, c.value) )
@@ -639,7 +768,7 @@ struct CookieValueMap {
 		return 0;
 	}
 
-	int opApply(scope int delegate(ref string name, ref string value) del)
+	int opApply(scope int delegate(string name, string value) del)
 	const {
 		foreach(Cookie c; m_entries)
 			if( auto ret = del(c.name, c.value) )
@@ -647,15 +776,60 @@ struct CookieValueMap {
 		return 0;
 	}
 
-	inout(string)* opBinaryRight(string op)(string name) inout if(op == "in")
+	auto opBinaryRight(string op)(string name) if(op == "in")
 	{
-		foreach(ref c; m_entries)
-			if( c.name == name ) {
-				static if (__VERSION__ < 2066)
-					return cast(inout(string)*)&c.value;
-				else
-					return &c.value;
-			}
-		return null;
+		return Ptr(&this, name);
 	}
+
+	auto opBinaryRight(string op)(string name) const if(op == "in")
+	{
+		return const(Ptr)(&this, name);
+	}
+
+	private static struct Ref {
+		private {
+			CookieValueMap* map;
+			string name;
+		}
+
+		@property string get() const { return (*map)[name]; }
+		void opAssign(string newval) {
+			foreach (ref c; *map)
+				if (c.name == name) {
+					c.value = newval;
+					return;
+				}
+			assert(false);
+		}
+		alias get this;
+	}
+	private static struct Ptr {
+		private {
+			CookieValueMap* map;
+			string name;
+		}
+		bool opCast() const {
+			foreach (ref c; map.m_entries)
+				if (c.name == name)
+					return true;
+			return false;
+		}
+		inout(Ref) opUnary(string op : "*")() inout { return inout(Ref)(map, name); }
+	}
+}
+
+unittest {
+	CookieValueMap m;
+	m["foo"] = "bar;baz%1";
+	assert(m["foo"] == "bar;baz%1");
+
+	m["foo"] = "bar";
+	assert(m.getAll("foo") == ["bar;baz%1", "bar"]);
+
+	assert("foo" in m);
+	if (auto val = "foo" in m) {
+		assert(*val == "bar;baz%1");
+	} else assert(false);
+	*("foo" in m) = "baz";
+	assert(m["foo"] == "baz");
 }

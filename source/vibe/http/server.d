@@ -31,6 +31,7 @@ import vibe.utils.string;
 
 import core.atomic;
 import core.vararg;
+import std.algorithm : canFind;
 import std.array;
 import std.conv;
 import std.datetime;
@@ -206,7 +207,7 @@ void setVibeDistHost(string host, ushort port)
 {
 	import vibe.templ.diet;
 	res.headers["Content-Type"] = "text/html; charset=UTF-8";
-	parseDietFile!(template_file, ALIASES)(res.bodyWriter);
+	compileDietFile!(template_file, ALIASES)(res.bodyWriter);
 }
 
 
@@ -333,6 +334,8 @@ enum HTTPServerOption {
 		help an attacker to abuse possible security holes.
 	*/
 	errorStackTraces          = 1<<7,
+	/// Enable port reuse in listenTCP()
+	reusePort                 = 1<<8,
 
 	/** The default set of options.
 
@@ -426,6 +429,7 @@ final class HTTPServerSettings {
 	TLSContext tlsContext;
 
 	/// Compatibility alias - use `tlsContext` instead.
+	deprecated("Use tlsContext instead.")
 	alias sslContext = tlsContext;
 
 	/// Session management is enabled if a session store instance is provided
@@ -457,7 +461,8 @@ final class HTTPServerSettings {
 	{
 		auto ret = new HTTPServerSettings;
 		foreach (mem; __traits(allMembers, HTTPServerSettings)) {
-			static if (mem == "bindAddresses") ret.bindAddresses = bindAddresses.dup;
+			static if (mem == "sslContext") {}
+			else static if (mem == "bindAddresses") ret.bindAddresses = bindAddresses.dup;
 			else static if (__traits(compiles, __traits(getMember, ret, mem) = __traits(getMember, this, mem)))
 				__traits(getMember, ret, mem) = __traits(getMember, this, mem);
 		}
@@ -540,7 +545,6 @@ enum SessionOption {
 final class HTTPServerRequest : HTTPRequest {
 	private {
 		SysTime m_timeCreated;
-		FixedAppender!(string, 31) m_dateAppender;
 		HTTPServerSettings m_settings;
 		ushort m_port;
 	}
@@ -551,10 +555,14 @@ final class HTTPServerRequest : HTTPRequest {
 		/// ditto
 		NetworkAddress clientAddress;
 
+		/// Determines if the request should be logged to the access log file.
+		bool noLog;
+
 		/// Determines if the request was issued over an TLS encrypted channel.
 		bool tls;
 
 		/// Compatibility alias - use `tls` instead.
+		deprecated("Use .tls instead.")
 		alias ssl = tls;
 
 		/** Information about the TLS certificate provided by the client.
@@ -607,13 +615,14 @@ final class HTTPServerRequest : HTTPRequest {
 		*/
 		FormFields query;
 
+		import vibe.utils.dictionarylist;
 		/** A map of general parameters for the request.
 
 			This map is supposed to be used by middleware functionality to store
 			information for later stages. For example vibe.http.router.URLRouter uses this map
 			to store the value of any named placeholders.
 		*/
-		string[string] params;
+		DictionaryList!(string, true, 8) params;
 
 		/** Supplies the request body as a stream.
 
@@ -631,7 +640,7 @@ final class HTTPServerRequest : HTTPRequest {
 			Remarks:
 				This field is only set if HTTPServerOption.parseJsonBody is set.
 
-				A JSON request must have the Content-Type "application/json".
+				A JSON request must have the Content-Type "application/json" or "application/vnd.api+json".
 		*/
 		Json json;
 
@@ -679,8 +688,6 @@ final class HTTPServerRequest : HTTPRequest {
 	{
 		m_timeCreated = time.toUTC();
 		m_port = port;
-		writeRFC822DateTimeString(m_dateAppender, time);
-		this.headers["Date"] = m_dateAppender.data();
 	}
 
 	/** Time when this request started processing.
@@ -725,7 +732,7 @@ final class HTTPServerRequest : HTTPRequest {
 		return url;
 	}
 
-	/** The relative path the the root folder.
+	/** The relative path to the root folder.
 
 		Using this function instead of absolute URLs for embedded links can be
 		useful to avoid dead link when the site is piped through a
@@ -771,6 +778,10 @@ final class HTTPServerResponse : HTTPResponse {
 		m_requestAlloc = req_alloc;
 	}
 
+	/** Returns the time at which the request was finalized.
+
+		Note that this field will only be set after `finalize` has been called.
+	*/
 	@property SysTime timeFinalized() { return m_timeFinalized; }
 
 	/** Determines if the HTTP header has already been written.
@@ -786,6 +797,7 @@ final class HTTPServerResponse : HTTPResponse {
 	bool tls() const { return m_tls; }
 
 	/// Compatibility alias - use `tls` instead.
+	deprecated("Use .tls instead.")
 	alias ssl = tls;
 
 	/// Writes the entire response body at once.
@@ -870,7 +882,7 @@ final class HTTPServerResponse : HTTPResponse {
 		import std.traits;
 		import vibe.stream.wrapper;
 
-		static if (is(typeof(data.data())) && isArray!(typeof(data.data()))) {
+		static if (!is(T == Json) && is(typeof(data.data())) && isArray!(typeof(data.data()))) {
 			static assert(!is(T == Appender!(typeof(data.data()))), "Passed an Appender!T to writeJsonBody - this is most probably not doing what's indended.");
 		}
 
@@ -905,6 +917,7 @@ final class HTTPServerResponse : HTTPResponse {
 		}
 		assert(!headerWritten);
 		writeHeader();
+		m_conn.flush();
 	}
 
 	/** A stream for writing the body of the HTTP response.
@@ -936,9 +949,10 @@ final class HTTPServerResponse : HTTPResponse {
 			headers.remove("Content-Length");
 		}
 
-		if ("Content-Length" in headers) {
+		if (auto pcl = "Content-Length" in headers) {
 			writeHeader();
-			m_bodyWriter = m_countingWriter; // TODO: LimitedOutputStream(m_conn, content_length)
+			m_countingWriter.writeLimit = (*pcl).to!ulong;
+			m_bodyWriter = m_countingWriter;
 		} else {
 			headers["Transfer-Encoding"] = "chunked";
 			writeHeader();
@@ -965,14 +979,13 @@ final class HTTPServerResponse : HTTPResponse {
 
 		Params:
 			url = The URL to redirect to
-			status = The HTTP redirect status (3xx) to send - by default this is $D(D HTTPStatus.found)
+			status = The HTTP redirect status (3xx) to send - by default this is $(D HTTPStatus.found)
 	*/
 	void redirect(string url, int status = HTTPStatus.Found)
 	{
 		statusCode = status;
 		headers["Location"] = url;
-		headers["Content-Length"] = "14";
-		bodyWriter.write("redirecting...");
+		writeBody("redirecting...");
 	}
 	/// ditto
 	void redirect(URL url, int status = HTTPStatus.Found)
@@ -1000,13 +1013,51 @@ final class HTTPServerResponse : HTTPResponse {
 
 
 	/** Special method sending a SWITCHING_PROTOCOLS response to the client.
+
+		Notice: For the overload that returns a `ConnectionStream`, it must be
+			ensured that the returned instance doesn't outlive the request
+			handler callback.
+
+		Params:
+			protocol = The protocol set in the "Upgrade" header of the response.
+				Use an empty string to skip setting this field.
 	*/
 	ConnectionStream switchProtocol(string protocol)
 	{
 		statusCode = HTTPStatus.SwitchingProtocols;
-		headers["Upgrade"] = protocol;
+		if (protocol.length) headers["Upgrade"] = protocol;
 		writeVoidBody();
 		return new ConnectionProxyStream(m_conn, m_rawConnection);
+	}
+	/// ditto
+	void switchProtocol(string protocol, scope void delegate(scope ConnectionStream) del)
+	{
+		statusCode = HTTPStatus.SwitchingProtocols;
+		if (protocol.length) headers["Upgrade"] = protocol;
+		writeVoidBody();
+		scope conn = new ConnectionProxyStream(m_conn, m_rawConnection);
+		del(conn);
+		finalize();
+		m_rawConnection.close(); // connection not reusable after a protocol upgrade
+	}
+
+	/** Special method for handling CONNECT proxy tunnel
+
+		Notice: For the overload that returns a `ConnectionStream`, it must be
+			ensured that the returned instance doesn't outlive the request
+			handler callback.
+	*/
+	ConnectionStream connectProxy()
+	{
+		return new ConnectionProxyStream(m_conn, m_rawConnection);
+	}
+	/// ditto
+	void connectProxy(scope void delegate(scope ConnectionStream) del)
+	{
+		scope conn = new ConnectionProxyStream(m_conn, m_rawConnection);
+		del(conn);
+		finalize();
+		m_rawConnection.close(); // connection not reusable after a protocol upgrade
 	}
 
 	/** Sets the specified cookie value.
@@ -1016,11 +1067,11 @@ final class HTTPServerResponse : HTTPResponse {
 			value = New cookie value - pass null to clear the cookie
 			path = Path (as seen by the client) of the directory tree in which the cookie is visible
 	*/
-	Cookie setCookie(string name, string value, string path = "/")
+	Cookie setCookie(string name, string value, string path = "/", Cookie.Encoding encoding = Cookie.Encoding.url)
 	{
 		auto cookie = new Cookie();
 		cookie.path = path;
-		cookie.value = value;
+		cookie.setValue(value, encoding);
 		if (value is null) {
 			cookie.maxAge = 0;
 			cookie.expires = "Thu, 01 Jan 1970 00:00:00 GMT";
@@ -1060,7 +1111,7 @@ final class HTTPServerResponse : HTTPResponse {
 	*/
 	void terminateSession()
 	{
-		assert(m_session, "Try to terminate a session, but none is started.");
+		if (!m_session) return;
 		auto cookie = setCookie(m_settings.sessionIdCookie, null, m_session.get!string("$sessionCookiePath"));
 		cookie.secure = m_session.get!bool("$sessionCookieSecure");
 		m_session.destroy();
@@ -1070,42 +1121,14 @@ final class HTTPServerResponse : HTTPResponse {
 	@property ulong bytesWritten() { return m_countingWriter.bytesWritten; }
 
 	/**
-		Scheduled for deprecation - use `render` instead.
-
-		This version of render() works around an old compiler bug in DMD < 2.064 (Issue 2962).
-
-		The first template argument is the name of the template file. All following arguments
-		must be pairs of a type and a string, each specifying one parameter. Parameter values
-		can be passed either as a value of the same type as specified by the template
-		arguments, or as a Variant which has the same type stored.
-
-		Note that the variables are copied and not referenced inside of the template - any
-		modification you do on them from within the template will get lost.
-
-		Examples:
-			---
-			string title = "Hello, World!";
-			int pageNumber = 1;
-			res.renderCompat!("mytemplate.jd",
-				string, "title",
-				int, "pageNumber")
-				(title, pageNumber);
-			---
-	*/
-	void renderCompat(string template_file, TYPES_AND_NAMES...)(...)
-	{
-		import vibe.templ.diet;
-		headers["Content-Type"] = "text/html; charset=UTF-8";
-		compileDietFileCompatV!(template_file, TYPES_AND_NAMES)(bodyWriter, _argptr, _arguments);
-	}
-
-	/**
-		Waits until either the connection closes or until the given timeout is
-		reached.
+		Waits until either the connection closes, data arrives, or until the
+		given timeout is reached.
 
 		Returns:
-			$(D true) if the connection was closed and $(D false) when the
-			timeout was reached.
+			$(D true) if the connection was closed and $(D false) if either the
+			timeout was reached, or if data has arrived for consumption.
+
+		See_Also: `connected`
 	*/
 	bool waitForConnectionClose(Duration timeout = Duration.max)
 	{
@@ -1114,8 +1137,28 @@ final class HTTPServerResponse : HTTPResponse {
 		return !m_rawConnection.connected;
 	}
 
-	// Finalizes the response. This is called automatically by the server.
-	private void finalize()
+	/**
+		Determines if the underlying connection is still alive.
+
+		Returns $(D true) if the remote peer is still connected and $(D false)
+		if the remote peer closed the connection.
+
+		See_Also: `waitForConnectionClose`
+	*/
+	@property bool connected()
+	{
+		if (!m_rawConnection) return false;
+		return m_rawConnection.connected;
+	}
+
+	/**
+		Finalizes the response. This is usually called automatically by the server.
+
+		This method can be called manually after writing the response to force
+		all network traffic associated with the current request to be finalized.
+		After the call returns, the `timeFinalized` property will be set.
+	*/
+	void finalize()
 	{
 		if (m_gzipOutputStream) {
 			m_gzipOutputStream.finalize();
@@ -1140,12 +1183,13 @@ final class HTTPServerResponse : HTTPResponse {
 				logDebug("HTTP response only written partially before finalization. Terminating connection.");
 				m_rawConnection.close();
 			}
+			m_rawConnection = null;
 		}
 
-		m_timeFinalized = Clock.currTime(UTC());
-
-		m_conn = null;
-		m_rawConnection = null;
+		if (m_conn) {
+			m_conn = null;
+			m_timeFinalized = Clock.currTime(UTC());
+		}
 	}
 
 	private void writeHeader()
@@ -1174,8 +1218,13 @@ final class HTTPServerResponse : HTTPResponse {
 			this.statusPhrase.length ? this.statusPhrase : httpStatusText(this.statusCode));
 
 		// write all normal headers
-		foreach (k, v; this.headers)
-			writeLine("%s: %s", k, v);
+		foreach (k, v; this.headers) {
+			dst.put(k);
+			dst.put(": ");
+			dst.put(v);
+			dst.put("\r\n");
+			logTrace("%s: %s", k, v);
+		}
 
 		logTrace("---------------------");
 
@@ -1188,8 +1237,6 @@ final class HTTPServerResponse : HTTPResponse {
 
 		// finalize response header
 		dst.put("\r\n");
-		dst.flush();
-		m_conn.flush();
 	}
 }
 
@@ -1252,11 +1299,18 @@ private struct HTTPServerContext {
 	size_t id;
 }
 
-private struct HTTPListenInfo {
+private final class HTTPListenInfo {
 	TCPListener listener;
 	string bindAddress;
 	ushort bindPort;
 	TLSContext tlsContext;
+
+	this(string bind_address, ushort bind_port, TLSContext tls_context)
+	{
+		this.bindAddress = bind_address;
+		this.bindPort = bind_port;
+		this.tlsContext = tls_context;
+	}
 }
 
 private enum MaxHTTPHeaderLineLength = 4096;
@@ -1369,13 +1423,19 @@ private void listenHTTPPlain(HTTPServerSettings settings)
 {
 	import std.algorithm : canFind;
 
-	static TCPListener doListen(HTTPListenInfo listen_info, bool dist)
+	static TCPListener doListen(HTTPListenInfo listen_info, bool dist, bool reusePort)
 	{
 		try {
+			TCPListenOptions options = TCPListenOptions.defaults;
+			if(dist) options |= TCPListenOptions.distribute; else options &= ~TCPListenOptions.distribute;
+			if(reusePort) options |= TCPListenOptions.reusePort; else options &= ~TCPListenOptions.reusePort;
 			auto ret = listenTCP(listen_info.bindPort, (TCPConnection conn) {
 					handleHTTPConnection(conn, listen_info);
-				}, listen_info.bindAddress, dist ? TCPListenOptions.distribute : TCPListenOptions.defaults);
-			logInfo("Listening for HTTP%s requests on %s:%s", listen_info.tlsContext ? "S" : "", listen_info.bindAddress, listen_info.bindPort);
+				}, listen_info.bindAddress, options);
+			auto proto = listen_info.tlsContext ? "https" : "http";
+			auto urladdr = listen_info.bindAddress;
+			if (urladdr.canFind(':')) urladdr = "["~urladdr~"]";
+			logInfo("Listening for requests on %s://%s:%s/", proto, urladdr, listen_info.bindPort);
 			return ret;
 		} catch( Exception e ) {
 			logWarn("Failed to listen on %s:%s", listen_info.bindAddress, listen_info.bindPort);
@@ -1385,11 +1445,9 @@ private void listenHTTPPlain(HTTPServerSettings settings)
 
 	void addVHost(ref HTTPListenInfo lst)
 	{
-		auto contexts = getContexts();
-
 		TLSContext onSNI(string servername)
 		{
-			foreach (ctx; contexts)
+			foreach (ctx; getContexts())
 				if (ctx.settings.bindAddresses.canFind(lst.bindAddress)
 					&& ctx.settings.port == lst.bindPort
 					&& ctx.settings.hostName.icmp(servername) == 0)
@@ -1407,7 +1465,7 @@ private void listenHTTPPlain(HTTPServerSettings settings)
 			lst.tlsContext.sniCallback = &onSNI;
 		}
 
-		foreach (ctx; contexts) {
+		foreach (ctx; getContexts()) {
 			if (ctx.settings.port != settings.port) continue;
 			if (!ctx.settings.bindAddresses.canFind(lst.bindAddress)) continue;
 			/*enforce(ctx.settings.hostName != settings.hostName,
@@ -1435,14 +1493,19 @@ private void listenHTTPPlain(HTTPServerSettings settings)
 				}
 			}
 			if (!found_listener) {
-				auto linfo = HTTPListenInfo(null, addr, settings.port, settings.tlsContext);
-				if (auto tcp_lst = doListen(linfo, (settings.options & HTTPServerOption.distribute) != 0)) // DMD BUG 2043
+				auto linfo = new HTTPListenInfo(addr, settings.port, settings.tlsContext);
+				if (auto tcp_lst = doListen(linfo, (settings.options & HTTPServerOption.distribute) != 0, (settings.options & HTTPServerOption.reusePort) != 0)) // DMD BUG 2043
 				{
 					linfo.listener = tcp_lst;
 					found_listener = true;
 					any_successful = true;
 					g_listeners ~= linfo;
 				}
+			}
+			if (settings.hostName.length) {
+				auto proto = settings.tlsContext ? "https" : "http";
+				auto port = settings.tlsContext && settings.port == 443 || !settings.tlsContext && settings.port == 80 ? "" : ":" ~ settings.port.to!string;
+				logInfo("Added virtual host %s://%s%s/ (%s)", proto, settings.hostName, port, addr);
 			}
 		}
 	}
@@ -1455,9 +1518,16 @@ private void handleHTTPConnection(TCPConnection connection, HTTPListenInfo liste
 {
 	Stream http_stream = connection;
 
+	// Set NODELAY to true, to avoid delays caused by sending the response
+	// header and body in separate chunks. Note that to avoid other performance
+	// issues (caused by tiny packets), this requires using an output buffer in
+	// the event driver, which is the case at least for the default libevent
+	// based driver.
+	connection.tcpNoDelay = true;
+
 	version(VibeNoSSL) {} else {
 		import std.traits : ReturnType;
-		ReturnType!createTLSStreamFL tls_stream;
+  //ReturnType!createTLSStreamFL tls_stream;
 	}
 
 	if (!connection.waitForData(10.seconds())) {
@@ -1471,12 +1541,13 @@ private void handleHTTPConnection(TCPConnection connection, HTTPListenInfo liste
 		else {
 			logDebug("Accept TLS connection: %s", listen_info.tlsContext.kind);
 			// TODO: reverse DNS lookup for peer_name of the incoming connection for TLS client certificate verification purposes
-			tls_stream = createTLSStreamFL(http_stream, listen_info.tlsContext, TLSStreamState.accepting, null, connection.remoteAddress);
-			http_stream = tls_stream;
+//			tls_stream = createTLSStreamFL(http_stream, listen_info.tlsContext, TLSStreamState.accepting, null, connection.remoteAddress);
+//			http_stream = tls_stream;
+   createTLSStreamFL(http_stream, listen_info.tlsContext, TLSStreamState.accepting, null, connection.remoteAddress);
 		}
 	}
 
-	do {
+	while (!connection.empty) {
 		HTTPServerSettings settings;
 		bool keep_alive;
 		handleRequest(http_stream, connection, listen_info, settings, keep_alive);
@@ -1489,7 +1560,7 @@ private void handleHTTPConnection(TCPConnection connection, HTTPListenInfo liste
 			else logDebug("Keep-alive connection timed out!");
 			break;
 		}
-	} while(!connection.empty);
+	}
 
 	logTrace("Done handling connection.");
 }
@@ -1501,7 +1572,7 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 	SysTime reqtime = Clock.currTime(UTC());
 
 	//auto request_allocator = scoped!(PoolAllocator)(1024, defaultAllocator());
-	scope request_allocator = new PoolAllocator(1024, defaultAllocator());
+	scope request_allocator = new PoolAllocator(1024, threadLocalAllocator());
 	scope(exit) request_allocator.reset();
 
 	// some instances that live only while the request is running
@@ -1539,6 +1610,9 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 		return false;
 	}
 
+	// temporarily set to the default settings, the virtual host specific settings will be set further down
+	req.m_settings = settings;
+
 	// Create the response object
 	auto res = FreeListRef!HTTPServerResponse(http_stream, tcp_connection, settings, request_allocator/*.Scoped_payload*/);
 	req.tls = res.m_tls = listen_info.tlsContext !is null;
@@ -1560,7 +1634,9 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 			err.exception = ex;
 			settings.errorPageHandler(req, res, err);
 		} else {
-			res.writeBody(format("%s - %s\n\n%s\n\nInternal error information:\n%s", code, httpStatusText(code), msg, debug_msg));
+			if (debug_msg.length)
+				res.writeBody(format("%s - %s\n\n%s\n\nInternal error information:\n%s", code, httpStatusText(code), msg, debug_msg));
+			else res.writeBody(format("%s - %s\n\n%s", code, httpStatusText(code), msg));
 		}
 		assert(res.headerWritten);
 	}
@@ -1587,11 +1663,24 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 		// find the matching virtual host
 		string reqhost;
 		ushort reqport = 0;
-		import std.algorithm : splitter;
-		auto reqhostparts = req.host.splitter(":");
-		if (!reqhostparts.empty) { reqhost = reqhostparts.front; reqhostparts.popFront(); }
-		if (!reqhostparts.empty) { reqport = reqhostparts.front.to!ushort; reqhostparts.popFront(); }
-		enforce(reqhostparts.empty, "Invalid suffix found in host header");
+		{
+			string s = req.host;
+			enforceHTTP(s.length > 0 || req.httpVersion <= HTTPVersion.HTTP_1_0, HTTPStatus.badRequest, "Missing Host header.");
+			if (s.startsWith('[')) { // IPv6 address
+				auto idx = s.indexOf(']');
+				enforce(idx > 0, "Missing closing ']' for IPv6 address.");
+				reqhost = s[1 .. idx];
+				s = s[idx+1 .. $];
+			} else if (s.length) { // host name or IPv4 address
+				auto idx = s.indexOf(':');
+				if (idx < 0) idx = s.length;
+				enforceHTTP(idx > 0, HTTPStatus.badRequest, "Missing Host header.");
+				reqhost = s[0 .. idx];
+				s = s[idx .. $];
+			}
+			if (s.startsWith(':')) reqport = s[1 .. $].to!ushort;
+		}
+
 		foreach (ctx; getContexts())
 			if (icmp2(ctx.settings.hostName, reqhost) == 0 &&
 				(!reqport || reqport == ctx.settings.port))
@@ -1669,15 +1758,12 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 
 		// lookup the session
 		if (settings.sessionStore) {
-			auto pv = settings.sessionIdCookie in req.cookies;
-			if (pv) {
-				// use the first cookie that contains a valid session ID in case
-				// of multiple matching session cookies
-				foreach (v; req.cookies.getAll(settings.sessionIdCookie)) {
-					req.session = settings.sessionStore.open(v);
-					res.m_session = req.session;
-					if (req.session) break;
-				}
+			// use the first cookie that contains a valid session ID in case
+			// of multiple matching session cookies
+			foreach (val; req.cookies.getAll(settings.sessionIdCookie)) {
+				req.session = settings.sessionStore.open(val);
+				res.m_session = req.session;
+				if (req.session) break;
 			}
 		}
 
@@ -1687,7 +1773,7 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 		}
 
 		if (settings.options & HTTPServerOption.parseJsonBody) {
-			if (icmp2(req.contentType, "application/json") == 0) {
+			if (icmp2(req.contentType, "application/json") == 0 || icmp2(req.contentType, "application/vnd.api+json") == 0 ) {
 				auto bodyStr = cast(string)req.bodyReader.readAll();
 				if (!bodyStr.empty) req.json = parseJson(bodyStr);
 			}
@@ -1757,9 +1843,11 @@ private bool handleRequest(Stream http_stream, TCPConnection tcp_connection, HTT
 		}
 	}
 
-	// log the request to access log
-	foreach (log; context.loggers)
-		log.log(req, res);
+	if (!req.noLog) {
+		// log the request to access log
+		foreach (log; context.loggers)
+			log.log(req, res);
+	}
 
 	logTrace("return %s (used pool memory: %s/%s)", keep_alive, request_allocator.allocatedSize, request_allocator.totalSize);
 	return keep_alive != false;
@@ -1803,17 +1891,36 @@ private void parseRequestHeader(HTTPServerRequest req, InputStream http_stream, 
 
 private void parseCookies(string str, ref CookieValueMap cookies)
 {
-	while(str.length > 0) {
-		auto idx = str.indexOf('=');
-		enforceBadRequest(idx > 0, "Expected name=value.");
-		string name = str[0 .. idx].strip();
-		str = str[idx+1 .. $];
+	import std.encoding : sanitize;
+	import std.array : split;
+	import std.string : strip;
+	import std.algorithm.iteration : map, filter, each;
+	import vibe.http.common : Cookie;
+	str.sanitize.split(";")
+		.map!(kv => kv.strip.split("="))
+		.filter!(kv => kv.length == 2) //ignore illegal cookies
+		.each!(kv => cookies.add(kv[0], kv[1], Cookie.Encoding.raw) );
+}
 
-		for (idx = 0; idx < str.length && str[idx] != ';'; idx++) {}
-		string value = str[0 .. idx].strip();
-		cookies[name] = urlDecode(value);
-		str = idx < str.length ? str[idx+1 .. $] : null;
-	}
+unittest
+{
+  auto cvm = CookieValueMap();
+  parseCookies("foo=bar;; baz=zinga; öö=üü   ;   møøse=was=sacked;    onlyval1; =onlyval2; onlykey=", cvm);
+  assert(cvm["foo"] == "bar");
+  assert(cvm["baz"] == "zinga");
+  assert(cvm["öö"] == "üü");
+  assert( "møøse" ! in cvm); //illegal cookie gets ignored
+  assert( "onlyval1" ! in cvm); //illegal cookie gets ignored
+  assert(cvm["onlykey"] == "");
+  assert(cvm[""] == "onlyval2");
+  assert(cvm.length() == 5);
+  cvm = CookieValueMap();
+  parseCookies("", cvm);
+  assert(cvm.length() == 0);
+  cvm = CookieValueMap();
+  parseCookies(";;=", cvm);
+  assert(cvm.length() == 1);
+  assert(cvm[""] == "");
 }
 
 shared static this()

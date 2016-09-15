@@ -377,3 +377,24 @@ unittest {
 	static assert(isOpApplyDg!(int delegate(int, ref string), int, string));
 	static assert(isOpApplyDg!(int delegate(ref int, string), int, string));
 }
+
+// Synchronized statements are logically nothrow but dmd still marks them as throwing.
+// DMD#4115, Druntime#1013, Druntime#1021, Phobos#2704
+import core.sync.mutex : Mutex;
+enum synchronizedIsNothrow = __traits(compiles, (Mutex m) nothrow { synchronized(m) {} });
+
+
+template StripHeadConst(T) {
+	static if (is(T == const(F), F)) alias StripHeadConst = StripHeadConst!F;
+	else static if (is(T == immutable(F), F)) alias StripHeadConst = StripHeadConst!F;
+	else static if (is(T == inout(F), F)) alias StripHeadConst = StripHeadConst!F;
+	else alias StripHeadConst = T;
+}
+
+unittest {
+	static assert(is(StripHeadConst!(int) == int));
+	static assert(is(StripHeadConst!(const(int)) == int));
+	static assert(is(StripHeadConst!(immutable(int)) == int));
+	static assert(is(StripHeadConst!(const(immutable(int))) == int));
+	static assert(is(StripHeadConst!(const(int[])) == const(int)[]));
+}

@@ -51,13 +51,16 @@ version(unittest)
 */
 template getSymbols(T)
 {
-	import std.typetuple : TypeTuple, NoDuplicates;
+	import std.typetuple : TypeTuple, NoDuplicates, staticMap;
 	import std.traits;
 
 	private template Implementation(T)
 	{
-		static if (isAggregateType!T || is(T == enum)) {
-			alias Implementation = TypeTuple!T;
+		static if (is(T == U!V, alias U, V)) { // single-argument template support
+			alias Implementation = TypeTuple!(U, Implementation!V);
+		}
+		else static if (isAggregateType!T || is(T == enum)) {
+			alias Implementation = T;
 		}
 		else static if (isStaticArray!T || isArray!T) {
 			alias Implementation = Implementation!(typeof(T.init[0]));
@@ -86,10 +89,12 @@ unittest
 	struct A {}
 	interface B {}
 	alias Type = A[const(B[A*])];
+	struct C(T) {}
 
 	// can't directly compare tuples thus comparing their string representation
 	static assert (getSymbols!Type.stringof == TypeTuple!(A, B).stringof);
 	static assert (getSymbols!int.stringof == TypeTuple!().stringof);
+	static assert (getSymbols!(C!A).stringof == TypeTuple!(C, A).stringof);
 }
 
 /**
@@ -257,31 +262,8 @@ unittest
 /// so we have to resort on string for functions attributes.
 template FuncAttributes(alias Func)
 {
-	static if (__VERSION__ <= 2065)
-	{
-		import std.traits;
-		enum FuncAttributes = {
-			alias FA = FunctionAttribute;
-			string res;
-			enum attr = functionAttributes!Func;
-			if (attr & FA.nothrow_) res ~= "nothrow ";
-			if (attr & FA.property) res ~= "@property ";
-			if (attr & FA.pure_) res ~= "pure ";
-			if (attr & FA.ref_) res ~= "ref ";
-			if (attr & FA.safe) res ~= "@safe ";
-			if (attr & FA.trusted) res ~= "@trusted ";
-			static if (is(FunctionTypeOf!Func == const)) res ~= "const ";
-			static if (is(FunctionTypeOf!Func == immutable)) res ~= "immutable ";
-			static if (is(FunctionTypeOf!Func == inout)) res ~= "inout ";
-			static if (is(FunctionTypeOf!Func == shared)) res ~= "shared ";
-			return res.length ? res[0 .. $-1] : res;
-		}();
-	}
-	else
-	{
-		import std.array : join;
-		enum FuncAttributes = [__traits(getFunctionAttributes, Func)].join(" ");
-	}
+	import std.array : join;
+	enum FuncAttributes = [__traits(getFunctionAttributes, Func)].join(" ");
 }
 
 
@@ -392,18 +374,18 @@ mixin template CloneFunctionDecl(alias Func, bool keepUDA = true, string identif
 	import vibe.internal.meta.codegen : ParameterTuple, FuncAttributes;
 
 	static if (keepUDA)
-		private alias UDA = TypeTuple!(__traits(getAttributes, Func));
+		private enum UDA = q{@(TypeTuple!(__traits(getAttributes, Func)))};
 	else
-		private alias UDA = TypeTuple!();
+		private enum UDA = "";
 
 	static if (variadicFunctionStyle!Func == Variadic.no) {
 		mixin(q{
-				@(UDA) ReturnType!Func %s(ParameterTuple!Func) %s;
-			}.format(identifier, FuncAttributes!Func));
+				%s ReturnType!Func %s(ParameterTuple!Func) %s;
+			}.format(UDA, identifier, FuncAttributes!Func));
 	} else static if (variadicFunctionStyle!Func == Variadic.typesafe) {
 		mixin(q{
-				@(UDA) ReturnType!Func %s(ParameterTuple!Func...) %s;
-			}.format(identifier, FuncAttributes!Func));
+				%s ReturnType!Func %s(ParameterTuple!Func...) %s;
+			}.format(UDA, identifier, FuncAttributes!Func));
 	} else
 		static assert(0, "Variadic style " ~ variadicFunctionStyle!Func.stringof
 					  ~ " not implemented.");

@@ -15,28 +15,6 @@ import vibe.core.log;
 
 import std.functional;
 
-version (VibeOldRouterImpl) {
-	pragma(msg, "-version=VibeOldRouterImpl is deprecated and will be removed in the next release.");
-}
-else version = VibeRouterTreeMatch;
-
-
-/**
-	An interface for HTTP request routers.
-
-	As of 0.7.24, the interface has been replaced with a deprecated alias to URLRouter.
-	This will break any code relying on HTTPRouter being an interface, but won't
-	break signatures.
-
-	Removal_notice:
-
-	Note that this is planned to be removed, due to interface/behavior considerations.
-	In particular, the exact behavior of the router (most importantly, the route match
-	string format) must be considered part of the interface. However, this removes the
-	prime argument for having an interface in the first place.
-*/
-deprecated("Will be removed in 0.7.25. See removal notice for more information.")
-public alias HTTPRouter = URLRouter;
 
 /**
 	Routes HTTP requests based on the request method and URL.
@@ -81,9 +59,9 @@ public alias HTTPRouter = URLRouter;
 */
 final class URLRouter : HTTPServerRequestHandler {
 	private {
-		version (VibeRouterTreeMatch) MatchTree!Route m_routes;
-		else Route[] m_routes;
+		MatchTree!Route m_routes;
 		string m_prefix;
+		bool m_computeBasePath;
 	}
 
 	this(string prefix = null)
@@ -91,7 +69,23 @@ final class URLRouter : HTTPServerRequestHandler {
 		m_prefix = prefix;
 	}
 
+	/** Sets a common prefix for all registered routes.
+
+		All routes will implicitly have this prefix prepended before being
+		matched against incoming requests.
+	*/
 	@property string prefix() const { return m_prefix; }
+
+	/** Controls the computation of the "routerRootDir" parameter.
+
+		This parameter is available as `req.params["routerRootDir"]` and
+		contains the relative path to the base path of the router. The base
+		path is determined by the `prefix` property.
+
+		Note that this feature currently is requires dynamic memory allocations
+		and is opt-in for this reason.
+	*/
+	@property void enableRootDir(bool enable) { m_computeBasePath = enable; }
 
 	/// Returns a single route handle to conveniently register multiple methods.
 	URLRoute route(string path)
@@ -132,8 +126,7 @@ final class URLRouter : HTTPServerRequestHandler {
 		import std.algorithm;
 		assert(count(path, ':') <= maxRouteParameters, "Too many route parameters");
 		logDebug("add route %s %s", method, path);
-		version (VibeRouterTreeMatch) m_routes.addTerminal(path, Route(method, path, cb));
-		else m_routes ~= Route(method, path, cb);
+		m_routes.addTerminal(path, Route(method, path, cb));
 		return this;
 	}
 	/// ditto
@@ -244,8 +237,7 @@ final class URLRouter : HTTPServerRequestHandler {
 	*/
 	void rebuild()
 	{
-		version (VibeRouterTreeMatch)
-			m_routes.rebuildGraph();
+		m_routes.rebuildGraph();
 	}
 
 	/// Handles a HTTP request by dispatching it to the registered route handlers.
@@ -253,44 +245,33 @@ final class URLRouter : HTTPServerRequestHandler {
 	{
 		auto method = req.method;
 
+		string calcBasePath()
+		{
+			import vibe.inet.path;
+			auto p = Path(prefix.length ? prefix : "/");
+			p.endsWithSlash = true;
+			return p.relativeToWeb(Path(req.path)).toString();
+		}
+
 		auto path = req.path;
 		if (path.length < m_prefix.length || path[0 .. m_prefix.length] != m_prefix) return;
 		path = path[m_prefix.length .. $];
 
-		version (VibeRouterTreeMatch) {
-			while (true) {
-				bool done = false;
-				m_routes.match(path, (ridx, scope values) {
-					if (done) return;
-					auto r = &m_routes.getTerminalData(ridx);
-					if (r.method == method) {
-						logDebugV("route match: %s -> %s %s %s", req.path, r.method, r.pattern, values);
-						// TODO: use a different map type that avoids allocations for small amounts of keys
-						foreach (i, v; values) req.params[m_routes.getTerminalVarNames(ridx)[i]] = v;
-						r.cb(req, res);
-						done = res.headerWritten;
-					}
-				});
-				if (done) return;
+		while (true) {
+			bool done = m_routes.match(path, (ridx, scope values) {
+				auto r = &m_routes.getTerminalData(ridx);
+				if (r.method != method) return false;
 
-				if (method == HTTPMethod.HEAD) method = HTTPMethod.GET;
-				else break;
-			}
-		} else {
-			while(true)
-			{
-				foreach (ref r; m_routes) {
-					if (r.method == method && r.matches(path, req.params)) {
-						logTrace("route match: %s -> %s %s", req.path, r.method, r.pattern);
-						// .. parse fields ..
-						r.cb(req, res);
-						if (res.headerWritten) return;
-					}
-				}
-				if (method == HTTPMethod.HEAD) method = HTTPMethod.GET;
-				//else if (method == HTTPMethod.OPTIONS)
-				else break;
-			}
+				logDebugV("route match: %s -> %s %s %s", req.path, r.method, r.pattern, values);
+				foreach (i, v; values) req.params[m_routes.getTerminalVarNames(ridx)[i]] = v;
+				if (m_computeBasePath) req.params["routerRootDir"] = calcBasePath();
+				r.cb(req, res);
+				return res.headerWritten;
+			});
+			if (done) return;
+
+			if (method == HTTPMethod.HEAD) method = HTTPMethod.GET;
+			else break;
 		}
 
 		logDebug("no route match: %s %s", req.method, req.requestURL);
@@ -299,12 +280,10 @@ final class URLRouter : HTTPServerRequestHandler {
 	/// Returns all registered routes as const AA
 	const(Route)[] getAllRoutes()
 	{
-		version (VibeRouterTreeMatch) {
-			auto routes = new Route[m_routes.terminalCount];
-			foreach (i, ref r; routes)
-				r = m_routes.getTerminalData(i);
-			return routes;
-		} else return m_routes;
+		auto routes = new Route[m_routes.terminalCount];
+		foreach (i, ref r; routes)
+			r = m_routes.getTerminalData(i);
+		return routes;
 	}
 }
 
@@ -488,44 +467,7 @@ private struct Route {
 	HTTPMethod method;
 	string pattern;
 	HTTPServerRequestDelegate cb;
-
-	bool matches(string url, ref string[string] params)
-	const {
-		size_t i, j;
-
-		// store parameters until a full match is confirmed
-		import std.typecons;
-		Tuple!(string, string)[maxRouteParameters] tmpparams;
-		size_t tmppparams_length = 0;
-
-		for (i = 0, j = 0; i < url.length && j < pattern.length;) {
-			if (pattern[j] == '*') {
-				foreach (t; tmpparams[0 .. tmppparams_length])
-					params[t[0]] = t[1];
-				return true;
-			}
-			if (url[i] == pattern[j]) {
-				i++;
-				j++;
-			} else if(pattern[j] == ':') {
-				j++;
-				string name = skipPathNode(pattern, j);
-				string match = skipPathNode(url, i);
-				assert(tmppparams_length < maxRouteParameters, "Maximum number of route parameters exceeded.");
-				tmpparams[tmppparams_length++] = tuple(name, match);
-			} else return false;
-		}
-
-		if ((j < pattern.length && pattern[j] == '*') || (i == url.length && j == pattern.length)) {
-			foreach (t; tmpparams[0 .. tmppparams_length])
-				params[t[0]] = t[1];
-			return true;
-		}
-
-		return false;
-	}
 }
-
 
 private string skipPathNode(string str, ref size_t idx)
 {
@@ -578,12 +520,12 @@ private struct MatchTree(T) {
 		m_upToDate = false;
 	}
 
-	void match(string text, scope void delegate(size_t terminal, scope string[] vars) del)
+	bool match(string text, scope bool delegate(size_t terminal, scope string[] vars) del)
 	{
 		// lazily update the match graph
 		if (!m_upToDate) rebuildGraph();
 
-		doMatch(text, del);
+		return doMatch(text, del);
 	}
 
 	const(string)[] getTerminalVarNames(size_t terminal) const { return m_terminals[terminal].varNames; }
@@ -634,7 +576,7 @@ private struct MatchTree(T) {
 		}
 	}
 
-	private void doMatch(string text, scope void delegate(size_t terminal, scope string[] vars) del)
+	private bool doMatch(string text, scope bool delegate(size_t terminal, scope string[] vars) del)
 	const {
 		string[maxRouteParameters] vars_buf = void;
 
@@ -642,7 +584,7 @@ private struct MatchTree(T) {
 
 		// first, determine the end node, if any
 		auto n = matchTerminals(text);
-		if (!n) return;
+		if (!n) return false;
 
 		// then, go through the terminals and match their variables
 		foreach (ref t; m_terminalTags[n.terminalsStart .. n.terminalsEnd]) {
@@ -650,8 +592,9 @@ private struct MatchTree(T) {
 			auto vars = vars_buf[0 .. term.varNames.length];
 			matchVars(vars, term, text);
 			if (vars.canFind!(v => v.length == 0)) continue; // all variables must be non-empty to match
-			del(t.index, vars);
+			if (del(t.index, vars)) return true;
 		}
+		return false;
 	}
 
 	private inout(Node)* matchTerminals(string text)
@@ -662,7 +605,7 @@ private struct MatchTree(T) {
 
 		// follow the path through the match graph
 		foreach (i, char ch; text) {
-			auto nidx = n.edges[cast(ubyte)ch];
+			auto nidx = n.edges[cast(size_t)ch];
 			if (nidx == uint.max) return null;
 			n = &m_nodes[nidx];
 		}
@@ -684,7 +627,7 @@ private struct MatchTree(T) {
 
 		// folow the path throgh the match graph
 		foreach (i, char ch; text) {
-			auto var = term.varMap[nidx];
+			auto var = term.varMap.get(nidx, size_t.max);
 
 			// detect end of variable
 			if (var != activevar && activevar != size_t.max) {
@@ -703,7 +646,7 @@ private struct MatchTree(T) {
 		}
 
 		// terminate any active varible with the end of the input string or with the last character
-		auto var = term.varMap[nidx];
+		auto var = term.varMap.get(nidx, size_t.max);
 		if (activevar != size_t.max) dst[activevar] = text[activevarstart .. (var == activevar ? $ : $-1)];
 	}
 
@@ -741,18 +684,20 @@ private struct MatchTree(T) {
 				auto var = t.var.length ? m_terminals[t.index].varNames.countUntil(t.var) : size_t.max;
 				assert(!m_terminalTags[nn.terminalsStart .. $].canFind!(u => u.index == t.index && u.var == var));
 				m_terminalTags ~= TerminalTag(t.index, var);
-				m_terminals[t.index].varMap[nmidx] = var;
+				if (var != size_t.max)
+					m_terminals[t.index].varMap[nmidx] = var;
 			}
 			nn.terminalsEnd = m_terminalTags.length;
-			foreach (e; builder.m_nodes[n].edges)
-				nn.edges[e.ch] = process(e.to);
+			foreach (ch, nodes; builder.m_nodes[n].edges)
+				foreach (to; nodes)
+					nn.edges[ch] = process(to);
 
 			m_nodes[nmidx] = nn;
 
 			return nmidx;
 		}
-		assert(builder.m_nodes[0].edges.length == 1, "Graph must be disambiguated before purging.");
-		process(builder.m_nodes[0].edges[0].to);
+		assert(builder.m_nodes[0].edges['^'].length == 1, "Graph must be disambiguated before purging.");
+		process(builder.m_nodes[0].edges['^'][0]);
 
 		logDebug("Match tree has %s nodes, %s terminals", m_nodes.length, m_terminals.length);
 	}
@@ -769,6 +714,7 @@ unittest {
 		m.match(str, (t, scope vals) {
 			mterms ~= t;
 			mvars ~= vals;
+			return false;
 		});
 		assert(mterms == terms, format("Mismatched terminals: %s (expected %s)", mterms, terms));
 		assert(mvars == vars, format("Mismatched variables; %s (expected %s)", mvars, vars));
@@ -846,12 +792,9 @@ private struct MatchGraphBuilder {
 			bool opEquals(in ref TerminalTag other) const { return index == other.index && var == other.var; }
 		}
 		struct Node {
+			size_t idx;
 			TerminalTag[] terminals;
-			Edge[] edges;
-		}
-		struct Edge {
-			ubyte ch;
-			size_t to;
+			size_t[][ubyte.max+1] edges;
 		}
 		Node[] m_nodes;
 	}
@@ -903,11 +846,14 @@ private struct MatchGraphBuilder {
 
 	void disambiguate()
 	{
+		import std.algorithm : map, sum;
+		import std.array : appender, join;
+
 //logInfo("Disambiguate");
 		if (!m_nodes.length) return;
 
 		import vibe.utils.hashmap;
-		HashMap!(immutable(size_t)[], size_t) combined_nodes;
+		HashMap!(size_t[], size_t) combined_nodes;
 		auto visited = new bool[m_nodes.length * 2];
 		size_t[] node_stack = [0];
 		while (node_stack.length) {
@@ -919,46 +865,56 @@ private struct MatchGraphBuilder {
 //logInfo("Disambiguate %s", n);
 			visited[n] = true;
 
-			Edge[] newedges;
-			immutable(size_t)[][ubyte.max+1] edges;
-			foreach (e; m_nodes[n].edges) edges[e.ch] ~= e.to;
 			foreach (ch_; ubyte.min .. ubyte.max+1) {
 				ubyte ch = cast(ubyte)ch_;
-				auto chnodes = edges[ch_];
+				auto chnodes = m_nodes[n].edges[ch_];
 
 				// handle trivial cases
-				if (!chnodes.length) continue;
-				if (chnodes.length == 1) { addToArray(newedges, Edge(ch, chnodes[0])); continue; }
+				if (chnodes.length <= 1) continue;
 
 				// generate combined state for ambiguous edges
-				if (auto pn = chnodes in combined_nodes) { addToArray(newedges, Edge(ch, *pn)); continue; }
+				if (auto pn = chnodes in combined_nodes) { m_nodes[n].edges[ch] = singleNodeArray(*pn); continue; }
 
 				// for new combinations, create a new node
 				size_t ncomb = addNode();
 				combined_nodes[chnodes] = ncomb;
-				bool[ubyte][size_t] nc_edges;
+
+				// allocate memory for all edges combined
+				size_t total_edge_count = 0;
 				foreach (chn; chnodes) {
-					foreach (e; m_nodes[chn].edges) {
-						if (auto pv = e.to in nc_edges) {
-							if (auto pw = e.ch in *pv)
-								continue;
-							else (*pv)[e.ch] = true;
-						} else nc_edges[e.to][e.ch] = true;
-						m_nodes[ncomb].edges ~= e;
-					}
-					addToArray(m_nodes[ncomb].terminals, m_nodes[chn].terminals);
+					Node* cn = &m_nodes[chn];
+					foreach (edges; cn.edges)
+						total_edge_count +=edges.length;
 				}
+				auto mem = new size_t[total_edge_count];
+
+				// write all edges
+				size_t idx = 0;
+				foreach (to_ch; ubyte.min .. ubyte.max+1) {
+					size_t start = idx;
+					foreach (chn; chnodes) {
+						auto edges = m_nodes[chn].edges[to_ch];
+						mem[idx .. idx + edges.length] = edges;
+						idx += edges.length;
+					}
+					m_nodes[ncomb].edges[to_ch] = mem[start .. idx];
+				}
+
+				// add terminal indices
+				foreach (chn; chnodes) addToArray(m_nodes[ncomb].terminals, m_nodes[chn].terminals);
 				foreach (i; 1 .. m_nodes[ncomb].terminals.length)
 					assert(m_nodes[ncomb].terminals[0] != m_nodes[ncomb].terminals[i]);
-				newedges ~= Edge(ch, ncomb);
+				
+				m_nodes[n].edges[ch] = singleNodeArray(ncomb);
 			}
-			m_nodes[n].edges = newedges;
 
 			// process nodes recursively
 			node_stack.assumeSafeAppend();
-			foreach (e; newedges) node_stack ~= e.to;
+			foreach (ch; ubyte.min .. ubyte.max+1)
+				if (m_nodes[n].edges[ch].length)
+					node_stack ~= m_nodes[n].edges[ch];
 		}
-//logInfo("Disambiguate done");
+//logInfo("Disambiguate done: %s nodes", m_nodes.length);
 	}
 
 	void print()
@@ -979,14 +935,17 @@ private struct MatchGraphBuilder {
 				return ch.to!string;
 			}
 			logInfo("  %s %s", i, n.terminals.map!(t => format("T%s%s", t.index, t.var.length ? "("~t.var~")" : "")).join(" "));
-			foreach (e; n.edges)
-				logInfo("    %s -> %s", mapChar(e.ch), e.to);
+			foreach (ch, tnodes; n.edges)
+				foreach (tn; tnodes)
+					logInfo("    %s -> %s", mapChar(cast(ubyte)ch), tn);
 		}
 	}
 
 	private void addEdge(size_t from, size_t to, ubyte ch, size_t terminal, string var)
 	{
-		m_nodes[from].edges ~= Edge(ch, to);
+		auto e = &m_nodes[from].edges[ch];
+		if (!(*e).length) *e = singleNodeArray(to);
+		else *e ~= to;
 		addTerminal(to, terminal, var);
 	}
 
@@ -994,7 +953,7 @@ private struct MatchGraphBuilder {
 	{
 		import std.algorithm : canFind;
 		import std.string : format;
-		assert(!m_nodes[from].edges.canFind!(e => e.ch == ch), format("%s is in %s", ch, m_nodes[from].edges));
+		assert(!m_nodes[from].edges[ch].length > 0, format("%s is in %s", ch, m_nodes[from].edges));
 		auto nidx = addNode();
 		addEdge(from, nidx, ch, terminal, var);
 		return nidx;
@@ -1015,8 +974,13 @@ private struct MatchGraphBuilder {
 	private size_t addNode()
 	{
 		auto idx = m_nodes.length;
-		m_nodes ~= Node(null, null);
+		m_nodes ~= Node(idx, null, null);
 		return idx;
+	}
+
+	private size_t[] singleNodeArray(size_t node)
+	{
+		return (&m_nodes[node].idx)[0 .. 1];
 	}
 
 	private static addToArray(T)(ref T[] arr, T[] elems) { foreach (e; elems) addToArray(arr, e); }

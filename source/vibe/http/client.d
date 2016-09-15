@@ -60,12 +60,12 @@ import std.datetime;
 
 	See_also: `vibe.inet.urltransfer.download`
 */
-HTTPClientResponse requestHTTP(string url, scope void delegate(scope HTTPClientRequest req) requester = null, HTTPClientSettings settings = defaultSettings)
+HTTPClientResponse requestHTTP(string url, scope void delegate(scope HTTPClientRequest req) requester = null, const(HTTPClientSettings) settings = defaultSettings)
 {
 	return requestHTTP(URL.parse(url), requester, settings);
 }
 /// ditto
-HTTPClientResponse requestHTTP(URL url, scope void delegate(scope HTTPClientRequest req) requester = null, HTTPClientSettings settings = defaultSettings)
+HTTPClientResponse requestHTTP(URL url, scope void delegate(scope HTTPClientRequest req) requester = null, const(HTTPClientSettings) settings = defaultSettings)
 {
 	enforce(url.schema == "http" || url.schema == "https", "URL schema must be http(s).");
 	enforce(url.host.length > 0, "URL must contain a host name.");
@@ -101,12 +101,12 @@ HTTPClientResponse requestHTTP(URL url, scope void delegate(scope HTTPClientRequ
 	return res;
 }
 /// ditto
-void requestHTTP(string url, scope void delegate(scope HTTPClientRequest req) requester, scope void delegate(scope HTTPClientResponse req) responder, HTTPClientSettings settings = defaultSettings)
+void requestHTTP(string url, scope void delegate(scope HTTPClientRequest req) requester, scope void delegate(scope HTTPClientResponse req) responder, const(HTTPClientSettings) settings = defaultSettings)
 {
 	requestHTTP(URL(url), requester, responder, settings);
 }
 /// ditto
-void requestHTTP(URL url, scope void delegate(scope HTTPClientRequest req) requester, scope void delegate(scope HTTPClientResponse req) responder, HTTPClientSettings settings = defaultSettings)
+void requestHTTP(URL url, scope void delegate(scope HTTPClientRequest req) requester, scope void delegate(scope HTTPClientResponse req) responder, const(HTTPClientSettings) settings = defaultSettings)
 {
 	enforce(url.schema == "http" || url.schema == "https", "URL schema must be http(s).");
 	enforce(url.host.length > 0, "URL must contain a host name.");
@@ -168,23 +168,26 @@ unittest {
 	usually requestHTTP should be used for making requests instead of manually using a
 	HTTPClient to do so.
 */
-auto connectHTTP(string host, ushort port = 0, bool use_tls = false, HTTPClientSettings settings = defaultSettings)
+auto connectHTTP(string host, ushort port = 0, bool use_tls = false, const(HTTPClientSettings) settings = null)
 {
-	static struct ConnInfo { string host; ushort port; bool useTLS; string proxyIP; ushort proxyPort; }
+	static struct ConnInfo { string host; ushort port; bool useTLS; string proxyIP; ushort proxyPort; NetworkAddress bind_addr; }
 	static FixedRingBuffer!(Tuple!(ConnInfo, ConnectionPool!HTTPClient), 16) s_connections;
+
+	auto sttngs = settings ? settings : defaultSettings;
+
 	if( port == 0 ) port = use_tls ? 443 : 80;
-	auto ckey = ConnInfo(host, port, use_tls, settings?settings.proxyURL.host:null, settings?settings.proxyURL.port:0);
+	auto ckey = ConnInfo(host, port, use_tls, sttngs.proxyURL.host, sttngs.proxyURL.port, sttngs.networkInterface);
 
 	ConnectionPool!HTTPClient pool;
 	foreach (c; s_connections)
-		if (c[0].host == host && c[0].port == port && c[0].useTLS == use_tls && ((c[0].proxyIP == settings.proxyURL.host && c[0].proxyPort == settings.proxyURL.port) || settings is null))
+		if (c[0] == ckey)
 			pool = c[1];
 
 	if (!pool) {
-		logDebug("Create HTTP client pool %s:%s %s proxy %s:%d", host, port, use_tls, ( settings ) ? settings.proxyURL.host : string.init, ( settings ) ? settings.proxyURL.port : 0);
+		logDebug("Create HTTP client pool %s:%s %s proxy %s:%d", host, port, use_tls, sttngs.proxyURL.host, sttngs.proxyURL.port);
 		pool = new ConnectionPool!HTTPClient({
 				auto ret = new HTTPClient;
-				ret.connect(host, port, use_tls, settings);
+				ret.connect(host, port, use_tls, sttngs);
 				return ret;
 			});
 		if (s_connections.full) s_connections.popFront();
@@ -205,6 +208,12 @@ auto connectHTTP(string host, ushort port = 0, bool use_tls = false, HTTPClientS
 class HTTPClientSettings {
 	URL proxyURL;
 	Duration defaultKeepAliveTimeout = 10.seconds;
+
+	/// Forces a specific network interface to use for outgoing connections.
+	NetworkAddress networkInterface = anyAddress;
+
+	/// Can be used to force looking up IPv4/IPv6 addresses for host names.
+	AddressFamily dnsAddressFamily = AddressFamily.UNSPEC;
 }
 
 ///
@@ -241,9 +250,10 @@ final class HTTPClient {
 	enum maxHeaderLineLength = 4096;
 
 	private {
-		HTTPClientSettings m_settings;
+		Rebindable!(const(HTTPClientSettings)) m_settings;
 		string m_server;
 		ushort m_port;
+		bool m_useTLS;
 		TCPConnection m_conn;
 		Stream m_stream;
 		TLSContext m_tls;
@@ -272,15 +282,12 @@ final class HTTPClient {
 	*/
 	static void setTLSSetupCallback(void function(TLSContext) func) { ms_tlsSetup = func; }
 
-	/// Compatibility alias - will be deprecated soon.
-	alias setSSLSetupCallback = setTLSSetupCallback;
-
 	/**
 		Connects to a specific server.
 
 		This method may only be called if any previous connection has been closed.
 	*/
-	void connect(string server, ushort port = 80, bool use_tls = false, HTTPClientSettings settings = defaultSettings)
+	void connect(string server, ushort port = 80, bool use_tls = false, const(HTTPClientSettings) settings = defaultSettings)
 	{
 		assert(m_conn is null);
 		assert(port != 0);
@@ -291,6 +298,7 @@ final class HTTPClient {
 		m_keepAliveLimit = Clock.currTime(UTC()) + m_keepAliveTimeout;
 		m_server = server;
 		m_port = port;
+		m_useTLS = use_tls;
 		if (use_tls) {
 			m_tls = createTLSContext(TLSContextKind.client);
 			// this will be changed to trustedCert once a proper root CA store is available by default
@@ -359,8 +367,8 @@ final class HTTPClient {
 			throw new HTTPStatusException(HTTPStatus.notAcceptable, "The Proxy Server didn't allow Basic Authentication");
 		}
 
-		SysTime connected_time = Clock.currTime(UTC());
-		has_body = doRequest(requester, &close_conn, true, connected_time);
+		SysTime connected_time;
+		has_body = doRequestWithRetry(requester, true, close_conn, connected_time);
 		m_responding = true;
 
 		static if (is (T == HTTPClientResponse*))
@@ -378,12 +386,15 @@ final class HTTPClient {
 	/**
 		Performs a HTTP request.
 
-		requester is called first to populate the request with headers and the desired
+		`requester` is called first to populate the request with headers and the desired
 		HTTP method and version. After a response has been received it is then passed
 		to the caller which can in turn read the reponse body. Any part of the body
 		that has not been processed will automatically be consumed and dropped.
 
-		Note that the second form of this method (returning a HTTPClientResponse) is
+		Note that the `requester` callback might be invoked multiple times in the event
+		that a request has to be resent due to a connection failure.
+
+		Also note that the second form of this method (returning a `HTTPClientResponse`) is
 		not recommended to use as it may accidentially block a HTTP connection when
 		only part of the response body was read and also requires a heap allocation
 		for the response object. The callback based version on the other hand uses
@@ -397,10 +408,10 @@ final class HTTPClient {
 			scope(exit) request_allocator.reset();
 		} else auto request_allocator = defaultAllocator();
 
-		SysTime connected_time = Clock.currTime(UTC());
+		bool close_conn;
+		SysTime connected_time;
+		bool has_body = doRequestWithRetry(requester, false, close_conn, connected_time);
 
-		bool close_conn = false;
-		bool has_body = doRequest(requester, &close_conn, false, connected_time);
 		m_responding = true;
 		auto res = scoped!HTTPClientResponse(this, has_body, close_conn, request_allocator, connected_time);
 
@@ -435,9 +446,9 @@ final class HTTPClient {
 	/// ditto
 	HTTPClientResponse request(scope void delegate(HTTPClientRequest) requester)
 	{
-		bool close_conn = false;
-		auto connected_time = Clock.currTime(UTC());
-		bool has_body = doRequest(requester, &close_conn, false, connected_time);
+		bool close_conn;
+		SysTime connected_time;
+		bool has_body = doRequestWithRetry(requester, false, close_conn, connected_time);
 		m_responding = true;
 		auto res = new HTTPClientResponse(this, has_body, close_conn, defaultAllocator(), connected_time);
 
@@ -449,7 +460,31 @@ final class HTTPClient {
 		return res;
 	}
 
+	private bool doRequestWithRetry(scope void delegate(HTTPClientRequest req) requester, bool confirmed_proxy_auth /* basic only */, out bool close_conn, out SysTime connected_time)
+	{
+		if (m_conn && m_conn.connected && connected_time > m_keepAliveLimit){
+			logDebug("Disconnected to avoid timeout");
+			disconnect();
+		}
 
+		// check if this isn't the first request on a connection
+		bool is_persistent_request = m_conn && m_conn.connected;
+
+		// retry the request if the connection gets closed prematurely and this is a persistent request
+		bool has_body;
+		foreach (i; 0 .. is_persistent_request ? 2 : 1) {
+		 	connected_time = Clock.currTime(UTC());
+
+			close_conn = false;
+			has_body = doRequest(requester, &close_conn, false, connected_time);
+
+			logTrace("HTTP client waiting for response");
+			if (!m_stream.empty) break;
+
+			enforce(i != 1, "Second attempt to send HTTP request failed.");
+		}
+		return has_body;
+	}
 
 	private bool doRequest(scope void delegate(HTTPClientRequest req) requester, bool* close_conn, bool confirmed_proxy_auth = false /* basic only */, SysTime connected_time = Clock.currTime(UTC()))
 	{
@@ -458,11 +493,6 @@ final class HTTPClient {
 
 		m_requesting = true;
 		scope(exit) m_requesting = false;
-
-		if (m_conn && m_conn.connected && connected_time > m_keepAliveLimit){
-			logDebug("Disconnected to avoid timeout");
-			disconnect();
-		}
 
 		if (!m_conn || !m_conn.connected) {
 			if (m_conn) m_conn.close(); // make sure all resources are freed
@@ -503,15 +533,24 @@ final class HTTPClient {
 					use_dns = true;
 				}
 
-				NetworkAddress proxyAddr = resolveHost(m_settings.proxyURL.host, 0, use_dns);
+				NetworkAddress proxyAddr = resolveHost(m_settings.proxyURL.host, m_settings.dnsAddressFamily, use_dns);
 				proxyAddr.port = m_settings.proxyURL.port;
-				m_conn = connectTCP(proxyAddr);
+				m_conn = connectTCP(proxyAddr, m_settings.networkInterface);
 			}
-			else
-				m_conn = connectTCP(m_server, m_port);
+			else {
+				auto addr = resolveHost(m_server, m_settings.dnsAddressFamily);
+				addr.port = m_port;
+				m_conn = connectTCP(addr, m_settings.networkInterface);
+			}
 
 			m_stream = m_conn;
-			if (m_tls) m_stream = createTLSStream(m_conn, m_tls, TLSStreamState.connecting, m_server, m_conn.remoteAddress);
+			if (m_useTLS) {
+				try m_stream = createTLSStream(m_conn, m_tls, TLSStreamState.connecting, m_server, m_conn.remoteAddress);
+				catch (Exception e) {
+					m_conn.close();
+					throw e;
+				}
+			}
 		}
 
 		auto req = scoped!HTTPClientRequest(m_stream, m_conn.localAddress);
@@ -809,27 +848,29 @@ final class HTTPClientResponse : HTTPResponse {
 		assert (m_client, "Response was already read or no response body, may not use bodyReader.");
 
 		// prepare body the reader
-		if( auto pte = "Transfer-Encoding" in this.headers ){
+		if (auto pte = "Transfer-Encoding" in this.headers) {
 			enforce(*pte == "chunked");
 			m_chunkedInputStream = FreeListRef!ChunkedInputStream(m_client.m_stream);
 			m_bodyReader = this.m_chunkedInputStream;
-		} else if( auto pcl = "Content-Length" in this.headers ){
+		} else if (auto pcl = "Content-Length" in this.headers) {
 			m_limitedInputStream = FreeListRef!LimitedInputStream(m_client.m_stream, to!ulong(*pcl));
 			m_bodyReader = m_limitedInputStream;
-		} else {
+		} else if (isKeepAliveResponse) {
 			m_limitedInputStream = FreeListRef!LimitedInputStream(m_client.m_stream, 0);
 			m_bodyReader = m_limitedInputStream;
+		} else {
+			m_bodyReader = m_client.m_stream;
 		}
 
 		if( auto pce = "Content-Encoding" in this.headers ){
 			if( *pce == "deflate" ){
 				m_deflateInputStream = FreeListRef!DeflateInputStream(m_bodyReader);
 				m_bodyReader = m_deflateInputStream;
-			} else if( *pce == "gzip" ){
+			} else if( *pce == "gzip" || *pce == "x-gzip"){
 				m_gzipInputStream = FreeListRef!GzipInputStream(m_bodyReader);
 				m_bodyReader = m_gzipInputStream;
 			}
-			else enforce(*pce == "identity", "Unsuported content encoding: "~*pce);
+			else enforce(*pce == "identity" || *pce == "", "Unsuported content encoding: "~*pce);
 		}
 
 		// be sure to free resouces as soon as the response has been read
@@ -898,19 +939,50 @@ final class HTTPClientResponse : HTTPResponse {
 
 		The caller caller gets ownership of the ConnectionStream and is responsible
 		for closing it.
+
+		Notice:
+			When using the overload that returns a `ConnectionStream`, the caller
+			must make sure that the stream is not used after the
+			`HTTPClientRequest` has been destroyed.
+
 		Params:
-			newProtocol = The protocol to which the connection is expected to upgrade. Should match the Upgrade header of the request.
+			new_protocol = The protocol to which the connection is expected to
+				upgrade. Should match the Upgrade header of the request. If an
+				empty string is passed, the "Upgrade" header will be ignored and
+				should be checked by other means.
 	*/
-	ConnectionStream switchProtocol(in string newProtocol)
+	ConnectionStream switchProtocol(string new_protocol)
 	{
 		enforce(statusCode == HTTPStatus.switchingProtocols, "Server did not send a 101 - Switching Protocols response");
 		string *resNewProto = "Upgrade" in headers;
 		enforce(resNewProto, "Server did not send an Upgrade header");
-		enforce(*resNewProto == newProtocol, "Expected Upgrade: " ~ newProtocol ~", received Upgrade: " ~ *resNewProto);
+		enforce(!new_protocol.length || *resNewProto == new_protocol, "Expected Upgrade: " ~ new_protocol ~", received Upgrade: " ~ *resNewProto);
 		auto stream = new ConnectionProxyStream(m_client.m_stream, m_client.m_conn);
 		m_client.m_responding = false;
 		m_client = null;
+		m_closeConn = true; // cannot reuse connection for further requests!
 		return stream;
+	}
+	/// ditto
+	void switchProtocol(string new_protocol, scope void delegate(ConnectionStream str) del)
+	{
+		enforce(statusCode == HTTPStatus.switchingProtocols, "Server did not send a 101 - Switching Protocols response");
+		string *resNewProto = "Upgrade" in headers;
+		enforce(resNewProto, "Server did not send an Upgrade header");
+		enforce(!new_protocol.length || *resNewProto == new_protocol, "Expected Upgrade: " ~ new_protocol ~", received Upgrade: " ~ *resNewProto);
+		scope stream = new ConnectionProxyStream(m_client.m_stream, m_client.m_conn);
+		m_client.m_responding = false;
+		m_client = null;
+		m_closeConn = true;
+		del(stream);
+	}
+
+	private @property isKeepAliveResponse()
+	const {
+		string conn;
+		if (this.httpVersion == HTTPVersion.HTTP_1_0) conn = this.headers.get("Connection", "close");
+		else conn = this.headers.get("Connection", "keep-alive");
+		return icmp(conn, "close") != 0;
 	}
 
 	private void finalize()
@@ -937,4 +1009,4 @@ final class HTTPClientResponse : HTTPResponse {
 }
 
 // This object is a placeholder and should to never be modified.
-private __gshared HTTPClientSettings defaultSettings = new HTTPClientSettings;
+package __gshared HTTPClientSettings defaultSettings = new HTTPClientSettings;

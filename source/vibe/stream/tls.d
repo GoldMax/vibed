@@ -29,7 +29,7 @@ import core.sync.mutex;
 import core.thread;
 
 version (VibeNoSSL) {}
-else version = OpenSSL;
+else version(Have_openssl) version = OpenSSL;
 
 
 /// A simple TLS client
@@ -89,6 +89,13 @@ TLSContext createTLSContext(TLSContextKind kind, TLSVersion ver = TLSVersion.any
 		}
 		if (!gs_sslContextFactory)
 			setTLSContextFactory(&createOpenSSLContext);
+	} else version(Have_botan) {
+		static TLSContext createBotanContext(TLSContextKind kind, TLSVersion ver) {
+			import vibe.stream.botan;
+			return new BotanTLSContext(kind);
+		}
+		if (!gs_sslContextFactory)
+			setTLSContextFactory(&createBotanContext);
 	}
 	assert(gs_sslContextFactory !is null, "No TLS context factory registered.");
 	return gs_sslContextFactory(kind, ver);
@@ -137,14 +144,17 @@ auto createTLSStreamFL(Stream underlying, TLSContext ctx, TLSStreamState state, 
 	// implementation headers.  When client code uses this function the compiler
 	// will have to semantically analyse it and subsequently will import the TLS
 	// implementation headers.
-	version (VibeNoTLS) assert(false, "No TLS support compiled in (VibeNoTLS)");
-	else {
+	version (OpenSSL) {
 		import vibe.utils.memory;
 		import vibe.stream.openssl;
 		static assert(AllocSize!TLSStream > 0);
 		return FreeListRef!OpenSSLStream(underlying, cast(OpenSSLContext)ctx,
 										 state, peer_name, peer_address);
-	}
+	} else version (Have_botan) {
+		import vibe.utils.memory;
+		import vibe.stream.botan;
+		return FreeListRef!BotanTLSStream(cast(ConnectionStream) underlying, cast(BotanTLSContext) ctx, state, peer_name, peer_address);
+	} else assert(false, "No TLS support compiled in (VibeNoTLS)");
 }
 
 void setTLSContextFactory(TLSContext function(TLSContextKind, TLSVersion) factory)
@@ -165,6 +175,15 @@ void setTLSContextFactory(TLSContext function(TLSContextKind, TLSVersion) factor
 */
 interface TLSStream : Stream {
 	@property TLSCertificateInformation peerCertificate();
+
+	//-/ The host name reported through SNI
+	//@property string hostName() const;
+
+	/** The ALPN that has been negotiated for this connection.
+
+		See_also: $(WEB https://en.wikipedia.org/wiki/Application-Layer_Protocol_Negotiation)
+	*/
+	@property string alpn() const;
 }
 
 enum TLSStreamState {
@@ -227,6 +246,14 @@ interface TLSContext {
 	@property void sniCallback(TLSServerNameCallback callback);
 	/// ditto
 	@property inout(TLSServerNameCallback) sniCallback() inout;
+
+	/// Callback function invoked to choose alpn (client side)
+	@property void alpnCallback(TLSALPNCallback alpn_chooser);
+	/// ditto
+	@property TLSALPNCallback alpnCallback() const;
+
+	/// Setter method invoked to offer ALPN (server side)
+	void setClientALPN(string[] alpn);
 
 	/** Creates a new stream associated to this context.
 	*/
@@ -292,6 +319,8 @@ enum TLSVersion {
 	any, /// Accept SSLv3 or TLSv1.0 and greater
 	ssl3, /// Accept only SSLv3
 	tls1, /// Accept only TLSv1.0
+	tls1_1, /// Accept only TLSv1.1
+	tls1_2, /// Accept only TLSv1.2
 	dtls1, /// Use DTLSv1.0
 
 	ssl23 = any /// Deprecated compatibility alias
@@ -381,7 +410,7 @@ struct TLSCertificateInformation {
 		Maps fields to their values. For example, typical fields on a
 		certificate will be 'commonName', 'countryName', 'emailAddress', etc.
 	*/
-	DictionaryList!(string, false) subjectName;
+	DictionaryList!(string, false, 8) subjectName;
 }
 
 struct TLSPeerValidationData {
@@ -395,6 +424,7 @@ struct TLSPeerValidationData {
 alias TLSPeerValidationCallback = bool delegate(scope TLSPeerValidationData data);
 
 alias TLSServerNameCallback = TLSContext delegate(string hostname);
+alias TLSALPNCallback = string delegate(string[] alpn_choices);
 
 private {
 	__gshared TLSContext function(TLSContextKind, TLSVersion) gs_sslContextFactory;

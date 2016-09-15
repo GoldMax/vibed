@@ -8,6 +8,7 @@
 module vibe.core.net;
 
 public import vibe.core.stream;
+public import std.socket : AddressFamily;
 
 import vibe.core.driver;
 import vibe.core.log;
@@ -17,7 +18,12 @@ import core.time;
 import std.exception;
 import std.functional;
 import std.string;
-version(Windows) import std.c.windows.winsock;
+version(Windows) {
+	static if (__VERSION__ >= 2070)
+		import std.c.windows.winsock;
+	else
+		import core.sys.windows.winsock2;
+}
 
 
 /**
@@ -26,7 +32,12 @@ version(Windows) import std.c.windows.winsock;
 	Setting use_dns to false will only allow IP address strings but also guarantees
 	that the call will not block.
 */
-NetworkAddress resolveHost(string host, ushort address_family = AF_UNSPEC, bool use_dns = true)
+NetworkAddress resolveHost(string host, AddressFamily address_family = AddressFamily.UNSPEC, bool use_dns = true)
+{
+	return resolveHost(host, cast(ushort)address_family, use_dns);
+}
+/// ditto
+NetworkAddress resolveHost(string host, ushort address_family, bool use_dns = true)
 {
 	return getEventDriver().resolveHost(host, address_family, use_dns);
 }
@@ -77,15 +88,31 @@ TCPListener listenTCP_s(ushort port, void function(TCPConnection stream) connect
 /**
 	Establishes a connection to the given host/port.
 */
-TCPConnection connectTCP(string host, ushort port)
+TCPConnection connectTCP(string host, ushort port, string bind_interface = null, ushort bind_port = 0)
 {
 	NetworkAddress addr = resolveHost(host);
 	addr.port = port;
-	return connectTCP(addr);
+	NetworkAddress bind_address;
+	if (bind_interface.length) bind_address = resolveHost(bind_interface, addr.family);
+	else {
+		bind_address.family = addr.family;
+		if (addr.family == AF_INET) bind_address.sockAddrInet4.sin_addr.s_addr = 0;
+		else bind_address.sockAddrInet6.sin6_addr.s6_addr[] = 0;
+	}
+	bind_address.port = bind_port;
+	return getEventDriver().connectTCP(addr, bind_address);
 }
 /// ditto
-TCPConnection connectTCP(NetworkAddress addr) {
-	return getEventDriver().connectTCP(addr);
+TCPConnection connectTCP(NetworkAddress addr, NetworkAddress bind_address = anyAddress)
+{
+	if (bind_address.family == AF_UNSPEC) {
+		bind_address.family = addr.family;
+		if (addr.family == AF_INET) bind_address.sockAddrInet4.sin_addr.s_addr = 0;
+		else bind_address.sockAddrInet6.sin6_addr.s6_addr[] = 0;
+		bind_address.port = 0;
+	}
+	enforce(addr.family == bind_address.family, "Destination address and bind address have different address families.");
+	return getEventDriver().connectTCP(addr, bind_address);
 }
 
 
@@ -97,6 +124,13 @@ UDPConnection listenUDP(ushort port, string bind_address = "0.0.0.0")
 	return getEventDriver().listenUDP(port, bind_address);
 }
 
+NetworkAddress anyAddress()
+{
+	NetworkAddress ret;
+	ret.family = AF_UNSPEC;
+	return ret;
+}
+
 version(VibeLibasyncDriver) {
 	public import libasync.events : NetworkAddress;
 } else {
@@ -104,15 +138,19 @@ version(VibeLibasyncDriver) {
 	Represents a network/socket address.
 */
 struct NetworkAddress {
+	@safe:
+
 	private union {
 		sockaddr addr;
 		sockaddr_in addr_ip4;
 		sockaddr_in6 addr_ip6;
 	}
 
-	/** Family (AF_) of the socket address.
+	/** Family of the socket address.
 	*/
 	@property ushort family() const pure nothrow { return addr.sa_family; }
+	/// ditto
+	@property void family(AddressFamily val) pure nothrow { addr.sa_family = cast(ubyte)val; }
 	/// ditto
 	@property void family(ushort val) pure nothrow { addr.sa_family = cast(ubyte)val; }
 
@@ -120,19 +158,22 @@ struct NetworkAddress {
 	*/
 	@property ushort port()
 	const pure nothrow {
+		ushort nport;
 		switch (this.family) {
 			default: assert(false, "port() called for invalid address family.");
-			case AF_INET: return ntoh(addr_ip4.sin_port);
-			case AF_INET6: return ntoh(addr_ip6.sin6_port);
+			case AF_INET: nport = addr_ip4.sin_port; break;
+			case AF_INET6: nport = addr_ip6.sin6_port; break;
 		}
+		return () @trusted { return ntoh(nport); } ();
 	}
 	/// ditto
 	@property void port(ushort val)
 	pure nothrow {
+		auto nport = () @trusted { return hton(val); } ();
 		switch (this.family) {
 			default: assert(false, "port() called for invalid address family.");
-			case AF_INET: addr_ip4.sin_port = hton(val); break;
-			case AF_INET6: addr_ip6.sin6_port = hton(val); break;
+			case AF_INET: addr_ip4.sin_port = nport; break;
+			case AF_INET6: addr_ip6.sin6_port = nport; break;
 		}
 	}
 
@@ -164,25 +205,32 @@ struct NetworkAddress {
 	string toAddressString()
 	const {
 		import std.array : appender;
-		import std.string : format;
+		auto ret = appender!string();
+		ret.reserve(40);
+		toAddressString(str => ret.put(str));
+		return ret.data;
+	}
+	/// ditto
+	void toAddressString(scope void delegate(const(char)[]) @safe sink)
+	const {
+		import std.array : appender;
 		import std.format : formattedWrite;
 		ubyte[2] _dummy = void; // Workaround for DMD regression in master
 
 		switch (this.family) {
 			default: assert(false, "toAddressString() called for invalid address family.");
 			case AF_INET:
-				ubyte[4] ip = (cast(ubyte*)&addr_ip4.sin_addr.s_addr)[0 .. 4];
-				return format("%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+				ubyte[4] ip = () @trusted { return (cast(ubyte*)&addr_ip4.sin_addr.s_addr)[0 .. 4]; } ();
+				sink.formattedWrite("%d.%d.%d.%d", ip[0], ip[1], ip[2], ip[3]);
+				break;
 			case AF_INET6:
 				ubyte[16] ip = addr_ip6.sin6_addr.s6_addr;
-				auto ret = appender!string();
-				ret.reserve(40);
 				foreach (i; 0 .. 8) {
-					if (i > 0) ret.put(':');
+					if (i > 0) sink(":");
 					_dummy[] = ip[i*2 .. i*2+2];
-					ret.formattedWrite("%x", bigEndianToNative!ushort(_dummy));
+					sink.formattedWrite("%x", bigEndianToNative!ushort(_dummy));
 				}
-				return ret.data;
+				break;
 		}
 	}
 
@@ -190,11 +238,26 @@ struct NetworkAddress {
 	*/
 	string toString()
 	const {
-		auto ret = toAddressString();
+		import std.array : appender;
+		auto ret = appender!string();
+		toString(str => ret.put(str));
+		return ret.data;
+	}
+	/// ditto
+	void toString(scope void delegate(const(char)[]) @safe sink)
+	const {
+		import std.format : formattedWrite;
 		switch (this.family) {
 			default: assert(false, "toString() called for invalid address family.");
-			case AF_INET: return ret ~ format(":%s", port);
-			case AF_INET6: return format("[%s]:%s", ret, port);
+			case AF_INET:
+				toAddressString(sink);
+				sink.formattedWrite(":%s", port);
+				break;
+			case AF_INET6:
+				sink("[");
+				toAddressString(sink);
+				sink.formattedWrite("]:%s", port);
+				break;
 		}
 	}
 
@@ -202,7 +265,7 @@ struct NetworkAddress {
 	else {
 		unittest {
 			void test(string ip) {
-				auto res = resolveHost(ip, AF_UNSPEC, false).toAddressString();
+				auto res = () @trusted { return resolveHost(ip, AF_UNSPEC, false); } ().toAddressString();
 				assert(res == ip,
 					   "IP "~ip~" yielded wrong string representation: "~res);
 			}
@@ -248,6 +311,9 @@ interface TCPConnection : ConnectionStream {
 	Represents a listening TCP socket.
 */
 interface TCPListener {
+	/// The local address at which TCP connections are accepted.
+	@property NetworkAddress bindAddress();
+
 	/// Stops listening and closes the socket.
 	void stopListening();
 }
@@ -313,6 +379,10 @@ enum TCPListenOptions {
 	distribute = 1<<0,
 	/// Disables automatic closing of the connection when the connection callback exits
 	disableAutoClose = 1<<1,
+	/** Enable port reuse on linux kernel version >=3.9, do nothing on other OS
+	    Does not affect libasync driver because it is always enabled by libasync.
+	*/
+	reusePort = 1<<2,
 }
 
 private pure nothrow {

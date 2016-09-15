@@ -19,11 +19,6 @@ import std.variant;
 //TODO: Use Whirlpool or SHA-512 here
 private SHA1HashMixerRNG g_rng;
 
-static this()
-{
-	g_rng = new SHA1HashMixerRNG();
-}
-
 //The "URL and Filename safe" Base64 without padding
 alias Base64URLNoPadding = Base64Impl!('-', '_', Base64.NoPadding);
 
@@ -58,7 +53,10 @@ final struct Session {
 
 	///
 	unittest {
-		import vibe.http.server;
+		//import vibe.http.server;
+		// workaround for cyclic module ctor compiler error
+		class HTTPServerRequest { Session session; string[string] form; }
+		class HTTPServerResponse { Session startSession() { assert(false); } }
 
 		void login(scope HTTPServerRequest req, scope HTTPServerResponse res)
 		{
@@ -103,7 +101,10 @@ final struct Session {
 	}
 	///
 	unittest {
-		import vibe.http.server;
+		//import vibe.http.server;
+		// workaround for cyclic module ctor compiler error
+		class HTTPServerRequest { Session session; }
+		class HTTPServerResponse { import vibe.core.stream; OutputStream bodyWriter() { assert(false); } string contentType; }
 
 		// sends all session entries to the requesting browser
 		// assumes that all entries are strings
@@ -114,28 +115,6 @@ final struct Session {
 				res.bodyWriter.write(key ~ ": " ~ req.session.get!string(key) ~ "\n");
 		}
 	}
-
-	/**
-		Gets/sets a key/value pair stored within the session.
-
-		Returns null if the specified key is not set.
-
-		Examples:
-		---
-		void handleRequest(HTTPServerRequest req, HTTPServerResponse res)
-		{
-			res.contentType = "text/plain";
-			res.bodyWriter.write("Username: " ~ req.session["userName"]);
-			res.bodyWriter.write("Request count: " ~ req.session["requestCount"]);
-			req.session["requestCount"] = to!string(req.session["requestCount"].to!int + 1);
-		}
-		---
-	*/
-	deprecated("Use get() instead.")
-	string opIndex(string name) { return m_store.get(m_id, name, Variant(string.init)).get!string; }
-	/// ditto
-	deprecated("Use set() instead.")
-	void opIndexAssign(string value, string name) { m_store.set(m_id, name, Variant(value)); }
 
 	package void destroy() { m_store.destroy(m_id); }
 
@@ -190,7 +169,7 @@ interface SessionStore {
 	/// Determines if a certain session key is set.
 	bool isKeySet(string id, string key);
 
-	/// Terminates the given sessiom.
+	/// Terminates the given session.
 	void destroy(string id);
 
 	/// Iterates all keys stored in the given session.
@@ -201,6 +180,7 @@ interface SessionStore {
 	{
 		if (!id.length) {
 			ubyte[64] rand;
+			if (!g_rng) g_rng = new SHA1HashMixerRNG();
 			g_rng.read(rand);
 			id = cast(immutable)Base64URLNoPadding.encode(rand);
 		}

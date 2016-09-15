@@ -9,9 +9,12 @@
 */
 module vibe.db.redis.types;
 
-import core.time : Duration, msecs, seconds;
-import std.datetime : SysTime;
 import vibe.db.redis.redis;
+
+import std.conv : to;
+import std.datetime : SysTime;
+import std.typecons : Nullable;
+import core.time : Duration, msecs, seconds;
 
 
 /** Returns a handle to a string type value.
@@ -507,9 +510,10 @@ struct RedisList(T = string) {
 
 	T removeFront() { return m_db.lpop!string(m_key).fromRedis!T; }
 	T removeBack() { return m_db.rpop!string(m_key).fromRedis!T; }
-	T removeFrontBlock(Duration max_wait = 0.seconds) {
+	Nullable!T removeFrontBlock(Duration max_wait = 0.seconds) {
 		assert(max_wait == 0.seconds || max_wait >= 1.seconds);
-		return m_db.blpop!string(m_key, max_wait.total!"seconds").fromRedis!T;
+		auto r = m_db.blpop!string(m_key, max_wait.total!"seconds");
+		return r.isNull ? Nullable!T.init : Nullable!T(r[1].fromRedis!T);
 	}
 
 	struct Dollar {

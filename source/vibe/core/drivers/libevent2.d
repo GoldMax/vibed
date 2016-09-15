@@ -16,6 +16,7 @@ import vibe.core.drivers.threadedfile;
 import vibe.core.drivers.timerqueue;
 import vibe.core.drivers.utils;
 import vibe.core.log;
+import vibe.internal.meta.traits : synchronizedIsNothrow;
 import vibe.utils.array : ArraySet;
 import vibe.utils.hashmap;
 import vibe.utils.memory;
@@ -52,7 +53,10 @@ else
 
 version(Windows)
 {
-	import std.c.windows.winsock;
+	static if (__VERSION__ >= 2070)
+		import core.sys.windows.winsock2;
+	else
+		import std.c.windows.winsock;
 
 	alias EWOULDBLOCK = WSAEWOULDBLOCK;
 }
@@ -75,6 +79,8 @@ final class Libevent2Driver : EventDriver {
 		TimerQueue!TimerInfo m_timers;
 		DList!AddressInfo m_addressInfoCache;
 		size_t m_addressInfoCacheLength = 0;
+
+		bool m_running = false; // runEventLoop in progress?
 	}
 
 	this(DriverCore core) nothrow
@@ -125,6 +131,7 @@ final class Libevent2Driver : EventDriver {
 
 		m_dnsBase = evdns_base_new(m_eventLoop, 1);
 		if( !m_dnsBase ) logError("Failed to initialize DNS lookup.");
+		evdns_base_set_option(m_dnsBase, "randomize-case:", "0");
 
 		string hosts_file;
 		version (Windows) hosts_file = `C:\Windows\System32\drivers\etc\hosts`;
@@ -160,6 +167,11 @@ final class Libevent2Driver : EventDriver {
 				auto obj = cast(Libevent2Object)cast(void*)key;
 				debug assert(obj.m_ownerThread !is m_ownerThread, "Live object of this thread detected after all owned mutexes have been destroyed.");
 				debug assert(obj.m_driver !is this, "Live object of this driver detected with different thread ID after all owned mutexes have been destroyed.");
+				// WORKAROUND for a possible race-condition in case of concurrent GC collections
+				// Since this only occurs on shutdown and rarely, this should be an acceptable
+				// "solution" until this is all switched to RC.
+				if (auto me = cast(Libevent2ManualEvent)obj)
+					if (!me.m_mutex) continue;
 				obj.onThreadShutdown();
 			}
 		}
@@ -176,6 +188,9 @@ final class Libevent2Driver : EventDriver {
 
 	int runEventLoop()
 	{
+		m_running = true;
+		scope (exit) m_running = false;
+
 		int ret;
 		m_exit = false;
 		while (!m_exit && (ret = event_base_loop(m_eventLoop, EVLOOP_ONCE)) == 0) {
@@ -201,7 +216,8 @@ final class Libevent2Driver : EventDriver {
 		processTimers();
 		logDebugV("processed events with exit == %s", m_exit);
 		if (m_exit) {
-			m_exit = false;
+			// leave the flag set, if the event loop is still running to let it exit, too
+			if (!m_running) m_exit = false;
 			return false;
 		}
 		return true;
@@ -265,8 +281,9 @@ final class Libevent2Driver : EventDriver {
 		return msg.addr;
 	}
 
-	Libevent2TCPConnection connectTCP(NetworkAddress addr)
+	Libevent2TCPConnection connectTCP(NetworkAddress addr, NetworkAddress bind_addr)
 	{
+		assert(addr.family == bind_addr.family, "Mismatching bind and target address.");
 
 		auto sockfd_raw = socket(addr.family, SOCK_STREAM, 0);
 		// on Win64 socket() returns a 64-bit value but libevent expects an int
@@ -274,13 +291,7 @@ final class Libevent2Driver : EventDriver {
 		auto sockfd = cast(int)sockfd_raw;
 		socketEnforce(sockfd != -1, "Failed to create socket.");
 
-		NetworkAddress bind_addr;
-		bind_addr.family = addr.family;
-		if (addr.family == AF_INET) bind_addr.sockAddrInet4.sin_addr.s_addr = 0;
-		else bind_addr.sockAddrInet6.sin6_addr.s6_addr[] = 0;
 		socketEnforce(bind(sockfd, bind_addr.sockAddr, bind_addr.sockAddrLen) == 0, "Failed to bind socket.");
-		socklen_t balen = bind_addr.sockAddrLen;
-		socketEnforce(getsockname(sockfd, bind_addr.sockAddr, &balen) == 0, "getsockname failed.");
 
 		if( evutil_make_socket_nonblocking(sockfd) )
 			throw new Exception("Failed to make socket non-blocking.");
@@ -289,6 +300,10 @@ final class Libevent2Driver : EventDriver {
 		if( !buf_event ) throw new Exception("Failed to create buffer event for socket.");
 
 		auto cctx = TCPContextAlloc.alloc(m_core, m_eventLoop, sockfd, buf_event, bind_addr, addr);
+		scope(failure) {
+			if (cctx.event) bufferevent_free(cctx.event);
+			TCPContextAlloc.free(cctx);
+		}
 		bufferevent_setcb(buf_event, &onSocketRead, &onSocketWrite, &onSocketEvent, cctx);
 		if( bufferevent_enable(buf_event, EV_READ|EV_WRITE) )
 			throw new Exception("Error enabling buffered I/O event for socket.");
@@ -307,12 +322,18 @@ final class Libevent2Driver : EventDriver {
 
 			while (cctx.status == 0)
 				m_core.yieldForEvent();
+		} catch (InterruptException e) {
+			throw e;
 		} catch (Exception e) {
 			throw new Exception(format("Failed to connect to %s: %s", addr.toString(), e.msg));
 		}
 
 		logTrace("Connect result status: %d", cctx.status);
 		enforce(cctx.status == BEV_EVENT_CONNECTED, format("Failed to connect to host %s: %s", addr.toString(), cctx.status));
+
+		socklen_t balen = bind_addr.sockAddrLen;
+		socketEnforce(getsockname(sockfd, bind_addr.sockAddr, &balen) == 0, "getsockname failed.");
+		cctx.local_addr = bind_addr;
 
 		return new Libevent2TCPConnection(cctx);
 	}
@@ -330,8 +351,18 @@ final class Libevent2Driver : EventDriver {
 		int tmp_reuse = 1;
 		socketEnforce(setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &tmp_reuse, tmp_reuse.sizeof) == 0,
 			"Error enabling socket address reuse on listening socket");
+		version (linux) {
+			if (options & TCPListenOptions.reusePort) {
+				if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEPORT, &tmp_reuse, tmp_reuse.sizeof)) {
+					if (errno != EINVAL && errno != ENOPROTOOPT) {
+						socketEnforce(false, "Error enabling socket port reuse on listening socket");
+					}
+				}
+			}
+		}
 		socketEnforce(bind(listenfd, bind_addr.sockAddr, bind_addr.sockAddrLen) == 0,
 			"Error binding listening socket");
+
 		socketEnforce(listen(listenfd, 128) == 0,
 			"Error listening to listening socket");
 
@@ -339,7 +370,10 @@ final class Libevent2Driver : EventDriver {
 		enforce(evutil_make_socket_nonblocking(listenfd) == 0,
 			"Error setting listening socket to non-blocking I/O.");
 
-		auto ret = new Libevent2TCPListener;
+		socklen_t balen = bind_addr.sockAddrLen;
+		socketEnforce(getsockname(listenfd, bind_addr.sockAddr, &balen) == 0, "getsockname failed.");
+
+		auto ret = new Libevent2TCPListener(bind_addr);
 
 		static final class HandlerContext {
 			Libevent2TCPListener listener;
@@ -363,6 +397,7 @@ final class Libevent2Driver : EventDriver {
 			auto core = getThreadLibeventDriverCore();
 			// Add an event to wait for connections
 			auto ctx = TCPContextAlloc.alloc(core, evloop, handler_context.listenfd, null, handler_context.bind_addr, NetworkAddress());
+			scope(failure) TCPContextAlloc.free(ctx);
 			ctx.connectionCallback = handler_context.connection_callback;
 			ctx.listenEvent = event_new(evloop, handler_context.listenfd, EV_READ | EV_PERSIST, &onConnect, ctx);
 			ctx.listenOptions = handler_context.options;
@@ -526,7 +561,9 @@ final class Libevent2Driver : EventDriver {
 	}
 
 	private void registerObject(Libevent2Object obj)
-	{
+	nothrow {
+		scope (failure) assert(false); // synchronized is not nothrow
+
 		debug assert(Thread.getThis() is m_ownerThread, "Event object created in foreign thread.");
 		auto key = cast(size_t)cast(void*)obj;
 		synchronized (s_threadObjectsMutex) {
@@ -536,7 +573,9 @@ final class Libevent2Driver : EventDriver {
 	}
 
 	private void unregisterObject(Libevent2Object obj)
-	{
+	nothrow {
+		scope (failure) assert(false); // synchronized is not nothrow
+
 		auto key = cast(size_t)cast(void*)obj;
 		synchronized (s_threadObjectsMutex) {
 			m_ownedObjects.remove(key);
@@ -574,7 +613,7 @@ private class Libevent2Object {
 	debug private Thread m_ownerThread;
 
 	this(Libevent2Driver driver)
-	{
+	nothrow {
 		m_driver = driver;
 		m_driver.registerObject(this);
 		debug m_ownerThread = driver.m_ownerThread;
@@ -607,24 +646,23 @@ final class Libevent2ManualEvent : Libevent2Object, ManualEvent {
 	}
 
 	this(Libevent2Driver driver)
-	{
+	nothrow {
 		super(driver);
+		scope (failure) assert(false);
 		m_mutex = new core.sync.mutex.Mutex;
 		m_waiters = ThreadSlotMap(manualAllocator());
 	}
 
 	~this()
 	{
+		m_mutex = null; // Optimistic race-condition detection (see Libevent2Driver.dispose())
 		foreach (ref m_waiters.Value ts; m_waiters)
 			event_free(ts.event);
 	}
 
 	void emit()
 	{
-		// Since 2068, synchronized statements are annotated nothrow.
-		// DMD#4115, Druntime#1013, Druntime#1021, Phobos#2704
-		// However, they were "logically" nothrow before.
-		static if (__VERSION__ <= 2069)
+		static if (!synchronizedIsNothrow)
 			scope (failure) assert(0, "Internal error: function should be nothrow");
 
 		atomicOp!"+="(m_emitCount, 1);
@@ -891,7 +929,7 @@ final class Libevent2UDPConnection : UDPConnection {
 
 		// create a context for storing connection information
 		m_ctx = TCPContextAlloc.alloc(driver.m_core, driver.m_eventLoop, sockfd, null, bind_addr, NetworkAddress());
-
+		scope(failure) TCPContextAlloc.free(m_ctx);
 		m_ctx.listenEvent = event_new(driver.m_eventLoop, sockfd, EV_READ|EV_PERSIST, &onUDPRead, m_ctx);
 		if (!m_ctx.listenEvent) throw new Exception("Failed to create buffer event for socket.");
 	}
@@ -975,8 +1013,8 @@ final class Libevent2UDPConnection : UDPConnection {
 		size_t tm = size_t.max;
 		if (timeout >= 0.seconds && timeout != Duration.max) {
 			tm = m_driver.createTimer(null);
+			m_driver.m_timers.getUserData(tm).owner = Task.getThis();
 			m_driver.rearmTimer(tm, timeout, false);
-			m_driver.acquireTimer(tm);
 		}
 
 		acquire();
@@ -1121,6 +1159,10 @@ final class InotifyDirectoryWatcher : DirectoryWatcher {
 			for (auto p = buf.ptr; p < buf.ptr + nread; )
 			{
 				auto ev = cast(inotify_event*)p;
+				if (ev.wd !in m_watches) {
+					logDebug("Got unknown inotify watch ID %s. Ignoring.", ev.wd);
+					continue;
+				}
 
 				DirectoryChangeType type;
 				if (ev.mask & (IN_CREATE|IN_MOVED_TO))
@@ -1189,6 +1231,8 @@ private {
 	__gshared DriverCore s_driverCore;
 	__gshared Mutex s_threadObjectsMutex;
 	__gshared ArraySet!size_t s_threadObjects;
+	debug __gshared size_t[void*] s_mutexes;
+	debug __gshared Mutex s_mutexesLock;
 	bool s_alreadyDeinitialized = false;
 }
 
@@ -1205,8 +1249,6 @@ package DriverCore getThreadLibeventDriverCore() nothrow
 private int getLastSocketError() nothrow
 {
 	version(Windows) {
-		static if (__VERSION__ < 2066)
-			scope (failure) assert(false); // assert nothrow condition
 		return WSAGetLastError();
 	} else {
 		import core.stdc.errno;
@@ -1238,7 +1280,7 @@ private nothrow extern(C)
 	void* lev_alloc(size_t size)
 	{
 		try {
-			auto mem = manualAllocator().alloc(size+size_t.sizeof);
+			auto mem = threadLocalManualAllocator().alloc(size+size_t.sizeof);
 			*cast(size_t*)mem.ptr = size;
 			return mem.ptr + size_t.sizeof;
 		} catch (UncaughtException th) {
@@ -1252,7 +1294,7 @@ private nothrow extern(C)
 			if( !p ) return lev_alloc(newsize);
 			auto oldsize = *cast(size_t*)(p-size_t.sizeof);
 			auto oldmem = (p-size_t.sizeof)[0 .. oldsize+size_t.sizeof];
-			auto newmem = manualAllocator().realloc(oldmem, newsize+size_t.sizeof);
+			auto newmem = threadLocalManualAllocator().realloc(oldmem, newsize+size_t.sizeof);
 			*cast(size_t*)newmem.ptr = newsize;
 			return newmem.ptr + size_t.sizeof;
 		} catch (UncaughtException th) {
@@ -1265,15 +1307,12 @@ private nothrow extern(C)
 		try {
 			auto size = *cast(size_t*)(p-size_t.sizeof);
 			auto mem = (p-size_t.sizeof)[0 .. size+size_t.sizeof];
-			manualAllocator().free(mem);
+			threadLocalManualAllocator().free(mem);
 		} catch (UncaughtException th) {
 			logCritical("Exception in lev_free: %s", th.msg);
 			assert(false);
 		}
 	}
-
-	debug __gshared size_t[void*] s_mutexes;
-	debug __gshared Mutex s_mutexesLock;
 
 	void* lev_alloc_mutex(uint locktype)
 	{
@@ -1436,12 +1475,7 @@ private nothrow extern(C)
 package timeval toTimeVal(Duration dur)
 {
 	timeval tvdur;
-	static if (__VERSION__ < 2066) {
-		tvdur.tv_sec = cast(int)dur.total!"seconds"();
-		tvdur.tv_usec = dur.fracSec().usecs();
-	} else {
-		dur.split!("seconds", "usecs")(tvdur.tv_sec, tvdur.tv_usec);
-	}
+	dur.split!("seconds", "usecs")(tvdur.tv_sec, tvdur.tv_usec);
 	return tvdur;
 }
 

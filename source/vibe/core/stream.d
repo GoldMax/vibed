@@ -1,7 +1,11 @@
 /**
 	Generic stream interface used by several stream-like classes.
 
-	Copyright: © 2012-2013 RejectedSoftware e.K.
+	This module defines the basic stream primitives. For concrete stream types, take a look at the
+	`vibe.stream` package. The `vibe.stream.operations` module contains additional high-level
+	operations on streams, such as reading streams by line or as a whole.
+
+	Copyright: © 2012-2015 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
@@ -145,7 +149,7 @@ interface Stream : InputStream, OutputStream {
 	Connection streams are based on streaming socket connections, pipes and
 	similar end-to-end streams.
 
-	See_also: vibe.core.new.TCPConnection
+	See_also: vibe.core.net.TCPConnection
 */
 interface ConnectionStream : Stream {
 	/** Determines The current connection status.
@@ -168,8 +172,22 @@ interface ConnectionStream : Stream {
 	*/
 	void close();
 
-	/// Sets a timeout until data has to be availabe for read. Returns false on timeout.
-	bool waitForData(Duration timeout = 0.seconds);
+	/** Blocks until data becomes available for read.
+
+		The maximum wait time can be customized with the `timeout` parameter.
+		If there is already data availabe for read, or if the connection is
+		closed, the function will return immediately without blocking.
+
+		Params:
+			timeout = Optional timeout, the default value of `Duration.max`
+				indicates an infinite timeout
+
+		Returns:
+			The function will return `true` if data becomes available before the
+			timeout is reached. If the connection gets closed, or the timeout
+			gets reached, `false` is returned instead.
+	*/
+	bool waitForData(Duration timeout = Duration.max);
 }
 
 

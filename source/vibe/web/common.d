@@ -89,7 +89,7 @@ string adjustMethodStyle(string name, MethodStyle style)
 					std.utf.decode(name, i);
 				}
 			}
-			if (i < name.length) {
+			if (start < name.length) {
 				ret ~= "_" ~ name[start .. $];
 			}
 			return style == MethodStyle.lowerUnderscored ?
@@ -122,6 +122,7 @@ unittest
 	assert(adjustMethodStyle("IDTest", MethodStyle.lowerUnderscored) == "id_test");
 	assert(adjustMethodStyle("IDTest", MethodStyle.pascalCase) == "IDTest");
 	assert(adjustMethodStyle("IDTest", MethodStyle.camelCase) == "idTest");
+	assert(adjustMethodStyle("anyA", MethodStyle.lowerUnderscored) == "any_a", adjustMethodStyle("anyA", MethodStyle.lowerUnderscored));
 }
 
 
@@ -168,7 +169,7 @@ auto extractHTTPMethodAndName(alias Func, bool indexSpecialCase)()
 	];
 
 	enum name = __traits(identifier, Func);
-	alias T = typeof(&Func) ;
+	alias T = typeof(&Func);
 
 	Nullable!HTTPMethod udmethod;
 	Nullable!string udurl;
@@ -209,7 +210,8 @@ auto extractHTTPMethodAndName(alias Func, bool indexSpecialCase)()
 	else {
 		foreach (method, prefixes; httpMethodPrefixes) {
 			foreach (prefix; prefixes) {
-				if (name.startsWith(prefix)) {
+				import std.uni : isLower;
+				if (name.startsWith(prefix) && (name.length == prefix.length || !name[prefix.length].isLower)) {
 					string tmp = name[prefix.length..$];
 					return udaOverride(method, tmp.length ? tmp : "/");
 				}
@@ -240,6 +242,10 @@ unittest
 		string mattersnot();
 
 		string get();
+
+		string posts();
+
+		string patches();
 	}
 
 	enum ret1 = extractHTTPMethodAndName!(Sample.getInfo, false,);
@@ -266,6 +272,14 @@ unittest
 	static assert (ret6.hadPathUDA == false);
 	static assert (ret6.method == HTTPMethod.GET);
 	static assert (ret6.url == "/");
+	enum ret7 = extractHTTPMethodAndName!(Sample.posts, false);
+	static assert(ret7.hadPathUDA == false);
+	static assert(ret7.method == HTTPMethod.POST);
+	static assert(ret7.url == "posts");
+	enum ret8 = extractHTTPMethodAndName!(Sample.patches, false);
+	static assert(ret8.hadPathUDA == false);
+	static assert(ret8.method == HTTPMethod.POST);
+	static assert(ret8.url == "patches");
 }
 
 
@@ -355,19 +369,6 @@ unittest {
 }
 
 
-/**
-	Scheduled for deprecation - use @$(D path) instead.
-
-	See_Also: $(D path)
- */
-PathAttribute rootPath(string path)
-{
-	if (!__ctfe)
-		assert(false, onlyAsUda!__FUNCTION__);
-	return PathAttribute(path);
-}
-
-
 /// Convenience alias to generate a name from the interface's name.
 @property PathAttribute rootPathFromName()
 {
@@ -414,8 +415,8 @@ class RestException : HTTPStatusException {
 	///
 	this(int status, Json jsonResult, string file = __FILE__, int line = __LINE__, Throwable next = null)
 	{
-		if (jsonResult.type == Json.Type.Object && jsonResult.statusMessage.type == Json.Type.String) {
-			super(status, jsonResult.statusMessage.get!string, file, line, next);
+		if (jsonResult.type == Json.Type.Object && jsonResult["statusMessage"].type == Json.Type.String) {
+			super(status, jsonResult["statusMessage"].get!string, file, line, next);
 		}
 		else {
 			super(status, httpStatusText(status) ~ " (" ~ jsonResult.toString() ~ ")", file, line, next);
@@ -451,13 +452,9 @@ package struct PathAttribute
 
 /// Private struct describing the origin of a parameter (Query, Header, Body).
 package struct WebParamAttribute {
-	enum Origin {
-		Body,
-		Header,
-		Query,
-	}
+	import vibe.web.internal.rest.common : ParameterKind;
 
-	Origin origin;
+	ParameterKind origin;
 	/// Parameter name
 	string identifier;
 	/// The meaning of this field depends on the origin.
@@ -482,9 +479,10 @@ package struct WebParamAttribute {
  * ----
  */
 WebParamAttribute bodyParam(string identifier, string field) {
+	import vibe.web.internal.rest.common : ParameterKind;
 	if (!__ctfe)
 		assert(false, onlyAsUda!__FUNCTION__);
-	return WebParamAttribute(WebParamAttribute.Origin.Body, identifier, field);
+	return WebParamAttribute(ParameterKind.body_, identifier, field);
 }
 
 /**
@@ -506,9 +504,10 @@ WebParamAttribute bodyParam(string identifier, string field) {
  */
 WebParamAttribute headerParam(string identifier, string field)
 {
+	import vibe.web.internal.rest.common : ParameterKind;
 	if (!__ctfe)
 		assert(false, onlyAsUda!__FUNCTION__);
-	return WebParamAttribute(WebParamAttribute.Origin.Header, identifier, field);
+	return WebParamAttribute(ParameterKind.header, identifier, field);
 }
 
 /**
@@ -530,9 +529,10 @@ WebParamAttribute headerParam(string identifier, string field)
  */
 WebParamAttribute queryParam(string identifier, string field)
 {
+	import vibe.web.internal.rest.common : ParameterKind;
 	if (!__ctfe)
 		assert(false, onlyAsUda!__FUNCTION__);
-	return WebParamAttribute(WebParamAttribute.Origin.Query, identifier, field);
+	return WebParamAttribute(ParameterKind.query, identifier, field);
 }
 
 /**
@@ -610,28 +610,28 @@ unittest {
 }
 
 
-// Little wrapper for Nullable!T to enable more comfortable initialization.
-/// private
-struct NullableW(T) {
-	Nullable!T storage;
-	alias storage this;
-
-	this(typeof(null)) {}
-	this(T val) { storage = val; }
-}
-
 /// private
 template isNullable(T) {
 	import std.traits;
-	enum isNullable = isInstanceOf!(Nullable, T) || isInstanceOf!(NullableW, T);
+	enum isNullable = isInstanceOf!(Nullable, T);
 }
 
 static assert(isNullable!(Nullable!int));
-static assert(isNullable!(NullableW!int));
 
+package struct ParamError {
+	string field;
+	string text;
+	string debugText;
+}
+
+package enum ParamResult {
+	ok,
+	skipped,
+	error
+}
 
 // NOTE: dst is assumed to be uninitialized
-package bool readFormParamRec(T)(scope HTTPServerRequest req, ref T dst, string fieldname, bool required)
+package ParamResult readFormParamRec(T)(scope HTTPServerRequest req, ref T dst, string fieldname, bool required, ref ParamError err)
 {
 	import std.string;
 	import std.traits;
@@ -640,47 +640,83 @@ package bool readFormParamRec(T)(scope HTTPServerRequest req, ref T dst, string 
 
 	static if (isDynamicArray!T && !isSomeString!T) {
 		alias EL = typeof(T.init[0]);
+		static assert(!is(EL == bool),
+			"Boolean arrays are not allowed, because their length cannot " ~
+			"be uniquely determined. Use a static array instead.");
 		size_t idx = 0;
 		dst = T.init;
 		while (true) {
 			EL el = void;
-			if (!readFormParamRec(req, el, format("%s_%s", fieldname, idx), false))
-				break;
+			auto r = readFormParamRec(req, el, format("%s_%s", fieldname, idx), false, err);
+			if (r == ParamResult.error) return r;
+			if (r == ParamResult.skipped) break;
 			dst ~= el;
 			idx++;
 		}
+	} else static if (isStaticArray!T) {
+		foreach (i; 0 .. T.length) {
+			auto r = readFormParamRec(req, dst[i], format("%s_%s", fieldname, i), true, err);
+			if (r == ParamResult.error) return r;
+			assert(r != ParamResult.skipped); break;
+		}
 	} else static if (isNullable!T) {
 		typeof(dst.get()) el = void;
-		if (readFormParamRec(req, el, fieldname, false))
+		auto r = readFormParamRec(req, el, fieldname, false, err);
+		if (r == ParamResult.ok)
 			dst.setVoid(el);
 		else dst.setVoid(T.init);
 	} else static if (is(T == struct) && !is(typeof(T.fromString(string.init))) && !is(typeof(T.fromStringValidate(string.init, null)))) {
-		foreach (m; __traits(allMembers, T))
-			if (!readFormParamRec(req, __traits(getMember, dst, m), fieldname~"_"~m, required))
-				return false;
+		foreach (m; __traits(allMembers, T)) {
+			auto r = readFormParamRec(req, __traits(getMember, dst, m), fieldname~"_"~m, required, err);
+			if (r != ParamResult.ok)
+				return r; // FIXME: in case of errors the struct will be only partially initialized! All previous fields should be deinitialized first.
+		}
 	} else static if (is(T == bool)) {
 		dst = (fieldname in req.form) !is null || (fieldname in req.query) !is null;
-	} else if (auto pv = fieldname in req.form) dst.setVoid((*pv).webConvTo!T);
-	else if (auto pv = fieldname in req.query) dst.setVoid((*pv).webConvTo!T);
-	else if (required) throw new HTTPStatusException(HTTPStatus.badRequest, "Missing parameter "~fieldname);
-	else return false;
-	return true;
+	} else if (auto pv = fieldname in req.form) {
+		if (!(*pv).webConvTo(dst, err)) {
+			err.field = fieldname;
+			return ParamResult.error;
+		}
+	} else if (auto pv = fieldname in req.query) {
+		if (!(*pv).webConvTo(dst, err)) {
+			err.field = fieldname;
+			return ParamResult.error;
+		}
+	} else if (required) {
+		err.field = fieldname;
+		err.text = "Missing form field.";
+		return ParamResult.error;
+	}
+	else return ParamResult.skipped;
+
+	return ParamResult.ok;
 }
 
-package T webConvTo(T)(string str)
-{
+package bool webConvTo(T)(string str, ref T dst, ref ParamError err)
+nothrow {
 	import std.conv;
 	import std.exception;
-	string error;
-	static if (is(typeof(T.fromStringValidate(str, &error)))) {
-		static assert(is(typeof(T.fromStringValidate(str, &error)) == Nullable!T));
-		auto ret = T.fromStringValidate(str, &error);
-		enforceBadRequest(!ret.isNull(), error); // TODO: refactor internally to work without exceptions
-		return ret.get();
-	} else static if (is(typeof(T.fromString(str)))) {
-		static assert(is(typeof(T.fromString(str)) == T));
-		return T.fromString(str);
-	} else return str.to!T();
+	try {
+		static if (is(typeof(T.fromStringValidate(str, &err.text)))) {
+			static assert(is(typeof(T.fromStringValidate(str, &err.text)) == Nullable!T));
+			auto res = T.fromStringValidate(str, &err.text);
+			if (res.isNull()) return false;
+			dst.setVoid(res);
+		} else static if (is(typeof(T.fromString(str)))) {
+			static assert(is(typeof(T.fromString(str)) == T));
+			dst.setVoid(T.fromString(str));
+		} else {
+			dst.setVoid(str.to!T());
+		}
+	} catch (Exception e) {
+		import std.encoding : sanitize;
+		err.text = e.msg;
+		try err.debugText = e.toString().sanitize;
+		catch (Exception) {}
+		return false;
+	}
+	return true;
 }
 
 // properly sets an uninitialized variable
@@ -697,4 +733,9 @@ package void setVoid(T, U)(ref T dst, U value)
 			dst = value;
 		}
 	} else dst = value;
+}
+
+unittest {
+	static assert(!__traits(compiles, { bool[] barr; ParamError err;readFormParamRec(null, barr, "f", true, err); }));
+	static assert(__traits(compiles, { bool[2] barr; ParamError err;readFormParamRec(null, barr, "f", true, err); }));
 }
