@@ -3,6 +3,8 @@
 *.lib
 *.dll
 .*.sw*
+*.qcd.user
+*.qcd.user.*
 
 docs.json
 /docs/index.html

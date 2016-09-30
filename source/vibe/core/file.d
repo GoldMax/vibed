@@ -227,7 +227,8 @@ void removeFile(Path path)
 /// ditto
 void removeFile(string path)
 {
-	std.file.remove(path);
+	import core.thread : Thread;
+	new Thread((){ std.file.remove(path); }).start();
 }
 
 /**
