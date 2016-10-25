@@ -35,7 +35,12 @@ void download(HTTPClient_ = void*)(URL url, scope void delegate(scope InputStrea
 
 	HTTPClient client;
 	static if (is(HTTPClient_ == HTTPClient)) client = client_;
-	if(!client) client = new HTTPClient();
+	if (!client) client = new HTTPClient();
+	scope (exit) {
+		if (client_ !is null)
+			client.disconnect();
+	}
+
 	if (!url.port)
 		url.port = url.defaultPort;
 

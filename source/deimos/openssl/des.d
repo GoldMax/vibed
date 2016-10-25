@@ -83,7 +83,7 @@ struct DES_ks
 	DES_cblock cblock;
 	/* make sure things are correct size on machines with
 	 * 8 byte longs */
-	DES_LONG deslong[2];
+	DES_LONG[2] deslong;
 	}
 	ks_[16] ks;
     }
@@ -205,7 +205,7 @@ void DES_ofb_encrypt(const(ubyte)* in_,ubyte* out_,int numbits,
 void DES_pcbc_encrypt(const(ubyte)* input,ubyte* output,
 		      c_long length,DES_key_schedule* schedule,DES_cblock* ivec,
 		      int enc);
-DES_LONG DES_quad_cksum(const(ubyte)* input,DES_cblock output[],
+DES_LONG DES_quad_cksum(const(ubyte)* input,DES_cblock[] output,
 			c_long length,int out_count,DES_cblock* seed);
 int DES_random_key(DES_cblock* ret);
 void DES_set_odd_parity(DES_cblock* key);
@@ -218,6 +218,9 @@ int DES_set_key(const_DES_cblock* key,DES_key_schedule* schedule);
 int DES_key_sched(const_DES_cblock* key,DES_key_schedule* schedule);
 int DES_set_key_checked(const_DES_cblock* key,DES_key_schedule* schedule);
 void DES_set_key_unchecked(const_DES_cblock* key,DES_key_schedule* schedule);
+version(OPENSSL_FIPS) {
+void private_DES_set_key_unchecked(const_DES_cblock* key,DES_key_schedule* schedule);
+}
 void DES_string_to_key(const(char)* str,DES_cblock* key);
 void DES_string_to_2keys(const(char)* str,DES_cblock* key1,DES_cblock* key2);
 void DES_cfb64_encrypt(const(ubyte)* in_,ubyte* out_,c_long length,

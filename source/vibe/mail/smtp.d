@@ -27,7 +27,6 @@ enum SMTPConnectionType {
 	plain,
 	tls,
 	startTLS,
-	ssl = tls /// deprecated
 }
 
 
@@ -121,7 +120,7 @@ final class Mail {
 
 	Valid headers can be found at http://tools.ietf.org/html/rfc4021
 */
-void sendMail(SMTPClientSettings settings, Mail mail)
+void sendMail(in SMTPClientSettings settings, Mail mail)
 {
 	TCPConnection raw_conn;
 	try {
@@ -232,7 +231,7 @@ unittest {
 	import std.datetime;
 	void testSmtp(string host, ushort port){
 		Mail email = new Mail;
-		email.headers["Date"] = Clock.currTime(TimeZone.getTimeZone("America/New_York")).toRFC822DateTimeString(); // uses UFCS
+		email.headers["Date"] = Clock.currTime(PosixTimeZone.getTimeZone("America/New_York")).toRFC822DateTimeString(); // uses UFCS
 		email.headers["Sender"] = "Domain.com Contact Form <no-reply@domain.com>";
 		email.headers["From"] = "John Doe <joe@doe.com>";
 		email.headers["To"] = "Customer Support <support@domain.com>";

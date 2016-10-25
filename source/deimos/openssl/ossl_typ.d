@@ -93,9 +93,13 @@ alias asn1_string_st ASN1_TIME;
 alias asn1_string_st ASN1_GENERALIZEDTIME;
 alias asn1_string_st ASN1_VISIBLESTRING;
 alias asn1_string_st ASN1_UTF8STRING;
+alias asn1_string_st ASN1_STRING;
 alias int ASN1_BOOLEAN;
 alias int ASN1_NULL;
 }
+
+import deimos.openssl.asn1t;
+alias ASN1_ITEM_st ASN1_ITEM;
 
 struct asn1_pctx_st;
 alias asn1_pctx_st ASN1_PCTX;
@@ -200,9 +204,6 @@ alias st_ERR_FNS ERR_FNS;
 
 struct engine_st;
 alias engine_st ENGINE;
-import deimos.openssl.ssl;
-alias ssl_st SSL;
-alias ssl_ctx_st SSL_CTX;
 
 struct X509_POLICY_NODE_st;
 alias X509_POLICY_NODE_st X509_POLICY_NODE;

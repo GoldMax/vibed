@@ -1,7 +1,7 @@
 /**
 	Internal module with common functionality for REST interface generators.
 
-	Copyright: © 2015 RejectedSoftware e.K.
+	Copyright: © 2015-2016 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
@@ -11,8 +11,7 @@ import vibe.http.common : HTTPMethod;
 import vibe.web.rest;
 
 import std.algorithm : endsWith, startsWith;
-static if (__VERSION__ >= 2068) import std.meta : anySatisfy, Filter;
-else import std.typetuple : anySatisfy, Filter;
+import std.meta : anySatisfy, Filter;
 
 
 /**
@@ -145,6 +144,8 @@ else import std.typetuple : anySatisfy, Filter;
 
 	private void computeRoutes()
 	{
+		import std.algorithm.searching : any;
+
 		foreach (si, RF; RouteFunctions) {
 			enum sroute = staticRoutes[si];
 			Route route;
@@ -179,7 +180,6 @@ else import std.typetuple : anySatisfy, Filter;
 						route.pattern = '/' ~ route.pattern;
 					route.pathParts ~= PathPart(true, "id");
 					route.fullPathParts ~= PathPart(true, "id");
-					route.pathHasPlaceholders = true;
 				}
 
 				route.parameters[i] = pi;
@@ -190,6 +190,7 @@ else import std.typetuple : anySatisfy, Filter;
 					case ParameterKind.header: route.headerParameters ~= pi; break;
 					case ParameterKind.internal: route.internalParameters ~= pi; break;
 					case ParameterKind.attributed: route.attributedParameters ~= pi; break;
+					case ParameterKind.auth: route.authParameters ~= pi; break;
 				}
 			}
 
@@ -197,6 +198,7 @@ else import std.typetuple : anySatisfy, Filter;
 			extractPathParts(route.fullPathParts, !prefix_id && route.pattern.startsWith("/") ? route.pattern[1 .. $] : route.pattern);
 			if (prefix_id) route.pattern = ":id" ~ route.pattern;
 			route.fullPattern = concatURL(this.basePath, route.pattern);
+			route.pathHasPlaceholders = route.fullPathParts.any!(p => p.isParameter);
 
 			routes[si] = route;
 		}
@@ -242,10 +244,13 @@ else import std.typetuple : anySatisfy, Filter;
 	private static StaticRoute[routeCount] computeStaticRoutes()
 	{
 		static import std.traits;
+		import vibe.web.auth : AuthInfo;
 
 		assert(__ctfe);
 
 		StaticRoute[routeCount] ret;
+
+		alias AUTHTP = AuthInfo!TImpl;
 
 		foreach (fi, func; RouteFunctions) {
 			StaticRoute route;
@@ -285,7 +290,9 @@ else import std.typetuple : anySatisfy, Filter;
 				}
 
 				// determine parameter source/destination
-				if (IsAttributedParameter!(func, pname)) {
+				if (is(PT == AUTHTP)) {
+					pi.kind = ParameterKind.auth;
+				} else if (IsAttributedParameter!(func, pname)) {
 					pi.kind = ParameterKind.attributed;
 				} else static if (anySatisfy!(mixin(CompareParamName.Name), WPAT)) {
 					alias PWPAT = Filter!(mixin(CompareParamName.Name), WPAT);
@@ -411,6 +418,7 @@ struct Route {
 	Parameter[] headerParameters;
 	Parameter[] attributedParameters;
 	Parameter[] internalParameters;
+	Parameter[] authParameters;
 }
 
 struct PathPart {
@@ -446,7 +454,8 @@ enum ParameterKind {
 	body_,       // JSON body
 	header,      // req.header[]
 	attributed,  // @before
-	internal     // req.params[]
+	internal,    // req.params[]
+	auth         // @authrorized!T
 }
 
 struct SubInterface {
@@ -663,11 +672,15 @@ unittest {
 	auto bar = RestInterface!Bar(foo.subInterfaces[0].settings, false);
 	assert(bar.routeCount == 2);
 	assert(bar.routes[0].fullPattern == "/bar/:barid/test");
+	assert(bar.routes[0].pathHasPlaceholders);
 	assert(bar.routes[1].fullPattern == "/bar/test2", bar.routes[1].fullPattern);
+	assert(!bar.routes[1].pathHasPlaceholders);
 	assert(bar.subInterfaceCount == 1);
 
 	auto baz = RestInterface!Baz(bar.subInterfaces[0].settings, false);
 	assert(baz.routeCount == 2);
 	assert(baz.routes[0].fullPattern == "/bar/:barid/baz/:bazid/test");
+	assert(baz.routes[0].pathHasPlaceholders);
 	assert(baz.routes[1].fullPattern == "/bar/:barid/baz/test2");
+	assert(baz.routes[1].pathHasPlaceholders);
 }

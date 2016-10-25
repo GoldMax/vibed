@@ -75,11 +75,13 @@ extern (C):
 nothrow:
 
 struct rc2_key_st {
-	RC2_INT data[64];
+	RC2_INT[64] data;
 	}
 alias rc2_key_st RC2_KEY;
 
- 
+version(OPENSSL_FIPS) {
+    void private_RC2_set_key(RC2_KEY* key, int len, const(ubyte)* data,int bits);
+}
 void RC2_set_key(RC2_KEY* key, int len, const(ubyte)* data,int bits);
 void RC2_ecb_encrypt(const(ubyte)* in_,ubyte* out_,RC2_KEY* key,
 		     int enc);

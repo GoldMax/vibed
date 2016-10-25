@@ -215,7 +215,10 @@ struct HashMap(TKey, TValue, Traits = DefaultHashMapTraits!TKey)
 		if (!m_allocator) m_allocator = defaultAllocator();
 
 		uint pot = 0;
-		while (new_size > 1) pot++, new_size /= 2;
+		while (new_size > 1) {
+			pot++;
+			new_size /= 2;
+		}
 		new_size = 1 << pot;
 
 		auto oldtable = m_table;
@@ -266,7 +269,6 @@ unittest {
 }
 
 // test for nothrow/@nogc compliance
-static if (__VERSION__ >= 2066)
 nothrow unittest {
 	HashMap!(int, int) map1;
 	HashMap!(string, string) map2;
@@ -371,5 +373,3 @@ private template UnConst(T) {
 		alias UnConst = V;
 	} else alias UnConst = T;
 }
-
-static if (__VERSION__ < 2066) private static bool nogc() { return false; }

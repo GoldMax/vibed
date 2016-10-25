@@ -9,7 +9,7 @@
 
 	See $(D registerWebInterface) for an overview of how the system works.
 
-	Copyright: © 2013-2015 RejectedSoftware e.K.
+	Copyright: © 2013-2016 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
@@ -25,6 +25,7 @@ import vibe.http.common;
 import vibe.http.router;
 import vibe.http.server;
 import vibe.http.websockets;
+import vibe.web.auth : AuthInfo, handleAuthentication, handleAuthorization, isAuthenticated;
 
 import std.encoding : sanitize;
 
@@ -166,7 +167,10 @@ URLRouter registerWebInterface(C : Object, MethodStyle method_style = MethodStyl
 				enum minfo = extractHTTPMethodAndName!(overload, true)();
 				enum url = minfo.hadPathUDA ? minfo.url : adjustMethodStyle(minfo.url, method_style);
 
-				static if (is(RT == class) || is(RT == interface)) {
+				static if (findFirstUDA!(NoRouteAttribute, overload).found) {
+					import vibe.core.log : logDebug;
+					logDebug("Method %s.%s annotated with @noRoute - not generating a route entry.", C.stringof, M);
+				} else static if (is(RT == class) || is(RT == interface)) {
 					// nested API
 					static assert(
 						ParameterTypeTuple!overload.length == 0,
@@ -265,12 +269,21 @@ unittest {
 /**
 	Renders a Diet template file to the current HTTP response.
 
-	This function is equivalent to vibe.http.server.render, but implicitly
+	This function is equivalent to `vibe.http.server.render`, but implicitly
 	writes the result to the response object of the currently processed
 	request.
 
 	Note that this may only be called from a function/method
-	registered using registerWebInterface.
+	registered using `registerWebInterface`.
+
+	In addition to the vanilla `render` function, this one also makes additional
+	functionality available within the template:
+
+	$(UL
+		$(LI The `req` variable that holds the current request object)
+		$(LI If the `@translationContext` attribute us used, enables the
+		     built-in i18n support of Diet templates)
+	)
 */
 template render(string diet_file, ALIASES...) {
 	void render(string MODULE = __MODULE__, string FUNCTION = __FUNCTION__)()
@@ -288,25 +301,39 @@ template render(string diet_file, ALIASES...) {
 		assert(s_requestContext.req !is null, "render() used outside of a web interface request!");
 		auto req = s_requestContext.req;
 
+		struct TranslateCTX(string lang)
+		{
+			version (Have_diet_ng) {
+				import diet.traits : dietTraits;
+				@dietTraits static struct diet_translate__ {
+					static string translate(string key, string context=null) { return tr!(TranslateContext, lang)(key, context); }
+				}
+			} else static string diet_translate__(string key,string context=null) { return tr!(TranslateContext, lang)(key, context); }
+
+			void render()
+			{
+				vibe.http.server.render!(diet_file, req, ALIASES, diet_translate__)(s_requestContext.res);
+			}
+		}
+
 		static if (is(TranslateContext) && TranslateContext.languages.length) {
 			static if (TranslateContext.languages.length > 1) {
 				switch (s_requestContext.language) {
 					default: {
-						static string diet_translate__(string key,string context=null) { return tr!(TranslateContext, TranslateContext.languages[0])(key,context); }
-						vibe.http.server.render!(diet_file, req, ALIASES, diet_translate__)(s_requestContext.res);
+						TranslateCTX!(TranslateContext.languages[0]) renderctx;
+						renderctx.render();
 						return;
 						}
 					foreach (lang; TranslateContext.languages[1 .. $])
 						case lang: {
-							mixin("struct "~lang~" { static string diet_translate__(string key,string context=null) { return tr!(TranslateContext, lang)(key,context); } void render() { vibe.http.server.render!(diet_file, req, ALIASES, diet_translate__)(s_requestContext.res); } }");
-							mixin(lang~" renderctx;");
+							TranslateCTX!lang renderctx;
 							renderctx.render();
 							return;
 							}
 				}
 			} else {
-				static string diet_translate__(string key,string context=null) { return tr!(TranslateContext, TranslateContext.languages[0])(key,context); }
-				vibe.http.server.render!(diet_file, req, ALIASES, diet_translate__)(s_requestContext.res);
+				TranslateCTX!(TranslateContext.languages[0]) renderctx;
+				renderctx.render();
 			}
 		} else {
 			vibe.http.server.render!(diet_file, req, ALIASES)(s_requestContext.res);
@@ -411,6 +438,34 @@ unittest {
 	}
 }
 
+
+/**
+	Methods marked with this attribute will not be treated as web endpoints.
+
+	This attribute enables the definition of public methods that do not take
+	part in the interface genration process.
+*/
+@property NoRouteAttribute noRoute()
+{
+	import vibe.web.common : onlyAsUda;
+	if (!__ctfe)
+		assert(false, onlyAsUda!__FUNCTION__);
+	return NoRouteAttribute.init;
+}
+
+///
+unittest {
+	interface IAPI {
+		// Accessible as "GET /info"
+		string getInfo();
+
+		// Not accessible over HTTP
+		@noRoute
+		int getFoo();
+	}
+}
+
+
 /**
 	Attribute to customize how errors/exceptions are displayed.
 
@@ -464,6 +519,32 @@ unittest {
 	void postForm(int ingeter)
 	{
 		redirect("/");
+	}
+}
+
+/** Determines how nested D fields/array entries are mapped to form field names.
+*/
+NestedNameStyleAttribute nestedNameStyle(NestedNameStyle style)
+{
+	import vibe.web.common : onlyAsUda;
+	if (!__ctfe) assert(false, onlyAsUda!__FUNCTION__);
+	return NestedNameStyleAttribute(style);
+}
+
+///
+unittest {
+	struct Items {
+		int[] entries;
+	}
+
+	@nestedNameStyle(NestedNameStyle.d)
+	class MyService {
+		// expects fields in D native style:
+		// "items.entries[0]", "items.entries[1]", ...
+		void postItems(Items items)
+		{
+
+		}
 	}
 }
 
@@ -547,8 +628,9 @@ struct SessionVar(T, string name) {
 	alias value this;
 }
 
+private struct NoRouteAttribute {}
 
-struct ErrorDisplayAttribute(alias DISPLAY_METHOD) {
+private struct ErrorDisplayAttribute(alias DISPLAY_METHOD) {
 	import std.traits : ParameterTypeTuple, ParameterIdentifierTuple;
 
 	alias displayMethod = DISPLAY_METHOD;
@@ -576,6 +658,8 @@ struct ErrorDisplayAttribute(alias DISPLAY_METHOD) {
 	}
 }
 
+private struct NestedNameStyleAttribute { NestedNameStyle value; }
+
 
 private {
 	TaskLocal!RequestContext s_requestContext;
@@ -602,10 +686,20 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 	alias RET = ReturnType!overload;
 	alias PARAMS = ParameterTypeTuple!overload;
 	alias default_values = ParameterDefaultValueTuple!overload;
+	alias AuthInfoType = AuthInfo!C;
 	enum param_names = [ParameterIdentifierTuple!overload];
 	enum erruda = findFirstUDA!(ErrorDisplayAttribute, overload);
 
+	static if (findFirstUDA!(NestedNameStyleAttribute, C).found)
+		enum nested_style = findFirstUDA!(NestedNameStyleAttribute, C).value.value;
+	else enum nested_style = NestedNameStyle.underscore;
+
 	s_requestContext = createRequestContext!overload(req, res);
+
+	static if (isAuthenticated!(C, overload)) {
+		auto auth_info = handleAuthentication!overload(instance, req, res);
+		if (res.headerWritten) return;
+	}
 
 	// collect all parameter values
 	PARAMS params = void; // FIXME: in case of errors, destructors could be called on uninitialized variables!
@@ -614,7 +708,9 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 		ParamError err;
 		err.field = param_names[i];
 		try {
-			static if (IsAttributedParameter!(overload, param_names[i])) {
+			static if (is(PT == AuthInfoType)) {
+				params[i] = auth_info;
+			} else static if (IsAttributedParameter!(overload, param_names[i])) {
 				params[i].setVoid(computeAttributedParameterCtx!(overload, param_names[i])(instance, req, res));
 				if (res.headerWritten) return;
 			}
@@ -642,7 +738,7 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 				params[i] = param_names[i] in req.form || param_names[i] in req.query;
 			} else {
 				enum has_default = !is(default_values[i] == void);
-				ParamResult pres = readFormParamRec(req, params[i], param_names[i], !has_default, err);
+				ParamResult pres = readFormParamRec(req, params[i], param_names[i], !has_default, nested_style, err);
 				static if (has_default) {
 					if (pres == ParamResult.skipped)
 						params[i].setVoid(default_values[i]);
@@ -705,6 +801,9 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 			}
 		}
 	}
+
+	static if (isAuthenticated!(C, overload))
+		handleAuthorization!(C, overload, params)(auth_info);
 
 	// execute the method and write the result
 	try {

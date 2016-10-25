@@ -252,7 +252,7 @@ enum SSL3_SESSION_ID_SIZE = 32;
 enum SSL3_RT_HEADER_LENGTH = 5;
 
 /+
-#ifndef SSL3_ALIGN_PAYLOAD
+version(SSL3_ALIGN_PAYLOAD) {} else {
  /* Some will argue that this increases memory footprint, but it's
   * not actually true. Point is that malloc has to return at least
   * 64-bit aligned pointers, meaning that allocating 5 bytes wastes
@@ -323,6 +323,7 @@ enum SSL3_RT_CHANGE_CIPHER_SPEC = 20;
 enum SSL3_RT_ALERT = 21;
 enum SSL3_RT_HANDSHAKE = 22;
 enum SSL3_RT_APPLICATION_DATA = 23;
+enum TLS1_RT_HEARTBEAT = 24;
 
 enum SSL3_AL_WARNING = 1;
 enum SSL3_AL_FATAL = 2;
@@ -340,6 +341,11 @@ enum SSL3_AD_CERTIFICATE_EXPIRED = 45;
 enum SSL3_AD_CERTIFICATE_UNKNOWN = 46;
 enum SSL3_AD_ILLEGAL_PARAMETER = 47;	/* fatal */
 
+enum TLS1_HB_REQUEST = 1;
+enum TLS1_HB_RESPONSE = 2;
+	
+version(OPENSSL_NO_SSL_INTERN) {} else {
+
 struct ssl3_record_st {
 /*r */	int type;               /* type of record */
 /*rw*/	uint length;    /* How many bytes available */
@@ -348,7 +354,7 @@ struct ssl3_record_st {
 /*rw*/	ubyte* input;   /* where the decode bytes are */
 /*r */	ubyte* comp;    /* only used with decompression - malloc()ed */
 /*r */  c_ulong epoch;    /* epoch number, needed by DTLS1 */
-/*r */  ubyte seq_num[8]; /* sequence number, needed by DTLS1 */
+/*r */  ubyte[8] seq_num; /* sequence number, needed by DTLS1 */
 	}
 alias ssl3_record_st SSL3_RECORD;
 
@@ -360,6 +366,8 @@ struct ssl3_buffer_st {
 	int left;               /* how many bytes left */
 	}
 alias ssl3_buffer_st SSL3_BUFFER;
+
+}
 
 enum SSL3_CT_RSA_SIGN = 1;
 enum SSL3_CT_DSS_SIGN = 2;
@@ -380,21 +388,35 @@ enum SSL3_FLAGS_DELAY_CLIENT_FINISHED = 0x0002;
 enum SSL3_FLAGS_POP_BUFFER = 0x0004;
 enum TLS1_FLAGS_TLS_PADDING_BUG = 0x0008;
 enum TLS1_FLAGS_SKIP_CERT_VERIFY = 0x0010;
+enum TLS1_FLAGS_KEEP_HANDSHAKE = 0x0020;
+ 
+/* SSL3_FLAGS_SGC_RESTART_DONE is set when we
+ * restart a handshake because of MS SGC and so prevents us
+ * from restarting the handshake in a loop. It's reset on a
+ * renegotiation, so effectively limits the client to one restart
+ * per negotiation. This limits the possibility of a DDoS
+ * attack where the client handshakes in a loop using SGC to
+ * restart. Servers which permit renegotiation can still be
+ * effected, but we can't prevent that.
+ */
+enum SSL3_FLAGS_SGC_RESTART_DONE = 0x0040;
+
+version(OPENSSL_NO_SSL_INTERN) {} else {
 
 struct ssl3_state_st
 	{
 	c_long flags;
 	int delay_buf_pop_ret;
 
-	ubyte read_sequence[8];
+	ubyte[8] read_sequence;
 	int read_mac_secret_size;
-	ubyte read_mac_secret[EVP_MAX_MD_SIZE];
-	ubyte write_sequence[8];
+	ubyte[EVP_MAX_MD_SIZE] read_mac_secret;
+	ubyte[8] write_sequence;
 	int write_mac_secret_size;
-	ubyte write_mac_secret[EVP_MAX_MD_SIZE];
+	ubyte[EVP_MAX_MD_SIZE] write_mac_secret;
 
-	ubyte server_random[SSL3_RANDOM_SIZE];
-	ubyte client_random[SSL3_RANDOM_SIZE];
+	ubyte[SSL3_RANDOM_SIZE] server_random;
+	ubyte[SSL3_RANDOM_SIZE] client_random;
 
 	/* flags for countermeasure against known-IV weakness */
 	int need_empty_fragments;
@@ -411,9 +433,9 @@ struct ssl3_state_st
 
 	/* storage for Alert/Handshake protocol data received but not
 	 * yet processed by ssl3_read_bytes: */
-	ubyte alert_fragment[2];
+	ubyte[2] alert_fragment;
 	uint alert_fragment_len;
-	ubyte handshake_fragment[4];
+	ubyte[4] handshake_fragment;
 	uint handshake_fragment_len;
 
 	/* partial write - check the numbers match */
@@ -438,7 +460,7 @@ struct ssl3_state_st
 	/* we allow one fatal and one warning alert to be outstanding,
 	 * send close alert via the warning alert */
 	int alert_dispatch;
-	ubyte send_alert[2];
+	ubyte[2] send_alert;
 
 	/* This flag is set when we should renegotiate ASAP, basically when
 	 * there is no more data in the read or write buffers */
@@ -458,12 +480,12 @@ struct ssl3_state_st
 
 	struct tmp_ {
 		/* actually only needs to be 16+20 */
-		ubyte cert_verify_md[EVP_MAX_MD_SIZE*2];
+		ubyte[EVP_MAX_MD_SIZE*2] cert_verify_md;
 
 		/* actually only need to be 16+20 for SSLv3 and 12 for TLS */
-		ubyte finish_md[EVP_MAX_MD_SIZE*2];
+		ubyte[EVP_MAX_MD_SIZE*2] finish_md;
 		int finish_md_len;
-		ubyte peer_finish_md[EVP_MAX_MD_SIZE*2];
+		ubyte[EVP_MAX_MD_SIZE*2] peer_finish_md;
 		int peer_finish_md_len;
 
 		c_ulong message_size;
@@ -487,7 +509,7 @@ version(OPENSSL_NO_ECDH) {} else {
 		/* used for certificate requests */
 		int cert_req;
 		int ctype_num;
-		char ctype[SSL3_CT_NUMBER];
+		char[SSL3_CT_NUMBER] ctype;
 		STACK_OF!(X509_NAME) *ca_names;
 
 		int use_rsa_tmp;
@@ -509,19 +531,38 @@ version(OPENSSL_NO_COMP) {
 	tmp_ tmp;
 
         /* Connection binding to prevent renegotiation attacks */
-        ubyte previous_client_finished[EVP_MAX_MD_SIZE];
+        ubyte[EVP_MAX_MD_SIZE] previous_client_finished;
         ubyte previous_client_finished_len;
-        ubyte previous_server_finished[EVP_MAX_MD_SIZE];
+        ubyte[EVP_MAX_MD_SIZE] previous_server_finished;
         ubyte previous_server_finished_len;
         int send_connection_binding; /* TODOEKR */
+
+version(OPENSSL_NO_NEXTPROTONEG) {} else {
+	/* Set if we saw the Next Protocol Negotiation extension from our peer. */
+	int next_proto_neg_seen;
+}
+
+version(OPENSSL_NO_TLSEXT) {} else {
+version(OPENSSL_NO_EC) {} else {
+	/* This is set to true if we believe that this is a version of Safari
+	 * running on OS X 10.6 or newer. We wish to know this because Safari
+	 * on 10.8 .. 10.8.3 has broken ECDHE-ECDSA support. */
+	char is_probably_safari;
+} /* !OPENSSL_NO_EC */
+} /* !OPENSSL_NO_TLSEXT */
 	}
 alias ssl3_state_st SSL3_STATE;
 
+}
 
 /* SSLv3 */
 /*client */
 /* extra state */
 enum SSL3_ST_CW_FLUSH = (0x100|SSL_ST_CONNECT);
+version(OPENSSL_NO_SCTP) {} else {
+enum DTLS1_SCTP_ST_CW_WRITE_SOCK = (0x310|SSL_ST_CONNECT);
+enum DTLS1_SCTP_ST_CR_READ_SOCK = (0x320|SSL_ST_CONNECT);
+}	
 /* write to server */
 enum SSL3_ST_CW_CLNT_HELLO_A = (0x110|SSL_ST_CONNECT);
 enum SSL3_ST_CW_CLNT_HELLO_B = (0x111|SSL_ST_CONNECT);
@@ -549,6 +590,10 @@ enum SSL3_ST_CW_CERT_VRFY_A = (0x190|SSL_ST_CONNECT);
 enum SSL3_ST_CW_CERT_VRFY_B = (0x191|SSL_ST_CONNECT);
 enum SSL3_ST_CW_CHANGE_A = (0x1A0|SSL_ST_CONNECT);
 enum SSL3_ST_CW_CHANGE_B = (0x1A1|SSL_ST_CONNECT);
+version(OPENSSL_NO_NEXTPROTONEG) {} else {
+enum SSL3_ST_CW_NEXT_PROTO_A = (0x200|SSL_ST_CONNECT);
+enum SSL3_ST_CW_NEXT_PROTO_B = (0x201|SSL_ST_CONNECT);
+}
 enum SSL3_ST_CW_FINISHED_A = (0x1B0|SSL_ST_CONNECT);
 enum SSL3_ST_CW_FINISHED_B = (0x1B1|SSL_ST_CONNECT);
 /* read from server */
@@ -564,6 +609,10 @@ enum SSL3_ST_CR_CERT_STATUS_B = (0x1F1|SSL_ST_CONNECT);
 /* server */
 /* extra state */
 enum SSL3_ST_SW_FLUSH = (0x100|SSL_ST_ACCEPT);
+version(OPENSSL_NO_SCTP) {} else {
+enum DTLS1_SCTP_ST_SW_WRITE_SOCK = (0x310|SSL_ST_ACCEPT);
+enum DTLS1_SCTP_ST_SR_READ_SOCK = (0x320|SSL_ST_ACCEPT);
+}	
 /* read from client */
 /* Do not change the number values, they do matter */
 enum SSL3_ST_SR_CLNT_HELLO_A = (0x110|SSL_ST_ACCEPT);
@@ -594,6 +643,10 @@ enum SSL3_ST_SR_CERT_VRFY_A = (0x1A0|SSL_ST_ACCEPT);
 enum SSL3_ST_SR_CERT_VRFY_B = (0x1A1|SSL_ST_ACCEPT);
 enum SSL3_ST_SR_CHANGE_A = (0x1B0|SSL_ST_ACCEPT);
 enum SSL3_ST_SR_CHANGE_B = (0x1B1|SSL_ST_ACCEPT);
+version(OPENSSL_NO_NEXTPROTONEG) {} else {
+enum SSL3_ST_SR_NEXT_PROTO_A = (0x210|SSL_ST_ACCEPT);
+enum SSL3_ST_SR_NEXT_PROTO_B = (0x211|SSL_ST_ACCEPT);
+}
 enum SSL3_ST_SR_FINISHED_A = (0x1C0|SSL_ST_ACCEPT);
 enum SSL3_ST_SR_FINISHED_B = (0x1C1|SSL_ST_ACCEPT);
 /* write to client */
@@ -618,6 +671,9 @@ enum SSL3_MT_CERTIFICATE_VERIFY = 15;
 enum SSL3_MT_CLIENT_KEY_EXCHANGE = 16;
 enum SSL3_MT_FINISHED = 20;
 enum SSL3_MT_CERTIFICATE_STATUS = 22;
+version(OPENSSL_NO_NEXTPROTONEG) {} else {
+enum SSL3_MT_NEXT_PROTO = 67;
+}
 enum DTLS1_MT_HELLO_VERIFY_REQUEST = 3;
 
 

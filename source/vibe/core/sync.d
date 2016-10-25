@@ -184,27 +184,26 @@ class LocalTaskSemaphore
 		
 		Waiter w;
 		w.signal = getEventDriver().createManualEvent();
+		scope(exit)
+			destroy(w.signal);
 		w.priority = priority;
 		w.seq = min(0, m_seq - w.priority);
 		if (++m_seq == uint.max)
 			rewindSeq();
 		
 		m_waiters.insert(w);
-		do w.signal.wait(); while (!tryLock());
-		// on resume:
-		destroy(w.signal);
+		w.signal.waitUninterruptible(w.signal.emitCount);
 	}
 
 	/** Gives up an existing lock.
 	*/
 	void unlock() 
-	{
-		m_locks--;
-		if (m_waiters.length > 0 && available > 0) {
-			Waiter w = m_waiters.front();
-			w.signal.emit(); // resume one
+	{		
+		if (m_waiters.length > 0) {
+			ManualEvent s = m_waiters.front().signal;
 			m_waiters.removeFront();
-		}
+			s.emit(); // resume one
+		} else m_locks--;
 	}
 
 	// if true, a goes after b. ie. b comes out front()
@@ -294,10 +293,8 @@ unittest {
 	});
 	assert(!mutex.m_impl.m_locked);
 
-	static if (__VERSION__ >= 2067) {
-		with(mutex.ScopedMutexLock) {
-			assert(mutex.m_impl.m_locked);
-		}
+	with(mutex.ScopedMutexLock) {
+		assert(mutex.m_impl.m_locked);
 	}
 }
 
@@ -546,10 +543,7 @@ private void runMutexUnitTests(M)()
 class TaskCondition : core.sync.condition.Condition {
 	private TaskConditionImpl!(false, Mutex) m_impl;
 
-	static if (__VERSION__ >= 2067)
-		this(core.sync.mutex.Mutex mtx) nothrow { m_impl.setup(mtx); super(mtx); }
-	else
-		this(core.sync.mutex.Mutex mtx) { m_impl.setup(mtx); super(mtx); }
+	this(core.sync.mutex.Mutex mtx) nothrow { m_impl.setup(mtx); super(mtx); }
 
 	override @property Mutex mutex() nothrow { return m_impl.mutex; }
 	override void wait() { m_impl.wait(); }

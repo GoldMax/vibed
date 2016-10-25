@@ -388,7 +388,7 @@ struct Json {
 	/**
 		Allows foreach iterating over JSON objects and arrays.
 	*/
-	int opApply(int delegate(ref Json obj) del)
+	int opApply(scope int delegate(ref Json obj) del)
 	@trusted {
 		checkType!(Json[], Json[string])("opApply");
 		if( m_type == Type.array ){
@@ -405,7 +405,7 @@ struct Json {
 		}
 	}
 	/// ditto
-	int opApply(int delegate(ref const Json obj) del)
+	int opApply(scope int delegate(ref const Json obj) del)
 	const @trusted {
 		checkType!(Json[], Json[string])("opApply");
 		if( m_type == Type.array ){
@@ -422,7 +422,7 @@ struct Json {
 		}
 	}
 	/// ditto
-	int opApply(int delegate(ref size_t idx, ref Json obj) del)
+	int opApply(scope int delegate(ref size_t idx, ref Json obj) del)
 	@trusted {
 		checkType!(Json[])("opApply");
 		foreach( idx, ref v; m_array )
@@ -431,7 +431,7 @@ struct Json {
 		return 0;
 	}
 	/// ditto
-	int opApply(int delegate(ref size_t idx, ref const Json obj) del)
+	int opApply(scope int delegate(ref size_t idx, ref const Json obj) del)
 	const @trusted {
 		checkType!(Json[])("opApply");
 		foreach( idx, ref v; m_array )
@@ -440,7 +440,7 @@ struct Json {
 		return 0;
 	}
 	/// ditto
-	int opApply(int delegate(ref string idx, ref Json obj) del)
+	int opApply(scope int delegate(ref string idx, ref Json obj) del)
 	@trusted {
 		checkType!(Json[string])("opApply");
 		foreach( idx, ref v; m_object )
@@ -450,7 +450,7 @@ struct Json {
 		return 0;
 	}
 	/// ditto
-	int opApply(int delegate(ref string idx, ref const Json obj) del)
+	int opApply(scope int delegate(ref string idx, ref const Json obj) del)
 	const @trusted {
 		checkType!(Json[string])("opApply");
 		foreach( idx, ref v; m_object )
@@ -502,7 +502,7 @@ struct Json {
 				return cast(T)m_int;
 			}
 		}
-		else static assert("JSON can only be cast to (bool, long, std.bigint.BigInt, double, string, Json[] or Json[string]. Not "~T.stringof~".");
+		else static assert(0, "JSON can only be cast to (bool, long, std.bigint.BigInt, double, string, Json[] or Json[string]. Not "~T.stringof~".");
 	}
 
 	/**
@@ -623,7 +623,7 @@ struct Json {
 				case Type.array: return BigInt(0);
 				case Type.object: return BigInt(0);
 			}
-		} else static assert("JSON can only be cast to (bool, long, std.bigint.BigInt, double, string, Json[] or Json[string]. Not "~T.stringof~".");
+		} else static assert(0, "JSON can only be cast to (bool, long, std.bigint.BigInt, double, string, Json[] or Json[string]. Not "~T.stringof~".");
 	}
 
 	/**
@@ -652,7 +652,7 @@ struct Json {
 			else if( m_type == Type.bigInt ) mixin("return Json("~op~"m_bigInt);");
 			else if( m_type == Type.float_ ) mixin("return Json("~op~"m_float);");
 			else assert(false);
-		} else static assert("Unsupported operator '"~op~"' for type JSON.");
+		} else static assert(0, "Unsupported operator '"~op~"' for type JSON.");
 	}
 	/**
 		Performs binary operations between JSON values.
@@ -715,7 +715,7 @@ struct Json {
 			if( m_type == Type.string ) return Json(m_string ~ other.m_string);
 			else if (m_type == Type.array) return Json(m_array ~ other.m_array);
 			else assert(false);
-		} else static assert("Unsupported operator '"~op~"' for type JSON.");
+		} else static assert(0, "Unsupported operator '"~op~"' for type JSON.");
 	}
 	/// ditto
 	Json opBinary(string op)(Json other)
@@ -726,7 +726,7 @@ struct Json {
 			if( m_type == Type.string ) return Json(m_string ~ other.m_string);
 			else if( m_type == Type.array ) return Json(m_array ~ other.m_array);
 			else assert(false);
-		} else static assert("Unsupported operator '"~op~"' for type JSON.");
+		} else static assert(0, "Unsupported operator '"~op~"' for type JSON.");
 	}
 	/// ditto
 	void opOpAssign(string op)(Json other)
@@ -765,7 +765,7 @@ struct Json {
 				if (other.m_type == Type.array) m_array ~= other.m_array;
 				else appendArrayElement(other);
 			} else enforceJson(false, "'~=' only allowed for string and array types, not "~.to!string(m_type)~".");
-		} else static assert("Unsupported operator '"~op~"=' for type JSON.");
+		} else static assert(0, "Unsupported operator '"~op~"=' for type JSON.");
 	}
 	/// ditto
 	void opOpAssign(string op, T)(T other)
@@ -862,29 +862,6 @@ struct Json {
 	{
 		enforceJson(m_type == Type.array, "'appendArrayElement' only allowed for array types, not "~.to!string(m_type)~".");
 		m_array ~= element;
-	}
-
-	// If VibeDataNoOpDispatch is declared, don't include the depracted functions. This allows UFCS to be used on a Json object
-	version (VibeDataNoOpDispatch) {
-	}
-	else {
-		/** Deprecated, please use `opIndex` instead.
-
-			Allows to access existing fields of a JSON object using dot syntax.
-		*/
-		deprecated("Use opIndex instead")
-		@property const(Json) opDispatch(string prop, string file = __FILE__, int line = __LINE__)() const {
-			static if (!file.endsWith("/std/range/primitives.d") && !file.endsWith("/std/array.d"))
-				pragma(msg, file~"("~line.stringof~"): Json.opDispatch is deprecated, use opIndex instead.");
-			return opIndex(prop);
-		}
-		/// ditto
-		deprecated("Use opIndex instead")
-		@property ref Json opDispatch(string prop, string file = __FILE__, int line = __LINE__)() {
-			static if (!file.endsWith("/std/range/primitives.d") && !file.endsWith("/std/array.d"))
-				pragma(msg, file~"("~line.stringof~"): Json.opDispatch is deprecated, use opIndex instead.");
-			return opIndex(prop);
-		}
 	}
 
 	/**
@@ -1169,7 +1146,7 @@ Json parseJson(R)(ref R range, int* line = null, string filename = null)
 			ret = skipJsonString(range);
 			break;
 		case '[':
-			Json[] arr;
+			auto arr = appender!(Json[]);
 			range.popFront();
 			while (true) {
 				skipWhitespace(range, line);
@@ -1184,7 +1161,7 @@ Json parseJson(R)(ref R range, int* line = null, string filename = null)
 				else range.popFront();
 			}
 			range.popFront();
-			ret = arr;
+			ret = arr.data;
 			break;
 		case '{':
 			Json[string] obj;
@@ -1598,30 +1575,30 @@ struct JsonSerializer {
 	// serialization
 	//
 	Json getSerializedResult() { return m_current; }
-	void beginWriteDictionary(T)() { m_compositeStack ~= Json.emptyObject; }
-	void endWriteDictionary(T)() { m_current = m_compositeStack[$-1]; m_compositeStack.length--; }
-	void beginWriteDictionaryEntry(T)(string name) {}
-	void endWriteDictionaryEntry(T)(string name) { m_compositeStack[$-1][name] = m_current; }
+	void beginWriteDictionary(Traits)() { m_compositeStack ~= Json.emptyObject; }
+	void endWriteDictionary(Traits)() { m_current = m_compositeStack[$-1]; m_compositeStack.length--; }
+	void beginWriteDictionaryEntry(Traits)(string name) {}
+	void endWriteDictionaryEntry(Traits)(string name) { m_compositeStack[$-1][name] = m_current; }
 
-	void beginWriteArray(T)(size_t) { m_compositeStack ~= Json.emptyArray; }
-	void endWriteArray(T)() { m_current = m_compositeStack[$-1]; m_compositeStack.length--; }
-	void beginWriteArrayEntry(T)(size_t) {}
-	void endWriteArrayEntry(T)(size_t) { m_compositeStack[$-1].appendArrayElement(m_current); }
+	void beginWriteArray(Traits)(size_t) { m_compositeStack ~= Json.emptyArray; }
+	void endWriteArray(Traits)() { m_current = m_compositeStack[$-1]; m_compositeStack.length--; }
+	void beginWriteArrayEntry(Traits)(size_t) {}
+	void endWriteArrayEntry(Traits)(size_t) { m_compositeStack[$-1].appendArrayElement(m_current); }
 
-	void writeValue(T)(in T value)
+	void writeValue(Traits, T)(in T value)
 		if (!is(T == Json))
 	{
 		static if (isJsonSerializable!T) m_current = value.toJson();
 		else m_current = Json(value);
 	}
 
-	void writeValue(T)(Json value) if (is(T == Json)) { m_current = value; }
-	void writeValue(T)(in Json value) if (is(T == Json)) { m_current = value.clone; }
+	void writeValue(Traits, T)(Json value) if (is(T == Json)) { m_current = value; }
+	void writeValue(Traits, T)(in Json value) if (is(T == Json)) { m_current = value.clone; }
 
 	//
 	// deserialization
 	//
-	void readDictionary(T)(scope void delegate(string) field_handler)
+	void readDictionary(Traits)(scope void delegate(string) field_handler)
 	{
 		enforceJson(m_current.type == Json.Type.object, "Expected JSON object, got "~m_current.type.to!string);
 		auto old = m_current;
@@ -1632,7 +1609,10 @@ struct JsonSerializer {
 		m_current = old;
 	}
 
-	void readArray(T)(scope void delegate(size_t) size_callback, scope void delegate() entry_callback)
+	void beginReadDictionaryEntry(Traits)(string name) {}
+	void endReadDictionaryEntry(Traits)(string name) {}
+
+	void readArray(Traits)(scope void delegate(size_t) size_callback, scope void delegate() entry_callback)
 	{
 		enforceJson(m_current.type == Json.Type.array, "Expected JSON array, got "~m_current.type.to!string);
 		auto old = m_current;
@@ -1644,13 +1624,17 @@ struct JsonSerializer {
 		m_current = old;
 	}
 
-	T readValue(T)()
+	void beginReadArrayEntry(Traits)(size_t index) {}
+	void endReadArrayEntry(Traits)(size_t index) {}
+
+	T readValue(Traits, T)()
 	{
 		static if (is(T == Json)) return m_current;
 		else static if (isJsonSerializable!T) return T.fromJson(m_current);
 		else static if (is(T == float) || is(T == double)) {
 			switch (m_current.type) {
 				default: return cast(T)m_current.get!long;
+				case Json.Type.null_: goto case;
 				case Json.Type.undefined: return T.nan;
 				case Json.Type.float_: return cast(T)m_current.get!double;
 				case Json.Type.bigInt: return cast(T)m_current.bigIntToLong();
@@ -1661,7 +1645,7 @@ struct JsonSerializer {
 		}
 	}
 
-	bool tryReadNull() { return m_current.type == Json.Type.null_; }
+	bool tryReadNull(Traits)() { return m_current.type == Json.Type.null_; }
 }
 
 
@@ -1699,9 +1683,9 @@ struct JsonStringSerializer(R, bool pretty = false)
 
 		void getSerializedResult() {}
 
-		void beginWriteDictionary(T)() { startComposite(); m_range.put('{'); }
-		void endWriteDictionary(T)() { endComposite(); m_range.put("}"); }
-		void beginWriteDictionaryEntry(T)(string name)
+		void beginWriteDictionary(Traits)() { startComposite(); m_range.put('{'); }
+		void endWriteDictionary(Traits)() { endComposite(); m_range.put("}"); }
+		void beginWriteDictionaryEntry(Traits)(string name)
 		{
 			startCompositeEntry();
 			m_range.put('"');
@@ -1709,20 +1693,20 @@ struct JsonStringSerializer(R, bool pretty = false)
 			static if (pretty) m_range.put(`": `);
 			else m_range.put(`":`);
 		}
-		void endWriteDictionaryEntry(T)(string name) {}
+		void endWriteDictionaryEntry(Traits)(string name) {}
 
-		void beginWriteArray(T)(size_t) { startComposite(); m_range.put('['); }
-		void endWriteArray(T)() { endComposite(); m_range.put(']'); }
-		void beginWriteArrayEntry(T)(size_t) { startCompositeEntry(); }
-		void endWriteArrayEntry(T)(size_t) {}
+		void beginWriteArray(Traits)(size_t) { startComposite(); m_range.put('['); }
+		void endWriteArray(Traits)() { endComposite(); m_range.put(']'); }
+		void beginWriteArrayEntry(Traits)(size_t) { startCompositeEntry(); }
+		void endWriteArrayEntry(Traits)(size_t) {}
 
-		void writeValue(T)(in T value)
+		void writeValue(Traits, T)(in T value)
 		{
 			static if (is(T == typeof(null))) m_range.put("null");
 			else static if (is(T == bool)) m_range.put(value ? "true" : "false");
 			else static if (is(T : long)) m_range.formattedWrite("%s", value);
 			else static if (is(T == BigInt)) m_range.formattedWrite("%d", value);
-			else static if (is(T : real)) m_range.formattedWrite("%.16g", value);
+			else static if (is(T : real)) value == value ? m_range.formattedWrite("%.16g", value) : m_range.put("null");
 			else static if (is(T == string)) {
 				m_range.put('"');
 				m_range.jsonEscape(value);
@@ -1773,7 +1757,7 @@ struct JsonStringSerializer(R, bool pretty = false)
 			int m_line = 0;
 		}
 
-		void readDictionary(T)(scope void delegate(string) entry_callback)
+		void readDictionary(Traits)(scope void delegate(string) entry_callback)
 		{
 			m_range.skipWhitespace(&m_line);
 			enforceJson(!m_range.empty && m_range.front == '{', "Expecting object.");
@@ -1801,7 +1785,10 @@ struct JsonStringSerializer(R, bool pretty = false)
 			}
 		}
 
-		void readArray(T)(scope void delegate(size_t) size_callback, scope void delegate() entry_callback)
+		void beginReadDictionaryEntry(Traits)(string name) {}
+		void endReadDictionaryEntry(Traits)(string name) {}
+
+		void readArray(Traits)(scope void delegate(size_t) size_callback, scope void delegate() entry_callback)
 		{
 			m_range.skipWhitespace(&m_line);
 			enforceJson(!m_range.empty && m_range.front == '[', "Expecting array.");
@@ -1822,7 +1809,10 @@ struct JsonStringSerializer(R, bool pretty = false)
 			}
 		}
 
-		T readValue(T)()
+		void beginReadArrayEntry(Traits)(size_t index) {}
+		void endReadArrayEntry(Traits)(size_t index) {}
+
+		T readValue(Traits, T)()
 		{
 			m_range.skipWhitespace(&m_line);
 			static if (is(T == typeof(null))) { enforceJson(m_range.take(4).equal("null"), "Expecting 'null'."); return null; }
@@ -1859,7 +1849,7 @@ struct JsonStringSerializer(R, bool pretty = false)
 			else static assert(false, "Unsupported type: " ~ T.stringof);
 		}
 
-		bool tryReadNull()
+		bool tryReadNull(Traits)()
 		{
 			m_range.skipWhitespace(&m_line);
 			if (m_range.front != 'n') return false;
@@ -1873,7 +1863,10 @@ struct JsonStringSerializer(R, bool pretty = false)
 	}
 }
 
-
+unittest
+{
+	assert(serializeToJsonString(double.nan) == "null");
+}
 
 /**
 	Writes the given JSON object as a JSON string into the destination range.
@@ -1900,7 +1893,7 @@ void writeJsonString(R, bool pretty = false)(ref R dst, in Json json, size_t lev
 		case Json.Type.float_:
 			auto d = json.get!double;
 			if (d != d)
-				dst.put("undefined"); // JSON has no NaN value so set null
+				dst.put("null"); // JSON has no NaN value so set null
 			else
 				formattedWrite(dst, "%.16g", json.get!double);
 			break;
@@ -2015,12 +2008,14 @@ unittest {
 unittest {
 	auto j = Json(double.init);
 
-	assert(j.toString == "undefined"); // A double nan should serialize to undefined
+	assert(j.toString == "null"); // A double nan should serialize to null
 	j = 17.04f;
 	assert(j.toString == "17.04");	// A proper double should serialize correctly
 
 	double d;
 	deserializeJson(d, Json.undefined); // Json.undefined should deserialize to nan
+	assert(d != d);
+	deserializeJson(d, Json(null)); // Json.undefined should deserialize to nan
 	assert(d != d);
 }
 /**

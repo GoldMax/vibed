@@ -610,6 +610,50 @@ struct Bson {
 		assert(value[2] == Bson("foo"));
 	}
 
+	/** Removes an entry from a BSON obect.
+
+		If the key doesn't exit, this function will be a no-op.
+	*/
+	void remove(string key)
+	{
+		checkType(Type.object);
+		auto d = m_data[4 .. $];
+		while (d.length > 0) {
+			size_t start_remainder = d.length;
+			auto tp = cast(Type)d[0];
+			if (tp == Type.end) break;
+			d = d[1 .. $];
+			auto ekey = skipCString(d);
+			auto evalue = Bson(tp, d);
+			d = d[evalue.data.length .. $];
+
+			if (ekey == key) {
+				m_data = m_data[0 .. $-start_remainder] ~ d;
+				break;
+			}
+		}
+	}
+
+	unittest {
+		auto o = Bson.emptyObject;
+		o["a"] = Bson(1);
+		o["b"] = Bson(2);
+		o["c"] = Bson(3);
+		assert(o.length == 3);
+		o.remove("b");
+		assert(o.length == 2);
+		assert(o["a"] == Bson(1));
+		assert(o["c"] == Bson(3));
+		o.remove("c");
+		assert(o.length == 1);
+		assert(o["a"] == Bson(1));
+		o.remove("c");
+		assert(o.length == 1);
+		assert(o["a"] == Bson(1));
+		o.remove("a");
+		assert(o.length == 0);
+	}
+
 	/**
 		Allows foreach iterating over BSON objects and arrays.
 	*/
@@ -667,33 +711,6 @@ struct Bson {
 				return ret;
 		}
 		return 0;
-	}
-
-	// If VibeDataNoOpDispatch is declared, don't include the depracted functions. This allows UFCS to be used on a Bson object
-	version (VibeDataNoOpDispatch) {
-	}
-	else {
-		/** Deprecated, please use `opIndex` instead.
-
-			Allows to access existing fields of a JSON object using dot syntax.
-
-			Returns a null value for non-existent fields.
-		*/
-		deprecated("Use opIndex instead")
-		@property const(Bson) opDispatch(string prop, string file = __FILE__, int line = __LINE__)() const {
-			import std.algorithm.searching : endsWith;
-			static if (!file.endsWith("/std/range/primitives.d") && !file.endsWith("/std/array.d"))
-				pragma(msg, file~"("~line.stringof~"): Bson.opDispatch is deprecated, use opIndex instead.");
-			return opIndex(prop);
-		}
-		/// ditto
-		deprecated("Use opIndex instead")
-		@property void opDispatch(string prop, T, string file = __FILE__, int line = __LINE__)(T val) {
-			import std.algorithm.searching : endsWith;
-			static if (!file.endsWith("/std/range/primitives.d") && !file.endsWith("/std/array.d"))
-				pragma(msg, file~"("~line.stringof~"): Bson.opDispatch is deprecated, use opIndexAssign instead.");
-			opIndexAssign(val, prop);
-		}
 	}
 
 	///
@@ -922,7 +939,6 @@ unittest {
 	assert(c.opt!int(12) == 12);
 	assert(c.opt!(Bson[])(null).length == 0);
 }
-
 
 
 /**
@@ -1331,34 +1347,34 @@ struct BsonSerializer {
 		return ret;
 	}
 
-	void beginWriteDictionary(T)()
+	void beginWriteDictionary(Traits)()
 	{
 		writeCompositeEntryHeader(Bson.Type.object);
 		m_compositeStack ~= m_dst.data.length;
 		m_dst.put(toBsonData(cast(int)0));
 	}
-	void endWriteDictionary(T)()
+	void endWriteDictionary(Traits)()
 	{
 		m_dst.put(Bson.Type.end);
 		auto sh = m_compositeStack[$-1];
 		m_compositeStack.length--;
 		m_dst.data[sh .. sh + 4] = toBsonData(cast(uint)(m_dst.data.length - sh))[];
 	}
-	void beginWriteDictionaryEntry(T)(string name) { m_entryName = name; }
-	void endWriteDictionaryEntry(T)(string name) {}
+	void beginWriteDictionaryEntry(Traits)(string name) { m_entryName = name; }
+	void endWriteDictionaryEntry(Traits)(string name) {}
 
-	void beginWriteArray(T)(size_t)
+	void beginWriteArray(Traits)(size_t)
 	{
 		writeCompositeEntryHeader(Bson.Type.array);
 		m_compositeStack ~= m_dst.data.length;
 		m_dst.put(toBsonData(cast(int)0));
 	}
-	void endWriteArray(T)() { endWriteDictionary!T(); }
-	void beginWriteArrayEntry(T)(size_t idx) { m_entryIndex = idx; }
-	void endWriteArrayEntry(T)(size_t idx) {}
+	void endWriteArray(Traits)() { endWriteDictionary!Traits(); }
+	void beginWriteArrayEntry(Traits)(size_t idx) { m_entryIndex = idx; }
+	void endWriteArrayEntry(Traits)(size_t idx) {}
 
 	// auto ref does't work for DMD 2.064
-	void writeValue(T)(/*auto ref const*/ in T value) { writeValueH!(T, true)(value); }
+	void writeValue(Traits, T)(/*auto ref const*/ in T value) { writeValueH!(T, true)(value); }
 
 	private void writeValueH(T, bool write_header)(/*auto ref const*/ in T value)
 	{
@@ -1412,7 +1428,7 @@ struct BsonSerializer {
 	//
 	// deserialization
 	//
-	void readDictionary(T)(scope void delegate(string) entry_callback)
+	void readDictionary(Traits)(scope void delegate(string) entry_callback)
 	{
 		enforce(m_inputData.type == Bson.Type.object, "Expected object instead of "~m_inputData.type.to!string());
 		auto old = m_inputData;
@@ -1423,7 +1439,10 @@ struct BsonSerializer {
 		m_inputData = old;
 	}
 
-	void readArray(T)(scope void delegate(size_t) size_callback, scope void delegate() entry_callback)
+	void beginReadDictionaryEntry(Traits)(string name) {}
+	void endReadDictionaryEntry(Traits)(string name) {}
+
+	void readArray(Traits)(scope void delegate(size_t) size_callback, scope void delegate() entry_callback)
 	{
 		enforce(m_inputData.type == Bson.Type.array, "Expected array instead of "~m_inputData.type.to!string());
 		auto old = m_inputData;
@@ -1434,7 +1453,10 @@ struct BsonSerializer {
 		m_inputData = old;
 	}
 
-	T readValue(T)()
+	void beginReadArrayEntry(Traits)(size_t index) {}
+	void endReadArrayEntry(Traits)(size_t index) {}
+
+	T readValue(Traits, T)()
 	{
 		static if (is(T == Bson)) return m_inputData;
 		else static if (is(T == Json)) return m_inputData.toJson();
@@ -1457,8 +1479,8 @@ struct BsonSerializer {
 			if (m_inputData.type == Bson.Type.string) return SysTime.fromISOExtString(m_inputData.get!string);
 			else return m_inputData.get!BsonDate().toSysTime();
 		}
-		else static if (isBsonSerializable!T) return T.fromBson(readValue!Bson);
-		else static if (isJsonSerializable!T) return T.fromJson(readValue!Bson.toJson());
+		else static if (isBsonSerializable!T) return T.fromBson(readValue!(Traits, Bson));
+		else static if (isJsonSerializable!T) return T.fromJson(readValue!(Traits, Bson).toJson());
 		else static if (is(T : const(ubyte)[])) {
 			auto ret = m_inputData.get!BsonBinData.rawData;
 			static if (isStaticArray!T) return cast(T)ret[0 .. T.length];
@@ -1467,7 +1489,7 @@ struct BsonSerializer {
 		} else return m_inputData.get!T();
 	}
 
-	bool tryReadNull()
+	bool tryReadNull(Traits)()
 	{
 		if (m_inputData.type == Bson.Type.null_) return true;
 		return false;

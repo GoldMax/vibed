@@ -82,10 +82,17 @@ package final class Libevent2TCPConnection : TCPConnection {
 		m_remoteAddress = ctx.remote_addr;
 
 		void* ptr;
-		if( ctx.remote_addr.family == AF_INET ) ptr = &ctx.remote_addr.sockAddrInet4.sin_addr;
-		else ptr = &ctx.remote_addr.sockAddrInet6.sin6_addr;
-		evutil_inet_ntop(ctx.remote_addr.family, ptr, m_peerAddressBuf.ptr, m_peerAddressBuf.length);
-		m_peerAddress = cast(string)m_peerAddressBuf[0 .. m_peerAddressBuf[].indexOf('\0')];
+		switch (ctx.remote_addr.family) {
+			default: throw new Exception("Unsupported address family.");
+			case AF_INET: ptr = &ctx.remote_addr.sockAddrInet4.sin_addr; break;
+			case AF_INET6: ptr = &ctx.remote_addr.sockAddrInet6.sin6_addr; break;
+			version (Posix) {
+				case AF_UNIX: ptr = &ctx.remote_addr.sockAddrUnix.sun_path; break;
+			}
+		}
+
+		if (evutil_inet_ntop(ctx.remote_addr.family, ptr, m_peerAddressBuf.ptr, m_peerAddressBuf.length) !is null)
+			m_peerAddress = cast(string)m_peerAddressBuf[0 .. m_peerAddressBuf[].indexOf('\0')];
 
 		bufferevent_setwatermark(m_ctx.event, EV_WRITE, 4096, 65536);
 		bufferevent_setwatermark(m_ctx.event, EV_READ, 0, 65536);
@@ -529,6 +536,7 @@ package struct TCPContext
 	bool shutdown = false;
 	int socketfd = -1;
 	int status = 0;
+	const(char)* statusMessage;
 	Task readOwner;
 	Task writeOwner;
 	Exception exception; // set during onSocketEvent calls that were emitted synchronously
@@ -732,6 +740,7 @@ package nothrow extern(C)
 				//	(status & BEV_EVENT_READING) ? "reading from" : (status & BEV_EVENT_WRITING) ? "writing to" : "on",
 				//	ctx.socketfd);
 				//ex = new SystemSocketException(msg);
+				ctx.statusMessage = evutil_socket_error_to_string(EVUTIL_SOCKET_ERROR());
 				free_event = true;
 			}
 

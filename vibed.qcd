@@ -1,7 +1,7 @@
 [General]
-ExtraArgs="-version=VibeLibeventDriver -version=VibeCustomMain -version=_VibeManualMemoryManagement"
+ExtraArgs="-version=VibePragmaLib -version=VibeLibeventDriver -version=Have_openssl "
 Includes=
-Libs=ssl crypto event
+Libs=
 SourceRoot=source
 
 [Files]
@@ -12,7 +12,6 @@ vibe\core\connectionpool.d=0
 vibe\core\core.d=0
 vibe\core\driver.d=0
 vibe\core\drivers\libasync.d=0
-vibe\core\drivers\libev.d=0
 vibe\core\drivers\libevent2.d=0
 vibe\core\drivers\libevent2_tcp.d=0
 vibe\core\drivers\native.d=0
@@ -54,7 +53,6 @@ vibe\http\fileserver.d=0
 vibe\http\form.d=0
 vibe\http\log.d=0
 vibe\http\proxy.d=0
-vibe\http\rest.d=0
 vibe\http\router.d=0
 vibe\http\server.d=0
 vibe\http\session.d=0
@@ -72,7 +70,6 @@ vibe\internal\meta\funcattr.d=0
 vibe\internal\meta\traits.d=0
 vibe\internal\meta\typetuple.d=0
 vibe\internal\meta\uda.d=0
-vibe\internal\newconcurrency.d=0
 vibe\internal\rangeutil.d=0
 vibe\internal\win32.d=0
 vibe\mail\smtp.d=0
@@ -83,7 +80,6 @@ vibe\stream\memory.d=0
 vibe\stream\multicast.d=0
 vibe\stream\openssl.d=0
 vibe\stream\operations.d=0
-vibe\stream\ssl.d=0
 vibe\stream\stdio.d=0
 vibe\stream\taskpipe.d=0
 vibe\stream\tls.d=0
@@ -102,6 +98,7 @@ vibe\utils\memory.d=0
 vibe\utils\string.d=0
 vibe\utils\validation.d=0
 vibe\vibe.d=0
+vibe\web\auth.d=0
 vibe\web\common.d=0
 vibe\web\i18n.d=0
 vibe\web\internal\rest\common.d=0

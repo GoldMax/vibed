@@ -101,11 +101,14 @@ enum MD5_DIGEST_LENGTH = 16;
 struct MD5state_st {
 	MD5_LONG A,B,C,D;
 	MD5_LONG Nl,Nh;
-	MD5_LONG data[MD5_LBLOCK];
+	MD5_LONG[MD5_LBLOCK] data;
 	uint num;
 	}
 alias MD5state_st MD5_CTX;
 
+version(OPENSSL_FIPS) {
+    int private_MD5_Init(MD5_CTX* c);
+}
 int MD5_Init(MD5_CTX* c);
 int MD5_Update(MD5_CTX* c, const(void)* data, size_t len);
 int MD5_Final(ubyte* md, MD5_CTX* c);

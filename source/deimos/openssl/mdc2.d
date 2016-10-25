@@ -74,13 +74,16 @@ enum MDC2_DIGEST_LENGTH = 16;
  
 struct mdc2_ctx_st {
 	uint num;
-	ubyte data[MDC2_BLOCK];
+	ubyte[MDC2_BLOCK] data;
 	DES_cblock h,hh;
 	int pad_type; /* either 1 or 2, default 1 */
 	}
 alias mdc2_ctx_st MDC2_CTX;
 
 
+version(OPENSSL_FIPS) {
+    int private_MDC2_Init(MDC2_CTX* c);
+}
 int MDC2_Init(MDC2_CTX* c);
 int MDC2_Update(MDC2_CTX* c, const(ubyte)* data, size_t len);
 int MDC2_Final(ubyte* md, MDC2_CTX* c);

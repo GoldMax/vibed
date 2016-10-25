@@ -71,6 +71,9 @@ struct URL {
 				case "ws":
 				case "wss":
 				case "file":
+				case "http+unix":
+				case "https+unix":
+				case "redis":
 					// proto://server/path style
 					enforce(str.startsWith("//"), "URL must start with proto://...");
 					requires_host = true;
@@ -131,6 +134,11 @@ struct URL {
 	}
 	/// ditto
 	static URL parse(string url_string)
+	{
+		return URL(url_string);
+	}
+	/// ditto
+	static URL fromString(string url_string)
 	{
 		return URL(url_string);
 	}
@@ -270,6 +278,8 @@ struct URL {
 			case "ftp":
 			case "spdy":
 			case "sftp":
+			case "http+unix":
+			case "https+unix":
 				dst.put("//");
 				break;
 		}
@@ -425,4 +435,19 @@ unittest { // issue #1318
 		URL("http://something/inval%id");
 		assert(false, "Expected to throw an exception.");
 	} catch (Exception e) {}
+}
+
+unittest {
+	assert(URL("http+unix://%2Fvar%2Frun%2Fdocker.sock").schema == "http+unix");
+	assert(URL("https+unix://%2Fvar%2Frun%2Fdocker.sock").schema == "https+unix");
+	assert(URL("http+unix://%2Fvar%2Frun%2Fdocker.sock").host == "%2Fvar%2Frun%2Fdocker.sock");
+	assert(URL("http+unix://%2Fvar%2Frun%2Fdocker.sock").pathString == "");
+	assert(URL("http+unix://%2Fvar%2Frun%2Fdocker.sock/container/json").pathString == "/container/json");
+	auto url = URL("http+unix://%2Fvar%2Frun%2Fdocker.sock/container/json");
+	assert(URL(url.toString()) == url);
+}
+
+unittest {
+	import vibe.data.serialization;
+	static assert(isStringSerializable!URL);
 }

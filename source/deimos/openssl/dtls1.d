@@ -73,11 +73,15 @@ public import deimos.openssl.pqueue;
 // #endif
 version (Windows) {
 /* Needed for timeval */
-import std.c.windows.winsock;
+import core.sys.windows.winsock2;
 // #elif defined(OPENSSL_SYS_NETWARE) && !defined(_WINSOCK2API_)
 // #include <sys/timeval.h>
+// #else
+// #if defined(OPENSSL_SYS_VXWORKS)
+// #include <sys/times.h>
+// #else
 } else version (Win64) {
-import std.c.windows.winsock;
+import core.sys.windows.winsock2;
 } else {
 import core.sys.posix.sys.time;
 }
@@ -111,11 +115,16 @@ enum DTLS1_AL_HEADER_LENGTH = 7;
 enum DTLS1_AL_HEADER_LENGTH = 2;
 }
 
+version(OPENSSL_NO_SSL_INTERN) {} else {
+
+version(OPENSSL_NO_SCTP) {} else {
+    enum DTLS1_SCTP_AUTH_LABEL = "EXPORTER_DTLS_OVER_SCTP";
+}
 
 struct dtls1_bitmap_st {
 	c_ulong map;		/* track 32 packets on 32-bit systems
 					   and 64 - on 64-bit systems */
-	ubyte max_seq_num[8];	/* max record number seen so far,
+	ubyte[8] max_seq_num;	/* max record number seen so far,
 					   64-bit value in big-endian
 					   encoding */
 	}
@@ -178,8 +187,8 @@ alias hm_fragment_st hm_fragment;
 
 struct dtls1_state_st {
 	uint send_cookie;
-	ubyte cookie[DTLS1_COOKIE_LENGTH];
-	ubyte rcvd_cookie[DTLS1_COOKIE_LENGTH];
+	ubyte[DTLS1_COOKIE_LENGTH] cookie;
+	ubyte[DTLS1_COOKIE_LENGTH] rcvd_cookie;
 	uint cookie_len;
 
 	/*
@@ -203,7 +212,7 @@ struct dtls1_state_st {
 	ushort handshake_read_seq;
 
 	/* save last sequence number for retransmissions */
-	ubyte last_write_sequence[8];
+	ubyte[8] last_write_sequence;
 
 	/* Received handshake records (processed and unprocessed) */
 	record_pqueue unprocessed_rcds;
@@ -232,7 +241,7 @@ struct dtls1_state_st {
 
 	dtls1_timeout_st timeout;
 
-	/* Indicates when the last handshake msg sent will timeout */
+	/* Indicates when the last handshake msg or heartbeat sent will timeout */
 	timeval next_timeout;
 
 	/* Timeout duration */
@@ -240,13 +249,20 @@ struct dtls1_state_st {
 
 	/* storage for Alert/Handshake protocol data received but not
 	 * yet processed by ssl3_read_bytes: */
-	ubyte alert_fragment[DTLS1_AL_HEADER_LENGTH];
+	ubyte[DTLS1_AL_HEADER_LENGTH] alert_fragment;
 	uint alert_fragment_len;
-	ubyte handshake_fragment[DTLS1_HM_HEADER_LENGTH];
+	ubyte[DTLS1_HM_HEADER_LENGTH] handshake_fragment;
 	uint handshake_fragment_len;
 
 	uint retransmitting;
 	uint change_cipher_spec_ok;
+
+version(OPENSSL_NO_SCTP) {} else {
+	/* used when SSL_ST_XX_FLUSH is entered */
+	int next_state;
+
+	int shutdown_received;
+}
 
 	}
 alias dtls1_state_st DTLS1_STATE;
@@ -256,9 +272,13 @@ struct dtls1_record_data_st {
 	uint   packet_length;
 	SSL3_BUFFER    rbuf;
 	SSL3_RECORD    rrec;
+    version(OPENSSL_NO_SCTP) {} else {
+	bio_dgram_sctp_rcvinfo recordinfo;
+    }
 	}
 alias dtls1_record_data_st DTLS1_RECORD_DATA;
 
+}
 
 /* Timeout multipliers (timeout slice is defined in apps/timeouts.h */
 enum DTLS1_TMO_READ_COUNT = 2;

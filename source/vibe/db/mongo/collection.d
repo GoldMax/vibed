@@ -204,8 +204,8 @@ struct MongoCollection {
 		cmd.update = update;
 		cmd.fields = returnFieldSelector;
 		auto ret = database.runCommand(cmd);
-		if( !ret.ok.get!double ) throw new Exception("findAndModify failed.");
-		return ret.value;
+		if( !ret["ok"].get!double ) throw new Exception("findAndModify failed.");
+		return ret["value"];
 	}
 
 	/// ditto
@@ -318,8 +318,8 @@ struct MongoCollection {
 			cmd.pipeline = pipeline[0];
 		else cmd.pipeline.args = pipeline;
 		auto ret = database.runCommand(cmd);
-		enforce(ret.ok.get!double == 1, "Aggregate command failed.");
-		return ret.result;
+		enforce(ret["ok"].get!double == 1, "Aggregate command failed.");
+		return ret["result"];
 	}
 
 	/// Example taken from the MongoDB documentation
@@ -354,13 +354,70 @@ struct MongoCollection {
 	}
 
 	/**
+		Returns an input range of all unique values for a certain field for
+		records matching the given query.
+
+		Params:
+			key = Name of the field for which to collect unique values
+			query = The query used to select records
+
+		Returns:
+			An input range with items of type `R` (`Bson` by default) is
+			returned.
+	*/
+	auto distinct(R = Bson, Q)(string key, Q query)
+	{
+		import std.algorithm : map;
+
+		static struct CMD {
+			string distinct;
+			string key;
+			Q query;
+		}
+		CMD cmd;
+		cmd.distinct = m_name;
+		cmd.key = key;
+		cmd.query = query;
+		auto res = m_db.runCommand(cmd);
+
+		enforce(res["ok"].get!double != 0, "Distinct query failed: "~res["errmsg"].opt!string);
+
+		// TODO: avoid dynamic array allocation
+		static if (is(R == Bson)) return res["values"].get!(Bson[]);
+		else return res["values"].get!(Bson[]).map!(b => deserializeBson!R(b));
+	}
+
+	///
+	unittest {
+		import std.algorithm : equal;
+		import vibe.db.mongo.mongo;
+
+		void test()
+		{
+			auto db = connectMongoDB("127.0.0.1").getDatabase("test");
+			auto coll = db["collection"];
+
+			coll.drop();
+			coll.insert(["a": "first", "b": "foo"]);
+			coll.insert(["a": "first", "b": "bar"]);
+			coll.insert(["a": "first", "b": "bar"]);
+			coll.insert(["a": "second", "b": "baz"]);
+			coll.insert(["a": "second", "b": "bam"]);
+
+			auto result = coll.distinct!string("b", ["a": "first"]);
+
+			assert(result.equal(["foo", "bar"]));
+		}
+	}
+
+	/**
 		Creates or updates an index.
 
 		Note that the overload taking an associative array of field orders
 		will be removed. Since the order of fields matters, it is
 		only suitable for single-field indices.
 	*/
-	void ensureIndex(scope const(Tuple!(string, int))[] field_orders, IndexFlags flags = IndexFlags.None, Duration expire_time = 0.seconds)
+	void ensureIndex(scope const(Tuple!(string, int))[] field_orders, IndexFlags flags = IndexFlags.none, Duration expire_time = 0.seconds)
 	{
 		// TODO: support 2d indexes
 
@@ -381,16 +438,16 @@ struct MongoCollection {
 		doc["key"] = key;
 		doc["ns"] = m_fullPath;
 		doc["name"] = indexname.data;
-		if (flags & IndexFlags.Unique) doc["unique"] = true;
-		if (flags & IndexFlags.DropDuplicates) doc["dropDups"] = true;
-		if (flags & IndexFlags.Background) doc["background"] = true;
-		if (flags & IndexFlags.Sparse) doc["sparse"] = true;
-		if (flags & IndexFlags.ExpireAfterSeconds) doc["expireAfterSeconds"] = expire_time.total!"seconds";
+		if (flags & IndexFlags.unique) doc["unique"] = true;
+		if (flags & IndexFlags.dropDuplicates) doc["dropDups"] = true;
+		if (flags & IndexFlags.background) doc["background"] = true;
+		if (flags & IndexFlags.sparse) doc["sparse"] = true;
+		if (flags & IndexFlags.expireAfterSeconds) doc["expireAfterSeconds"] = expire_time.total!"seconds";
 		database["system.indexes"].insert(doc);
 	}
 	/// ditto
 	deprecated("Use the overload taking an array of field_orders instead.")
-	void ensureIndex(int[string] field_orders, IndexFlags flags = IndexFlags.None, ulong expireAfterSeconds = 0)
+	void ensureIndex(int[string] field_orders, IndexFlags flags = IndexFlags.none, ulong expireAfterSeconds = 0)
 	{
 		Tuple!(string, int)[] orders;
 		foreach (k, v; field_orders)
@@ -496,13 +553,4 @@ unittest {
 		if (!qusr.isNull)
 			logInfo("User: %s", qusr.loginName);
 	}
-}
-
-enum IndexFlags {
-	None = 0,
-	Unique = 1<<0,
-	DropDuplicates = 1<<2,
-	Background = 1<<3,
-	Sparse = 1<<4,
-	ExpireAfterSeconds = 1<<5
 }

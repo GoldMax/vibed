@@ -1,7 +1,10 @@
 /**
 	This module contains the core functionality of the vibe.d framework.
 
-	Copyright: © 2012-2015 RejectedSoftware e.K.
+	See `runApplication` for the main entry point for typical vibe.d
+	server or GUI applications.
+
+	Copyright: © 2012-2016 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
@@ -12,7 +15,6 @@ public import vibe.core.driver;
 import vibe.core.args;
 import vibe.core.concurrency;
 import vibe.core.log;
-import vibe.internal.newconcurrency;
 import vibe.utils.array;
 import std.algorithm;
 import std.conv;
@@ -65,13 +67,115 @@ version (Windows)
 /**************************************************************************************************/
 
 /**
-	Starts the vibe event loop.
+	Performs final initialization and runs the event loop.
 
-	Note that this function is usually called automatically by the vibe framework. However, if
-	you provide your own main() function, you need to call it manually.
+	This function performs three tasks:
+	$(OL
+		$(LI Makes sure that no unrecognized command line options are passed to
+			the application and potentially displays command line help. See also
+			`vibe.core.args.finalizeCommandLineOptions`.)
+		$(LI Performs privilege lowering if required.)
+		$(LI Runs the event loop and blocks until it finishes.)
+	)
 
-	The event loop will continue running during the whole life time of the application.
-	Tasks will be started and handled from within the event loop.
+	Params:
+		args_out = Optional parameter to receive unrecognized command line
+			arguments. If left to `null`, an error will be reported if
+			any unrecognized argument is passed.
+
+	See_also: ` vibe.core.args.finalizeCommandLineOptions`, `lowerPrivileges`,
+		`runEventLoop`
+*/
+int runApplication(string[]* args_out = null)
+{
+	try if (!finalizeCommandLineOptions()) return 0;
+	catch (Exception e) {
+		logDiagnostic("Error processing command line: %s", e.msg);
+		return 1;
+	}
+
+	lowerPrivileges();
+
+	logDiagnostic("Running event loop...");
+	int status;
+	version (VibeDebugCatchAll) {
+		try {
+			status = runEventLoop();
+		} catch( Throwable th ){
+			logError("Unhandled exception in event loop: %s", th.msg);
+			logDiagnostic("Full exception: %s", th.toString().sanitize());
+			return 1;
+		}
+	} else {
+		status = runEventLoop();
+	}
+
+	logDiagnostic("Event loop exited with status %d.", status);
+	return status;
+}
+
+/// A simple echo server, listening on a privileged TCP port.
+unittest {
+	import vibe.core.core;
+	import vibe.core.net;
+
+	int main()
+	{
+		// first, perform any application specific setup (privileged ports still
+		// available if run as root)
+		listenTCP(7, (conn) { conn.write(conn); });
+
+		// then use runApplication to perform the remaining initialization and
+		// to run the event loop
+		return runApplication();
+	}
+}
+
+/** The same as above, but performing the initialization sequence manually.
+
+	This allows to skip any additional initialization (opening the listening
+	port) if an invalid command line argument or the `--help`  switch is
+	passed to the application.
+*/
+unittest {
+	import vibe.core.core;
+	import vibe.core.net;
+
+	int main()
+	{
+		// process the command line first, to be able to skip the application
+		// setup if not required
+		if (!finalizeCommandLineOptions()) return 0;
+
+		// then set up the application
+		listenTCP(7, (conn) { conn.write(conn); });
+
+		// finally, perform privilege lowering (safe to skip for non-server
+		// applications)
+		lowerPrivileges();
+
+		// and start the event loop
+		return runEventLoop();
+	}
+}
+
+/**
+	Starts the vibe.d event loop for the calling thread.
+
+	Note that this function is usually called automatically by the vibe.d
+	framework. However, if you provide your own `main()` function, you may need
+	to call either this or `runApplication` manually.
+
+	The event loop will by default continue running during the whole life time
+	of the application, but calling `runEventLoop` multiple times in sequence
+	is allowed. Tasks will be started and handled only while the event loop is
+	running.
+
+	Returns:
+		The returned value is the suggested code to return to the operating
+		system from the `main` function.
+
+	See_Also: `runApplication`
 */
 int runEventLoop()
 {
@@ -477,7 +581,7 @@ private TaskFuncInfo makeTaskFuncInfo(CALLABLE, ARGS...)(ref CALLABLE callable, 
 	import std.algorithm : move;
 	import std.traits : hasElaborateAssign;
 
-	struct TARGS { ARGS expand; }
+	static struct TARGS { ARGS expand; }
 
 	static assert(CALLABLE.sizeof <= TaskFuncInfo.callable.length);
 	static assert(TARGS.sizeof <= maxTaskParameterSize,
@@ -557,7 +661,7 @@ public void setupWorkerThreads(uint num = logicalProcessorCount())
 public @property uint logicalProcessorCount()
 {
 	version (linux) {
-		static if (__VERSION__ >= 2067) import core.sys.linux.sys.sysinfo;
+		import core.sys.linux.sys.sysinfo;
 		return get_nprocs();
 	} else version (OSX) {
 		int count;
@@ -586,7 +690,6 @@ public @property uint logicalProcessorCount()
 version (OSX) private extern(C) int sysctlbyname(const(char)* name, void* oldp, size_t* oldlen, void* newp, size_t newlen);
 version (FreeBSD) private extern(C) int sysctlbyname(const(char)* name, void* oldp, size_t* oldlen, void* newp, size_t newlen);
 version (NetBSD) private extern(C) int sysctlbyname(const(char)* name, void* oldp, size_t* oldlen, void* newp, size_t newlen);
-version (linux) static if (__VERSION__ <= 2066) private extern(C) int get_nprocs();
 version (Solaris) private extern(C) int get_nprocs();
 
 /**
@@ -792,6 +895,9 @@ void disableDefaultSignalHandlers()
 	This function is useful for services run as root to give up on the privileges that
 	they only need for initialization (such as listening on ports <= 1024 or opening
 	system log files).
+
+	Note that this function is called automatically by vibe.d's default main
+	implementation, as well as by `runApplication`.
 */
 void lowerPrivileges(string uname, string gname)
 {
@@ -832,9 +938,9 @@ void setTaskEventCallback(TaskEventCb func)
 
 
 /**
-	A version string representing the current vibe version
+	A version string representing the current vibe.d version
 */
-enum vibeVersionString = "0.7.29";
+enum vibeVersionString = "0.7.30";
 
 
 /**
@@ -1062,7 +1168,6 @@ private class CoreTask : TaskFiber {
 	static CoreTask getThis()
 	@safe nothrow {
 		auto f = () @trusted nothrow {
-			static if (__VERSION__ <= 2066) scope (failure) assert(false);
 			return Fiber.getThis();
 		} ();
 		if (f) return cast(CoreTask)f;
@@ -1077,7 +1182,6 @@ private class CoreTask : TaskFiber {
 
 	@property State state()
 	@trusted const nothrow {
-		static if (__VERSION__ <= 2066) scope (failure) assert(false);
 		return super.state;
 	}
 
@@ -1105,10 +1209,8 @@ private class CoreTask : TaskFiber {
 					m_running = true;
 					scope(exit) m_running = false;
 
-					static if (newStdConcurrency) {
-						static import std.concurrency;
-						std.concurrency.thisTid; // force creation of a new Tid
-					}
+					static import std.concurrency;
+					std.concurrency.thisTid; // force creation of a new Tid
 
 					debug if (s_taskEventCallback) s_taskEventCallback(TaskEvent.start, handle);
 					if (!s_eventLoopRunning) {
@@ -1125,8 +1227,7 @@ private class CoreTask : TaskFiber {
 					logDebug("Full error: %s", e.toString().sanitize());
 				}
 
-				static if (newStdConcurrency)
-					this.tidInfo.ident = Tid.init; // reset Tid
+				this.tidInfo.ident = Tid.init; // reset Tid
 
 				// check for any unhandled deferred exceptions
 				if (m_exception !is null) {
@@ -1281,10 +1382,7 @@ private class VibeDriverCore : DriverCore {
 		// do nothing if the task is aready scheduled to be resumed
 		if (ctask.m_queue) return;
 
-		static if (__VERSION__ > 2066)
-			auto uncaught_exception = () @trusted nothrow { return ctask.call!(Fiber.Rethrow.no)(); } ();
-		else
-			auto uncaught_exception = () @trusted nothrow { scope (failure) assert(false); return ctask.call(false); } ();
+		auto uncaught_exception = () @trusted nothrow { return ctask.call!(Fiber.Rethrow.no)(); } ();
 
 		if (uncaught_exception) {
 			auto th = cast(Throwable)uncaught_exception;
@@ -1318,7 +1416,7 @@ private class VibeDriverCore : DriverCore {
 				return;
 			}
 		}
-		if (!s_yieldedTasks.empty) logDebug("Exiting from idle processing although there are still yielded tasks");
+		if (!s_yieldedTasks.empty) logDebug("Exiting from idle processing although there are still yielded tasks (exit=%s)", getExitFlag());
 
 		if (Thread.getThis() is st_mainThread) {
 			if (!m_ignoreIdleForGC && m_gcTimer) {
@@ -1336,7 +1434,7 @@ private class VibeDriverCore : DriverCore {
 	}
 
 	private void resumeYieldedTasks()
-	{
+	nothrow {
 		for (auto limit = s_yieldedTasks.length; limit > 0 && !s_yieldedTasks.empty; limit--) {
 			auto tf = s_yieldedTasks.front;
 			s_yieldedTasks.popFront();
@@ -1348,13 +1446,13 @@ private class VibeDriverCore : DriverCore {
 	@safe nothrow {
 		if (task != Task.init) {
 			debug if (s_taskEventCallback) () @trusted { s_taskEventCallback(TaskEvent.yield, task); } ();
-			static if (__VERSION__ < 2067) scope (failure) assert(false); // Fiber.yield() not nothrow on 2.066 and below
 			() @trusted { task.fiber.yield(); } ();
 			debug if (s_taskEventCallback) () @trusted { s_taskEventCallback(TaskEvent.resume, task); } ();
 			// leave fiber.m_exception untouched, so that it gets thrown on the next yieldForEvent call
 		} else {
 			assert(!s_eventLoopRunning, "Event processing outside of a fiber should only happen before the event loop is running!?");
 			m_eventException = null;
+			() @trusted nothrow { resumeYieldedTasks(); } (); // let tasks that yielded because they were started outside of an event loop
 			try if (auto err = () @trusted { return getEventDriver().runEventLoopOnce(); } ()) {
 				logError("Error running event loop: %d", err);
 				assert(err != 1, "No events registered, exiting event loop.");
@@ -1562,10 +1660,9 @@ shared static this()
 		readOption("gid|group", &s_privilegeLoweringGroupName, "Sets the group name or id used for privilege lowering.");
 	}
 
-	static if (newStdConcurrency) {
-		static import std.concurrency;
-		std.concurrency.scheduler = new VibedScheduler;
-	}
+	// set up vibe.d compatibility for std.concurrency
+	static import std.concurrency;
+	std.concurrency.scheduler = new VibedScheduler;
 }
 
 shared static ~this()
@@ -1610,7 +1707,7 @@ static this()
 static ~this()
 {
 	// Issue #1374: Sometimes Druntime for some reason calls `static ~this` after `shared static ~this`
-	if (!s_core) return; 
+	if (!s_core) return;
 
 	version(VibeLibasyncDriver) {
 		import vibe.core.drivers.libasync;

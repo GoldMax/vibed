@@ -87,11 +87,14 @@ enum RIPEMD160_DIGEST_LENGTH = 20;
 struct RIPEMD160state_st {
 	RIPEMD160_LONG A,B,C,D,E;
 	RIPEMD160_LONG Nl,Nh;
-	RIPEMD160_LONG data[RIPEMD160_LBLOCK];
+	RIPEMD160_LONG[RIPEMD160_LBLOCK] data;
 	uint   num;
 	}
 alias RIPEMD160state_st RIPEMD160_CTX;
 
+version(OPENSSL_FIPS) {
+    int private_RIPEMD160_Init(RIPEMD160_CTX* c);
+}
 int RIPEMD160_Init(RIPEMD160_CTX* c);
 int RIPEMD160_Update(RIPEMD160_CTX* c, const(void)* data, size_t len);
 int RIPEMD160_Final(ubyte* md, RIPEMD160_CTX* c);

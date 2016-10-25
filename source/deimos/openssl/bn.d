@@ -295,7 +295,7 @@ version(OPENSSL_NO_DEPRECATED) {} else {
 enum BN_FLG_FREE = 0x8000;	/* used for debuging */
 }
 void BN_set_flags()(BIGNUM* b, int n) { b.flags |= n; }
-int BN_get_flags()(BIGNUM* b, int n) { return b.flags & n; }
+int BN_get_flags()(const(BIGNUM)* b, int n) { return b.flags & n; }
 
 /* get a clone of a BIGNUM with changed flags, for* temporary* use only
  * (the two BIGNUMs cannot not be used in parallel!) */
@@ -339,7 +339,7 @@ struct bn_mont_ctx_st
 	BIGNUM N;      /* The modulus */
 	BIGNUM Ni;     /* R*(1/R mod N) - N*Ni = 1
 	                * (Ni is only stored for bignum algorithm) */
-	BN_ULONG n0[2];/* least significant word(s) of Ni;
+	BN_ULONG[2] n0;/* least significant word(s) of Ni;
 	                  (type changed with 0.9.9, was "BN_ULONG n0;" before) */
 	int flags;
 	};
@@ -410,15 +410,15 @@ auto BN_prime_checks_for_size(T)(T b) {
 	/* b >= 100 */ 27);
 }
 
-auto BN_num_bytes()(BIGNUM* a) { return (BN_num_bits(a)+7)/8; }
+auto BN_num_bytes()(const(BIGNUM)* a) { return (BN_num_bits(a)+7)/8; }
 
 /* Note that BN_abs_is_word didn't work reliably for w == 0 until 0.9.8 */
-auto BN_abs_is_word()(BIGNUM* a, BN_ULONG w) { return (((a.top == 1) && (a.d[0] == (w))) ||
+auto BN_abs_is_word()(const(BIGNUM)* a, BN_ULONG w) { return (((a.top == 1) && (a.d[0] == (w))) ||
 				(((w) == 0) && (a.top == 0))); }
-auto BN_is_zero()(BIGNUM* a) { return (a.top == 0); }
-auto BN_is_one()(BIGNUM* a) { return (BN_abs_is_word((a),1) && !a.neg); }
-auto BN_is_word()(BIGNUM* a, BN_ULONG w) { return (BN_abs_is_word((a),(w)) && (!(w) || !a.neg)); }
-auto BN_is_odd()(BIGNUM* a) { return ((a.top > 0) && (a.d[0] & 1)); }
+auto BN_is_zero()(const(BIGNUM)* a) { return (a.top == 0); }
+auto BN_is_one()(const(BIGNUM)* a) { return (BN_abs_is_word((a),1) && !a.neg); }
+auto BN_is_word()(const(BIGNUM)* a, BN_ULONG w) { return (BN_abs_is_word((a),(w)) && (!(w) || !a.neg)); }
+auto BN_is_odd()(const(BIGNUM)* a) { return ((a.top > 0) && (a.d[0] & 1)); }
 
 auto BN_one()(BIGNUM* a) { return BN_set_word((a),1); }
 auto BN_zero_ex()(BIGNUM* a) {
@@ -471,11 +471,11 @@ void	BN_set_negative(BIGNUM* b, int n);
  * \param  a  pointer to the BIGNUM object
  * \return 1 if a < 0 and 0 otherwise
  */
-auto BN_is_negative()(BIGNUM* a) { return a.neg != 0; }
+auto BN_is_negative()(const(BIGNUM)* a) { return a.neg != 0; }
 
 int	BN_div(BIGNUM* dv, BIGNUM* rem, const(BIGNUM)* m, const(BIGNUM)* d,
 	BN_CTX* ctx);
-auto BN_mod()(BIGNUM* rem,BIGNUM* m,BIGNUM* d,BN_CTX* ctx) { return BN_div(NULL,(rem),(m),(d),(ctx)); }
+auto BN_mod()(BIGNUM* rem,const(BIGNUM)* m,const(BIGNUM)* d,BN_CTX* ctx) { return BN_div(null,(rem),(m),(d),(ctx)); }
 int	BN_nnmod(BIGNUM* r, const(BIGNUM)* m, const(BIGNUM)* d, BN_CTX* ctx);
 int	BN_mod_add(BIGNUM* r, const(BIGNUM)* a, const(BIGNUM)* b, const(BIGNUM)* m, BN_CTX* ctx);
 int	BN_mod_add_quick(BIGNUM* r, const(BIGNUM)* a, const(BIGNUM)* b, const(BIGNUM)* m);
@@ -548,6 +548,8 @@ BIGNUM* BN_mod_inverse(BIGNUM* ret,
 BIGNUM* BN_mod_sqrt(BIGNUM* ret,
 	const(BIGNUM)* a, const(BIGNUM)* n,BN_CTX* ctx);
 
+void	BN_consttime_swap(BN_ULONG swap, BIGNUM *a, BIGNUM *b, int nwords);
+
 /* Deprecated versions */
 version(OPENSSL_NO_DEPRECATED) {} else {
 BIGNUM* BN_generate_prime(BIGNUM* ret,int bits,int safe,
@@ -567,6 +569,17 @@ int	BN_generate_prime_ex(BIGNUM* ret,int bits,int safe, const(BIGNUM)* add,
 int	BN_is_prime_ex(const(BIGNUM)* p,int nchecks, BN_CTX* ctx, BN_GENCB* cb);
 int	BN_is_prime_fasttest_ex(const(BIGNUM)* p,int nchecks, BN_CTX* ctx,
 		int do_trial_division, BN_GENCB* cb);
+
+int BN_X931_generate_Xpq(BIGNUM *Xp, BIGNUM *Xq, int nbits, BN_CTX *ctx);
+
+int BN_X931_derive_prime_ex(BIGNUM *p, BIGNUM *p1, BIGNUM *p2,
+			const(BIGNUM)* Xp, const(BIGNUM)* Xp1, const(BIGNUM)* Xp2,
+			const(BIGNUM)* e, BN_CTX *ctx, BN_GENCB *cb);
+int BN_X931_generate_prime_ex(BIGNUM *p, BIGNUM *p1, BIGNUM *p2,
+			BIGNUM *Xp1, BIGNUM *Xp2,
+			const(BIGNUM)* Xp,
+			const(BIGNUM)* e, BN_CTX *ctx,
+			BN_GENCB *cb);
 
 BN_MONT_CTX* BN_MONT_CTX_new();
 void BN_MONT_CTX_init(BN_MONT_CTX* ctx);
@@ -623,6 +636,8 @@ int	BN_mod_exp_recp(BIGNUM* r, const(BIGNUM)* a, const(BIGNUM)* p,
 int	BN_div_recp(BIGNUM* dv, BIGNUM* rem, const(BIGNUM)* m,
 	BN_RECP_CTX* recp, BN_CTX* ctx);
 
+version(OPENSSL_NO_EC2M) {} else {
+
 /* Functions for arithmetic over binary polynomials represented by BIGNUMs.
  *
  * The BIGNUM::neg property of BIGNUMs representing binary polynomials is
@@ -655,24 +670,26 @@ alias BN_ucmp BN_GF2m_cmp;
  *    t^p[0] + t^p[1] + ... + t^p[k]
  * where m = p[0] > p[1] > ... > p[k] = 0.
  */
-int	BN_GF2m_mod_arr(BIGNUM* r, const(BIGNUM)* a, const int p[]);
+int	BN_GF2m_mod_arr(BIGNUM* r, const(BIGNUM)* a, const int[] p);
 	/* r = a mod p */
 int	BN_GF2m_mod_mul_arr(BIGNUM* r, const(BIGNUM)* a, const(BIGNUM)* b,
-	const int p[], BN_CTX* ctx); /* r = (a* b) mod p */
-int	BN_GF2m_mod_sqr_arr(BIGNUM* r, const(BIGNUM)* a, const int p[],
+	const int[] p, BN_CTX* ctx); /* r = (a* b) mod p */
+int	BN_GF2m_mod_sqr_arr(BIGNUM* r, const(BIGNUM)* a, const int[] p,
 	BN_CTX* ctx); /* r = (a* a) mod p */
-int	BN_GF2m_mod_inv_arr(BIGNUM* r, const(BIGNUM)* b, const int p[],
+int	BN_GF2m_mod_inv_arr(BIGNUM* r, const(BIGNUM)* b, const int[] p,
 	BN_CTX* ctx); /* r = (1 / b) mod p */
 int	BN_GF2m_mod_div_arr(BIGNUM* r, const(BIGNUM)* a, const(BIGNUM)* b,
-	const int p[], BN_CTX* ctx); /* r = (a / b) mod p */
+	const int[] p, BN_CTX* ctx); /* r = (a / b) mod p */
 int	BN_GF2m_mod_exp_arr(BIGNUM* r, const(BIGNUM)* a, const(BIGNUM)* b,
-	const int p[], BN_CTX* ctx); /* r = (a ^ b) mod p */
+	const int[] p, BN_CTX* ctx); /* r = (a ^ b) mod p */
 int	BN_GF2m_mod_sqrt_arr(BIGNUM* r, const(BIGNUM)* a,
-	const int p[], BN_CTX* ctx); /* r = sqrt(a) mod p */
+	const int[] p, BN_CTX* ctx); /* r = sqrt(a) mod p */
 int	BN_GF2m_mod_solve_quad_arr(BIGNUM* r, const(BIGNUM)* a,
-	const int p[], BN_CTX* ctx); /* r^2 + r = a mod p */
-int	BN_GF2m_poly2arr(const(BIGNUM)* a, int p[], int max);
-int	BN_GF2m_arr2poly(const int p[], BIGNUM* a);
+	const int[] p, BN_CTX* ctx); /* r^2 + r = a mod p */
+int	BN_GF2m_poly2arr(const(BIGNUM)* a, int[] p, int max);
+int	BN_GF2m_arr2poly(const int[] p, BIGNUM* a);
+
+}
 
 /* faster mod functions for the 'NIST primes'
  * 0 <= a < p^2 */
@@ -771,11 +788,20 @@ int RAND_pseudo_bytes(ubyte* buf,int num);
 
 #define bn_fix_top(a)		bn_check_top(a)
 
+#define bn_check_size(bn, bits) bn_wcheck_size(bn, ((bits+BN_BITS2-1))/BN_BITS2)
+#define bn_wcheck_size(bn, words) \
+	do { \
+		const BIGNUM *_bnum2 = (bn); \
+		assert(words <= (_bnum2)->dmax && words >= (_bnum2)->top); \
+	} while(0)
+
 #else /* !BN_DEBUG */
 +/
 void bn_pollute()(BIGNUM* a) {}
 void bn_check_top()(BIGNUM* a) {}
 alias bn_correct_top bn_fix_top;
+void bn_check_size()(BIGNUM* bn, size_t bits) {}
+void bn_wcheck_size()(BIGNUM* bn, size_t words) {}
 
 // #endif
 

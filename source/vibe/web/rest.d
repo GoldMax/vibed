@@ -1,13 +1,12 @@
 /**
 	Automatic REST interface and client code generation facilities.
 
-	Copyright: © 2012-2013 RejectedSoftware e.K.
+	Copyright: © 2012-2016 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig, Михаил Страшун
 */
 module vibe.web.rest;
 
-public import vibe.internal.meta.funcattr : before, after;
 public import vibe.web.common;
 
 import vibe.core.log;
@@ -17,9 +16,11 @@ import vibe.http.common : HTTPMethod;
 import vibe.http.server : HTTPServerRequestDelegate;
 import vibe.http.status : isSuccessCode;
 import vibe.internal.meta.uda;
+import vibe.internal.meta.funcattr;
 import vibe.inet.url;
 import vibe.inet.message : InetHeaderMap;
 import vibe.web.internal.rest.common : RestInterface, Route, SubInterfaceType;
+import vibe.web.auth : AuthInfo, handleAuthentication, handleAuthorization, isAuthenticated;
 
 import std.algorithm : startsWith, endsWith;
 import std.range : isOutputRange;
@@ -242,14 +243,14 @@ HTTPServerRequestDelegate serveRestJSClient(I)(URL base_url)
 {
 	auto settings = new RestInterfaceSettings;
 	settings.baseURL = base_url;
-	return serveRestJSClient(settings);
+	return serveRestJSClient!I(settings);
 }
 /// ditto
 HTTPServerRequestDelegate serveRestJSClient(I)(string base_url)
 {
 	auto settings = new RestInterfaceSettings;
 	settings.baseURL = URL(base_url);
-	return serveRestJSClient(settings);
+	return serveRestJSClient!I(settings);
 }
 
 ///
@@ -268,6 +269,8 @@ unittest {
 
 		auto router = new URLRouter;
 		router.get("/myapi.js", serveRestJSClient!MyAPI(restsettings));
+		//router.get("/myapi.js", serveRestJSClient!MyAPI(URL("http://api.example.org/")));
+		//router.get("/myapi.js", serveRestJSClient!MyAPI("http://api.example.org/"));
 		//router.get("/", staticTemplate!"index.dt");
 
 		listenHTTP(new HTTPServerSettings, router);
@@ -278,7 +281,7 @@ unittest {
 		html
 			head
 				title JS REST client test
-				script(src="test.js")
+				script(src="myapi.js")
 			body
 				button(onclick="MyAPI.postBar('hello');")
 	*/
@@ -291,8 +294,9 @@ unittest {
 void generateRestJSClient(I, R)(ref R output, RestInterfaceSettings settings = null)
 	if (is(I == interface) && isOutputRange!(R, char))
 {
-	import vibe.web.internal.rest.jsclient : generateInterface;
-	output.generateInterface!I(null, settings);
+	import vibe.web.internal.rest.jsclient : generateInterface, JSRestClientSettings;
+	auto jsgenset = new JSRestClientSettings;
+	output.generateInterface!I(settings, jsgenset, true);
 }
 
 /// Writes a JavaScript REST client to a local .js file.
@@ -307,11 +311,14 @@ unittest {
 	void generateJSClientImpl()
 	{
 		import std.array : appender;
-		
+
 		auto app = appender!string;
-		generateRestJSClient!MyAPI(app);
-		writeFileUTF8(Path("myapi.js"), app.data);
+		auto settings = new RestInterfaceSettings;
+		settings.baseURL = URL("http://localhost/");
+		generateRestJSClient!MyAPI(app, settings);
 	}
+
+	generateJSClientImpl();
 }
 
 
@@ -427,7 +434,7 @@ class RestInterfaceClient(I) : I
 					 ref InetHeaderMap optReturnHdrs) const
 		{
 			auto path = URL(m_intf.baseURL).pathString;
-			
+
 			if (name.length)
 			{
 				if (path.length && path[$ - 1] == '/' && name[0] == '/')
@@ -561,10 +568,7 @@ struct Collection(I)
 
 	alias Interface = I;
 	alias AllIDs = TypeTuple!(typeof(I.CollectionIndices.tupleof));
-	static if (__VERSION__ >= 2067)
-		alias AllIDNames = FieldNameTuple!(I.CollectionIndices);
-	else
-		alias AllIDNames = TypeTuple!(__traits(allMembers, I.CollectionIndices));
+	alias AllIDNames = FieldNameTuple!(I.CollectionIndices);
 	static assert(AllIDs.length >= 1, I.stringof~".CollectionIndices must define at least one member.");
 	static assert(AllIDNames.length == AllIDs.length);
 	alias ItemID = AllIDs[$-1];
@@ -855,6 +859,116 @@ unittest {
 	assert(api.items["foo"].subItems[2].getSquaredPosition() == 4);
 }
 
+unittest {
+	interface C {
+		struct CollectionIndices {
+			int _ax;
+			int _b;
+		}
+		void testB(int _ax, int _b);
+	}
+
+	interface B {
+		struct CollectionIndices {
+			int _a;
+		}
+		Collection!C c();
+		void testA(int _a);
+	}
+
+	interface A {
+		Collection!B b();
+	}
+
+	static assert (!is(typeof(A.init.b[1].c[2].testB())));
+}
+
+/** Allows processing the server request/response before the handler method is called.
+
+	Note that this attribute is only used by `registerRestInterface`, but not
+	by the client generators. This attribute expects the name of a parameter that
+	will receive its return value.
+
+	Writing to the response body from within the specified hander function
+	causes any further processing of the request to be skipped. In particular,
+	the route handler method will not be called.
+
+	Note:
+		The example shows the drawback of this attribute. It generally is a
+		leaky abstraction that propagates to the base interface. For this
+		reason the use of this attribute is not recommended, unless there is
+		no suitable alternative.
+*/
+alias before = vibe.internal.meta.funcattr.before;
+
+///
+unittest {
+	import vibe.http.server : HTTPServerRequest, HTTPServerResponse;
+
+	interface MyService {
+		long getHeaderCount(size_t foo = 0);
+	}
+
+	size_t handler(HTTPServerRequest req, HTTPServerResponse res)
+	{
+		return req.headers.length;
+	}
+
+	class MyServiceImpl : MyService {
+		// the "foo" parameter will receive the number of request headers
+		@before!handler("foo")
+		long getHeaderCount(size_t foo)
+		{
+			return foo;
+		}
+	}
+
+	void test(URLRouter router)
+	{
+		router.registerRestInterface(new MyServiceImpl);
+	}
+}
+
+
+/** Allows processing the return value of a handler method and the request/response objects.
+
+	The value returned by the REST API will be the value returned by the last
+	`@after` handler, which allows to post process the results of the handler
+	method.
+
+	Writing to the response body from within the specified handler function
+	causes any further processing of the request ot be skipped, including
+	any other `@after` annotations and writing the result value.
+*/
+alias after = vibe.internal.meta.funcattr.after;
+
+///
+unittest {
+	import vibe.http.server : HTTPServerRequest, HTTPServerResponse;
+
+	interface MyService {
+		long getMagic();
+	}
+
+	long handler(long ret, HTTPServerRequest req, HTTPServerResponse res)
+	{
+		return ret * 2;
+	}
+
+	class MyServiceImpl : MyService{
+		// the result reported by the REST API will be 42
+		@after!handler
+		long getMagic()
+		{
+			return 21;
+		}
+	}
+
+	void test(URLRouter router)
+	{
+		router.registerRestInterface(new MyServiceImpl);
+	}
+}
 
 /**
  * Generate an handler that will wrap the server's method
@@ -916,6 +1030,11 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 				"The request body must contain a JSON object with an entry for each parameter.");
 		}
 
+		static if (isAuthenticated!(T, Func)) {
+			auto auth_info = handleAuthentication!Func(inst, req, res);
+			if (res.headerWritten) return;
+		}
+
 		PTypes params;
 
 		foreach (i, PT; PTypes) {
@@ -925,12 +1044,18 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 			static if (isInstanceOf!(Nullable, PT)) PT v;
 			else Nullable!PT v;
 
-			static if (sparam.kind == ParameterKind.query) {
+			static if (sparam.kind == ParameterKind.auth) {
+				v = auth_info;
+			} else static if (sparam.kind == ParameterKind.query) {
 				if (auto pv = fieldname in req.query)
 					v = fromRestString!PT(*pv);
 			} else static if (sparam.kind == ParameterKind.body_) {
-				if (auto pv = fieldname in req.json)
-					v = deserializeJson!PT(*pv);
+				if (auto pv = fieldname in req.json) {
+					try
+						v = deserializeJson!PT(*pv);
+					catch (JSONException e)
+						enforceBadRequest(false, e.msg);
+                }
 			} else static if (sparam.kind == ParameterKind.header) {
 				if (auto pv = fieldname in req.headers)
 					v = fromRestString!PT(*pv);
@@ -947,6 +1072,9 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 				else enforceBadRequest(false, "Missing non-optional "~sparam.kind.to!string~" parameter '"~(fieldname.length?fieldname:sparam.name)~"'.");
 			} else params[i] = v;
 		}
+
+		static if (isAuthenticated!(T, Func))
+			handleAuthorization!(T, Func, params)(auth_info);
 
 		void handleCors()
 		{
@@ -1061,7 +1189,7 @@ private HTTPServerRequestDelegate optionsMethodHandler(RouteRange)(RouteRange ro
 			settings.allowedOrigins.length != 0 &&
 			!settings.allowedOrigins.any!(org => org.sicmp((*origin)) == 0))
 			return;
-		
+
 		auto method = "Access-Control-Request-Method" in req.headers;
 		if (method is null)
 			return;
@@ -1074,7 +1202,7 @@ private HTTPServerRequestDelegate optionsMethodHandler(RouteRange)(RouteRange ro
 		res.headers["Access-Control-Allow-Origin"] = *origin;
 
 		// there is no way to know if the specific resource supports credentials
-		// (either cookies, HTTP authentication, or client-side SSL certificates), 
+		// (either cookies, HTTP authentication, or client-side SSL certificates),
 		// so we always assume it does
 		res.headers["Access-Control-Allow-Credentials"] = "true";
 		res.headers["Access-Control-Max-Age"] = "1728000";
@@ -1090,12 +1218,12 @@ private HTTPServerRequestDelegate optionsMethodHandler(RouteRange)(RouteRange ro
 	{
 		// since this is a OPTIONS request, we have to return the ALLOW headers to tell which methods we have
 		res.headers["Allow"] = allow;
-		
+
 		// handle CORS preflighted requests
 		handlePreflightedCors(req,res,methods,settings);
 
 		// NOTE: besides just returning the allowed methods and handling CORS preflighted requests,
-		// this would be a nice place to describe what kind of resources are on this route, 
+		// this would be a nice place to describe what kind of resources are on this route,
 		// the params each accepts, the headers, etc... think WSDL but then for REST.
 		res.writeBody("");
 	}
@@ -1109,7 +1237,7 @@ private string generateRestClientMethods(I)()
 	import std.traits : fullyQualifiedName, isInstanceOf;
 
 	alias Info = RestInterface!I;
-	
+
 	string ret = q{
 		import vibe.internal.meta.codegen : CloneFunction;
 	};
@@ -1385,7 +1513,39 @@ private {
 			else return deserializeJson!T(parseJson(value));
 		} catch (ConvException e) {
 			throw new HTTPStatusException(HTTPStatus.badRequest, e.msg);
+		} catch (JSONException e) {
+			throw new HTTPStatusException(HTTPStatus.badRequest, e.msg);
 		}
+	}
+
+	// Converting from invalid JSON string to aggregate should throw bad request
+	unittest {
+		import vibe.web.common : HTTPStatusException, HTTPStatus;
+
+		void assertHTTPStatus(E)(lazy E expression, HTTPStatus expectedStatus,
+			string file = __FILE__, size_t line = __LINE__)
+		{
+			import core.exception : AssertError;
+			import std.format : format;
+
+			try
+				expression();
+			catch (HTTPStatusException e)
+			{
+				if (e.status != expectedStatus)
+					throw new AssertError(format("assertHTTPStatus failed: " ~
+						"status expected %d but was %d", expectedStatus, e.status),
+						file, line);
+
+				return;
+			}
+
+			throw new AssertError("assertHTTPStatus failed: No " ~
+				"'HTTPStatusException' exception was thrown", file, line);
+		}
+
+		struct Foo { int bar; }
+		assertHTTPStatus(fromRestString!(Foo)("foo"), HTTPStatus.badRequest);
 	}
 }
 
@@ -1507,6 +1667,7 @@ body {
 				auto str = pathAttr.value.data;
 				if (str.canFind("//")) return "%s: Path '%s' contains empty entries.".format(FuncId, pathAttr.value);
 				str = str.strip('/');
+				if (!str.length) return null;
 				foreach (elem; str.splitter('/')) {
 					assert(elem.length, "Empty path entry not caught yet!?");
 
@@ -1571,10 +1732,7 @@ unittest {
 
 // Missing parameter name
 unittest {
-	static if (__VERSION__ < 2067)
-		enum msg = "A parameter has no name.";
-	else
-		enum msg = "Parameter 0 has no name.";
+	enum msg = "Parameter 0 has no name.";
 
 	interface IMissingName1 {
 		string getResponse(string = "troublemaker");
@@ -1680,13 +1838,8 @@ unittest {
 }
 
 private string stripTestIdent(string msg) {
-	static if (__VERSION__ <= 2066) {
-		import vibe.utils.string;
-		auto idx = msg.indexOfCT(": ");
-	} else {
-		import std.string;
-		auto idx = msg.indexOf(": ");
-	}
+	import std.string;
+	auto idx = msg.indexOf(": ");
 	return idx >= 0 ? msg[idx+2 .. $] : msg;
 }
 

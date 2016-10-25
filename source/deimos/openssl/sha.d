@@ -108,12 +108,15 @@ struct SHAstate_st
 	{
 	SHA_LONG h0,h1,h2,h3,h4;
 	SHA_LONG Nl,Nh;
-	SHA_LONG data[SHA_LBLOCK];
+	SHA_LONG[SHA_LBLOCK] data;
 	uint num;
 	}
 alias SHAstate_st  SHA_CTX;
 
 version(OPENSSL_NO_SHA0) {} else {
+version(OPENSSL_FIPS) {
+    int private_SHA_Init(SHA_CTX* c);
+}
 int SHA_Init(SHA_CTX* c);
 int SHA_Update(SHA_CTX* c, const(void)* data, size_t len);
 int SHA_Final(ubyte* md, SHA_CTX* c);
@@ -121,6 +124,9 @@ ubyte* SHA(const(ubyte)* d, size_t n, ubyte* md);
 void SHA_Transform(SHA_CTX* c, const(ubyte)* data);
 }
 version(OPENSSL_NO_SHA1) {} else {
+version(OPENSSL_FIPS) {
+    int private_SHA1_Init(SHA_CTX* c);
+}
 int SHA1_Init(SHA_CTX* c);
 int SHA1_Update(SHA_CTX* c, const(void)* data, size_t len);
 int SHA1_Final(ubyte* md, SHA_CTX* c);
@@ -135,14 +141,18 @@ enum SHA224_DIGEST_LENGTH = 28;
 enum SHA256_DIGEST_LENGTH = 32;
 
 struct SHA256state_st {
-	SHA_LONG h[8];
+	SHA_LONG[8] h;
 	SHA_LONG Nl,Nh;
-	SHA_LONG data[SHA_LBLOCK];
+	SHA_LONG[SHA_LBLOCK] data;
 	uint num,md_len;
 	}
 alias SHA256state_st SHA256_CTX;
 
 version(OPENSSL_NO_SHA256) {} else {
+version(OPENSSL_FIPS) {
+    int private_SHA224_Init(SHA256_CTX *c);
+    int private_SHA256_Init(SHA256_CTX *c);
+}
 int SHA224_Init(SHA256_CTX* c);
 int SHA224_Update(SHA256_CTX* c, const(void)* data, size_t len);
 int SHA224_Final(ubyte* md, SHA256_CTX* c);
@@ -180,11 +190,11 @@ alias ulong SHA_LONG64;
 
 struct SHA512state_st
 	{
-	SHA_LONG64 h[8];
+	SHA_LONG64[8] h;
 	SHA_LONG64 Nl,Nh;
 	union u_ {
-		SHA_LONG64	d[SHA_LBLOCK];
-		ubyte	p[SHA512_CBLOCK];
+		SHA_LONG64[SHA_LBLOCK]	d;
+		ubyte[SHA512_CBLOCK]	p;
 	}
 	u_ u;
 	uint num,md_len;
@@ -193,6 +203,10 @@ alias SHA512state_st SHA512_CTX;
 }
 
 version(OPENSSL_NO_SHA512) {} else {
+version(OPENSSL_FIPS) {
+    int private_SHA384_Init(SHA512_CTX* c);
+    int private_SHA512_Init(SHA512_CTX* c);
+}
 int SHA384_Init(SHA512_CTX* c);
 int SHA384_Update(SHA512_CTX* c, const(void)* data, size_t len);
 int SHA384_Final(ubyte* md, SHA512_CTX* c);

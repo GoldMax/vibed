@@ -8,7 +8,6 @@
 module vibe.core.task;
 
 import vibe.core.sync;
-import vibe.internal.newconcurrency : newStdConcurrency;
 import vibe.utils.array;
 
 import core.thread;
@@ -28,10 +27,8 @@ struct Task {
 	private {
 		shared(TaskFiber) m_fiber;
 		size_t m_taskCounter;
-		static if (newStdConcurrency) {
-			import std.concurrency : ThreadInfo, Tid;
-			static ThreadInfo s_tidInfo;
-		}
+		import std.concurrency : ThreadInfo, Tid;
+		static ThreadInfo s_tidInfo;
 	}
 
 	private this(TaskFiber fiber, size_t task_counter)
@@ -46,12 +43,6 @@ struct Task {
 	*/
 	static Task getThis() nothrow @safe
 	{
-		// In 2067, synchronized statements where annotated nothrow.
-		// DMD#4115, Druntime#1013, Druntime#1021, Phobos#2704
-		// However, they were "logically" nothrow before.
-		static if (__VERSION__ <= 2066)
-			scope (failure) assert(0, "Internal error: function should be nothrow");
-
 		auto fiber = () @trusted { return Fiber.getThis(); } ();
 		if (!fiber) return Task.init;
 		auto tfiber = cast(TaskFiber)fiber;
@@ -74,13 +65,9 @@ struct Task {
 			return this.fiber.m_running && this.fiber.m_taskCounter == m_taskCounter;
 		}
 
-		static if (newStdConcurrency) {
-			// FIXME: this is not thread safe!
-			@property ref ThreadInfo tidInfo() { return m_fiber ? fiber.tidInfo : s_tidInfo; }
-			@property Tid tid() { return tidInfo.ident; }
-		} else {
-			@property Task tid() { return this; }
-		}
+		// FIXME: this is not thread safe!
+		@property ref ThreadInfo tidInfo() { return m_fiber ? fiber.tidInfo : s_tidInfo; }
+		@property Tid tid() { return tidInfo.ident; }
 	}
 
 	/// Reserved for internal use!
@@ -107,11 +94,9 @@ struct Task {
 */
 class TaskFiber : Fiber {
 	private {
+		import std.concurrency : ThreadInfo;
 		Thread m_thread;
-		static if (newStdConcurrency) {
-			import std.concurrency : ThreadInfo;
-			ThreadInfo m_tidInfo;
-		}
+		ThreadInfo m_tidInfo;
 		MessageQueue m_messageQueue;
 	}
 
@@ -122,7 +107,6 @@ class TaskFiber : Fiber {
 
 	protected this(void delegate() fun, size_t stack_size)
 	nothrow {
-		static if (__VERSION__ <= 2066) scope (failure) assert(false);
 		super(fun, stack_size);
 		m_thread = Thread.getThis();
 		scope (failure) assert(false);
@@ -140,7 +124,7 @@ class TaskFiber : Fiber {
 	/// Reserved for internal use!
 	@property inout(MessageQueue) messageQueue() inout { return m_messageQueue; }
 
-	static if (newStdConcurrency) @property ref inout(ThreadInfo) tidInfo() inout nothrow { return m_tidInfo; }
+	@property ref inout(ThreadInfo) tidInfo() inout nothrow { return m_tidInfo; }
 
 	/** Blocks until the task has ended.
 	*/

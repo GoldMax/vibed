@@ -36,7 +36,13 @@ import std.string;
 import std.typecons;
 import std.datetime;
 
-
+version(Posix)
+{
+	version(VibeLibeventDriver)
+	{
+		version = UnixSocket;
+	}
+}
 /**************************************************************************************************/
 /* Public functions                                                                               */
 /**************************************************************************************************/
@@ -67,16 +73,25 @@ HTTPClientResponse requestHTTP(string url, scope void delegate(scope HTTPClientR
 /// ditto
 HTTPClientResponse requestHTTP(URL url, scope void delegate(scope HTTPClientRequest req) requester = null, const(HTTPClientSettings) settings = defaultSettings)
 {
-	enforce(url.schema == "http" || url.schema == "https", "URL schema must be http(s).");
+	version(UnixSocket) {
+		enforce(url.schema == "http" || url.schema == "https" || url.schema == "http+unix" || url.schema == "https+unix", "URL schema must be http(s) or http(s)+unix.");
+	} else {
+		enforce(url.schema == "http" || url.schema == "https", "URL schema must be http(s).");
+	}
 	enforce(url.host.length > 0, "URL must contain a host name.");
 	bool use_tls;
 
 	if (settings.proxyURL.schema !is null)
 		use_tls = settings.proxyURL.schema == "https";
 	else
-		use_tls = url.schema == "https";
+	{
+		version(UnixSocket)
+			use_tls = url.schema == "https";
+		else
+			use_tls = url.schema == "https" || url.schema == "https+unix";
+	}
 
-	auto cli = connectHTTP(url.host, url.port, use_tls, settings);
+	auto cli = connectHTTP(url.getFilteredHost, url.port, use_tls, settings);
 	auto res = cli.request((req){
 			if (url.localURI.length) {
 				assert(url.path.absolute, "Request URL path must be absolute.");
@@ -84,7 +99,13 @@ HTTPClientResponse requestHTTP(URL url, scope void delegate(scope HTTPClientRequ
 			}
 			if (settings.proxyURL.schema !is null)
 				req.requestURL = url.toString(); // proxy exception to the URL representation
-			req.headers["Host"] = url.host;
+
+			// Provide port number when it is not the default one (RFC2616 section 14.23)
+			if (url.port && url.port != url.defaultPort)
+				req.headers["Host"] = format("%s:%d", url.host, url.port);
+			else
+				req.headers["Host"] = url.host;
+
 			if ("authorization" !in req.headers && url.username != "") {
 				import std.base64;
 				string pwstr = url.username ~ ":" ~ url.password;
@@ -108,16 +129,25 @@ void requestHTTP(string url, scope void delegate(scope HTTPClientRequest req) re
 /// ditto
 void requestHTTP(URL url, scope void delegate(scope HTTPClientRequest req) requester, scope void delegate(scope HTTPClientResponse req) responder, const(HTTPClientSettings) settings = defaultSettings)
 {
-	enforce(url.schema == "http" || url.schema == "https", "URL schema must be http(s).");
+	version(UnixSocket) {
+		enforce(url.schema == "http" || url.schema == "https" || url.schema == "http+unix" || url.schema == "https+unix", "URL schema must be http(s) or http(s)+unix.");
+	} else {
+		enforce(url.schema == "http" || url.schema == "https", "URL schema must be http(s).");
+	}
 	enforce(url.host.length > 0, "URL must contain a host name.");
 	bool use_tls;
 
 	if (settings.proxyURL.schema !is null)
 		use_tls = settings.proxyURL.schema == "https";
 	else
-		use_tls = url.schema == "https";
+	{
+		version(UnixSocket)
+			use_tls = url.schema == "https";
+		else
+			use_tls = url.schema == "https" || url.schema == "https+unix";
+	}
 
-	auto cli = connectHTTP(url.host, url.port, use_tls, settings);
+	auto cli = connectHTTP(url.getFilteredHost, url.port, use_tls, settings);
 	cli.request((scope req) {
 		if (url.localURI.length) {
 			assert(url.path.absolute, "Request URL path must be absolute.");
@@ -125,7 +155,13 @@ void requestHTTP(URL url, scope void delegate(scope HTTPClientRequest req) reque
 		}
 		if (settings.proxyURL.schema !is null)
 			req.requestURL = url.toString(); // proxy exception to the URL representation
-		req.headers["Host"] = url.host;
+
+		// Provide port number when it is not the default one (RFC2616 section 14.23)
+		if (url.port && url.port != url.defaultPort)
+			req.headers["Host"] = format("%s:%d", url.host, url.port);
+		else
+			req.headers["Host"] = url.host;
+
 		if ("authorization" !in req.headers && url.username != "") {
 			import std.base64;
 			string pwstr = url.username ~ ":" ~ url.password;
@@ -538,9 +574,33 @@ final class HTTPClient {
 				m_conn = connectTCP(proxyAddr, m_settings.networkInterface);
 			}
 			else {
-				auto addr = resolveHost(m_server, m_settings.dnsAddressFamily);
-				addr.port = m_port;
-				m_conn = connectTCP(addr, m_settings.networkInterface);
+				version(UnixSocket)
+				{
+					import core.sys.posix.sys.un;
+					import core.sys.posix.sys.socket;
+					import std.regex : regex, Captures, Regex, matchFirst, ctRegex;
+					import core.stdc.string : strcpy;
+
+					NetworkAddress addr;
+					if (m_server[0] == '/')
+					{
+						addr.family = AF_UNIX;
+						sockaddr_un* s = addr.sockAddrUnix();
+						enforce(s.sun_path.length > m_server.length, "Unix sockets cannot have that long a name.");
+						s.sun_family = AF_UNIX;
+						strcpy(cast(char*)s.sun_path.ptr,m_server.toStringz());
+					} else
+					{
+						addr = resolveHost(m_server, m_settings.dnsAddressFamily);
+						addr.port = m_port;
+					}
+					m_conn = connectTCP(addr, m_settings.networkInterface);
+				} else
+				{
+					auto addr = resolveHost(m_server, m_settings.dnsAddressFamily);
+					addr.port = m_port;
+					m_conn = connectTCP(addr, m_settings.networkInterface);
+				}
 			}
 
 			m_stream = m_conn;
@@ -956,7 +1016,8 @@ final class HTTPClientResponse : HTTPResponse {
 		enforce(statusCode == HTTPStatus.switchingProtocols, "Server did not send a 101 - Switching Protocols response");
 		string *resNewProto = "Upgrade" in headers;
 		enforce(resNewProto, "Server did not send an Upgrade header");
-		enforce(!new_protocol.length || *resNewProto == new_protocol, "Expected Upgrade: " ~ new_protocol ~", received Upgrade: " ~ *resNewProto);
+		enforce(!new_protocol.length || !icmp(*resNewProto, new_protocol),
+			"Expected Upgrade: " ~ new_protocol ~", received Upgrade: " ~ *resNewProto);
 		auto stream = new ConnectionProxyStream(m_client.m_stream, m_client.m_conn);
 		m_client.m_responding = false;
 		m_client = null;
@@ -969,7 +1030,8 @@ final class HTTPClientResponse : HTTPResponse {
 		enforce(statusCode == HTTPStatus.switchingProtocols, "Server did not send a 101 - Switching Protocols response");
 		string *resNewProto = "Upgrade" in headers;
 		enforce(resNewProto, "Server did not send an Upgrade header");
-		enforce(!new_protocol.length || *resNewProto == new_protocol, "Expected Upgrade: " ~ new_protocol ~", received Upgrade: " ~ *resNewProto);
+		enforce(!new_protocol.length || !icmp(*resNewProto, new_protocol),
+			"Expected Upgrade: " ~ new_protocol ~", received Upgrade: " ~ *resNewProto);
 		scope stream = new ConnectionProxyStream(m_client.m_stream, m_client.m_conn);
 		m_client.m_responding = false;
 		m_client = null;
@@ -1006,6 +1068,20 @@ final class HTTPClientResponse : HTTPResponse {
 		if (disconnect) cli.disconnect();
 		destroy(lockedConnection);
 	}
+}
+
+/** Returns clean host string. In case of unix socket it performs urlDecode on host. */
+private auto getFilteredHost(URL url)
+{
+	version(UnixSocket)
+	{
+		import vibe.textfilter.urlencode : urlDecode;
+		if (url.schema == "https+unix" || url.schema == "http+unix")
+			return urlDecode(url.host);
+		else
+			return url.host;
+	} else
+		return url.host;
 }
 
 // This object is a placeholder and should to never be modified.

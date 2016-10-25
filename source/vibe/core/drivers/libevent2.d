@@ -85,12 +85,6 @@ final class Libevent2Driver : EventDriver {
 
 	this(DriverCore core) nothrow
 	{
-		// In 2067, synchronized statements where annotated nothrow.
-		// DMD#4115, Druntime#1013, Druntime#1021, Phobos#2704
-		// However, they were "logically" nothrow before.
-		static if (__VERSION__ <= 2066)
-			scope (failure) assert(0, "Internal error: function should be nothrow");
-
 		debug m_ownerThread = Thread.getThis();
 		m_core = core;
 		s_driverCore = core;
@@ -212,7 +206,7 @@ final class Libevent2Driver : EventDriver {
 	bool processEvents()
 	{
 		logDebugV("process events with exit == %s", m_exit);
-		event_base_loop(m_eventLoop, EVLOOP_NONBLOCK);
+		event_base_loop(m_eventLoop, EVLOOP_NONBLOCK|EVLOOP_ONCE);
 		processTimers();
 		logDebugV("processed events with exit == %s", m_exit);
 		if (m_exit) {
@@ -329,7 +323,9 @@ final class Libevent2Driver : EventDriver {
 		}
 
 		logTrace("Connect result status: %d", cctx.status);
-		enforce(cctx.status == BEV_EVENT_CONNECTED, format("Failed to connect to host %s: %s", addr.toString(), cctx.status));
+		enforce(cctx.status == BEV_EVENT_CONNECTED, cctx.statusMessage
+			? format("Failed to connect to host %s: %s", addr.toString(), cctx.statusMessage.to!string)
+			: format("Failed to connect to host %s: %s", addr.toString(), cctx.status));
 
 		socklen_t balen = bind_addr.sockAddrLen;
 		socketEnforce(getsockname(sockfd, bind_addr.sockAddr, &balen) == 0, "getsockname failed.");
@@ -830,7 +826,7 @@ final class Libevent2FileDescriptorEvent : Libevent2Object, FileDescriptorEvent 
 		event_free(m_event);
 	}
 
-	void wait(Trigger which)
+	Trigger wait(Trigger which)
 	{
 		assert(!m_waiter, "Only one task may wait on a Libevent2FileEvent.");
 		m_waiter = Task.getThis();
@@ -841,9 +837,10 @@ final class Libevent2FileDescriptorEvent : Libevent2Object, FileDescriptorEvent 
 
 		while ((m_activeEvents & which) == Trigger.none)
 			getThreadLibeventDriverCore().yieldForEvent();
+		return m_activeEvents & which;
 	}
 
-	bool wait(Duration timeout, Trigger which)
+	Trigger wait(Duration timeout, Trigger which)
 	{
 		assert(!m_waiter, "Only one task may wait on a Libevent2FileEvent.");
 		m_waiter = Task.getThis();
@@ -861,7 +858,7 @@ final class Libevent2FileDescriptorEvent : Libevent2Object, FileDescriptorEvent 
 			getThreadLibeventDriverCore().yieldForEvent();
 			if (!m_driver.isTimerPending(tm)) break;
 		}
-		return (m_activeEvents & which) != Trigger.none;
+		return m_activeEvents & which;
 	}
 
 	private static nothrow extern(C)

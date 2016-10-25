@@ -78,12 +78,14 @@ enum CAST_BLOCK = 8;
 enum CAST_KEY_LENGTH = 16;
 
 struct cast_key_st {
-	CAST_LONG data[32];
+	CAST_LONG[32] data;
 	int short_key;	/* Use reduced rounds for short key */
 	}
 alias cast_key_st CAST_KEY;
 
-
+version(OPENSSL_FIPS) {
+void private_CAST_set_key(CAST_KEY *key, int len, const(ubyte)* data);
+}
 void CAST_set_key(CAST_KEY* key, int len, const(ubyte)* data);
 void CAST_ecb_encrypt(const(ubyte)* in_, ubyte* out_, const(CAST_KEY)* key,
 		      int enc);

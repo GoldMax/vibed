@@ -100,12 +100,14 @@ enum BF_ROUNDS = 16;
 enum BF_BLOCK = 8;
 
 struct bf_key_st {
-	BF_LONG P[BF_ROUNDS+2];
-	BF_LONG S[4*256];
+	BF_LONG[BF_ROUNDS+2] P;
+	BF_LONG[4*256] S;
 	}
 alias bf_key_st BF_KEY;
 
-
+version(OPENSSL_FIPS) {
+    void private_BF_set_key(BF_KEY *key, int len, const(ubyte)* data);
+}
 void BF_set_key(BF_KEY* key, int len, const(ubyte)* data);
 
 void BF_encrypt(BF_LONG* data,const(BF_KEY)* key);

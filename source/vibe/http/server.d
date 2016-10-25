@@ -84,6 +84,7 @@ HTTPListener listenHTTP(HTTPServerSettings settings, HTTPServerRequestDelegate r
 	ctx.settings = settings;
 	ctx.requestHandler = request_handler;
 
+	if (settings.accessLogger) ctx.loggers ~= settings.accessLogger;
 	if (settings.accessLogToConsole)
 		ctx.loggers ~= new HTTPConsoleLogger(settings, settings.accessLogFormat);
 	if (settings.accessLogFile.length)
@@ -134,7 +135,6 @@ HTTPListener listenHTTP(HTTPServerSettings settings, HTTPServerRequestHandlerS r
 */
 @property HTTPServerRequestDelegateS staticTemplate(string template_file)()
 {
-	import vibe.templ.diet;
 	return (scope HTTPServerRequest req, scope HTTPServerResponse res){
 		res.render!(template_file, req);
 	};
@@ -205,9 +205,104 @@ void setVibeDistHost(string host, ushort port)
 */
 @property void render(string template_file, ALIASES...)(HTTPServerResponse res)
 {
-	import vibe.templ.diet;
 	res.headers["Content-Type"] = "text/html; charset=UTF-8";
-	compileDietFile!(template_file, ALIASES)(res.bodyWriter);
+	version (Have_diet_ng) {
+		import vibe.stream.wrapper : StreamOutputRange;
+		import diet.html : compileHTMLDietFile;
+		auto output = StreamOutputRange(res.bodyWriter);
+		compileHTMLDietFile!(template_file, ALIASES, DefaultFilters)(output);
+	} else {
+		import vibe.templ.diet;
+		compileDietFile!(template_file, ALIASES)(res.bodyWriter);
+	}
+}
+
+version (Have_diet_ng)
+{
+	import diet.traits;
+
+	@dietTraits
+	private struct DefaultFilters {
+		import std.string : splitLines;
+
+		static string filterCss(I)(I text, size_t indent = 0)
+		{
+			auto lines = splitLines(text);
+
+			string indent_string = "\n";
+			while (indent-- > 0) indent_string ~= '\t';
+
+			string ret = indent_string~"<style type=\"text/css\"><!--";
+			indent_string = indent_string ~ '\t';
+			foreach (ln; lines) ret ~= indent_string ~ ln;
+			indent_string = indent_string[0 .. $-1];
+			ret ~= indent_string ~ "--></style>";
+
+			return ret;
+		}
+
+
+		static string filterJavascript(I)(I text, size_t indent = 0)
+		{
+			auto lines = splitLines(text);
+
+			string indent_string = "\n";
+			while (indent-- > 0) indent_string ~= '\t';
+
+			string ret = indent_string~"<script type=\"application/javascript\">";
+			ret ~= indent_string~'\t' ~ "//<![CDATA[";
+			foreach (ln; lines) ret ~= indent_string ~ '\t' ~ ln;
+			ret ~= indent_string ~ '\t' ~ "//]]>" ~ indent_string ~ "</script>";
+
+			return ret;
+		}
+
+		static string filterMarkdown(I)(I text)
+		{
+			import vibe.textfilter.markdown : markdown = filterMarkdown;
+			// TODO: indent
+			return markdown(text);
+		}
+
+		static string filterHtmlescape(I)(I text)
+		{
+			import vibe.textfilter.html : htmlEscape;
+			// TODO: indent
+			return htmlEscape(text);
+		}
+
+		static this()
+		{
+			filters["css"] = (input, scope output) { output(filterCss(input)); };
+			filters["javascript"] = (input, scope output) { output(filterJavascript(input)); };
+			filters["markdown"] = (input, scope output) { output(filterMarkdown(cast(string)input)); };
+			filters["htmlescape"] = (input, scope output) { output(filterHtmlescape(input)); };
+		}
+
+		static FilterCallback[string] filters;
+	}
+
+
+	unittest {
+		static string compile(string diet)() {
+			import std.array : appender;
+			import std.string : strip;
+			import diet.html : compileHTMLDietString;
+			auto dst = appender!string;
+			dst.compileHTMLDietString!(diet, DefaultFilters);
+			return strip(cast(string)(dst.data));
+		}
+
+		assert(compile!":css .test" == "<style type=\"text/css\"><!--\n\t.test\n--></style>");
+		assert(compile!":javascript test();" == "<script type=\"application/javascript\">\n\t//<![CDATA[\n\ttest();\n\t//]]>\n</script>");
+		assert(compile!":markdown **test**" == "<p><strong>test</strong>\n</p>");
+		assert(compile!":htmlescape <test>" == "&lt;test&gt;");
+		assert(compile!":css !{\".test\"}" == "<style type=\"text/css\"><!--\n\t.test\n--></style>");
+		assert(compile!":javascript !{\"test();\"}" == "<script type=\"application/javascript\">\n\t//<![CDATA[\n\ttest();\n\t//]]>\n</script>");
+		assert(compile!":markdown !{\"**test**\"}" == "<p><strong>test</strong>\n</p>");
+		assert(compile!":htmlescape !{\"<test>\"}" == "&lt;test&gt;");
+		assert(compile!":javascript\n\ttest();" == "<script type=\"application/javascript\">\n\t//<![CDATA[\n\ttest();\n\t//]]>\n</script>");
+	}
 }
 
 
@@ -414,7 +509,7 @@ final class HTTPServerSettings {
 	Duration keepAliveTimeout;// = dur!"seconds"(10);
 
 	/// Maximum number of transferred bytes per request after which the connection is closed with
-	/// an error; not supported yet
+	/// an error
 	ulong maxRequestSize = 2097152;
 
 
@@ -427,10 +522,6 @@ final class HTTPServerSettings {
 
 	/// If set, a HTTPS server will be started instead of plain HTTP.
 	TLSContext tlsContext;
-
-	/// Compatibility alias - use `tlsContext` instead.
-	deprecated("Use tlsContext instead.")
-	alias sslContext = tlsContext;
 
 	/// Session management is enabled if a session store instance is provided
 	SessionStore sessionStore;
@@ -455,6 +546,10 @@ final class HTTPServerSettings {
 
 	/// If set, access log entries will be output to the console.
 	bool accessLogToConsole = false;
+
+	/** Specifies a custom access logger instance.
+	*/
+	HTTPLogger accessLogger;
 
 	/// Returns a duplicate of the settings object.
 	@property HTTPServerSettings dup()
@@ -560,10 +655,6 @@ final class HTTPServerRequest : HTTPRequest {
 
 		/// Determines if the request was issued over an TLS encrypted channel.
 		bool tls;
-
-		/// Compatibility alias - use `tls` instead.
-		deprecated("Use .tls instead.")
-		alias ssl = tls;
 
 		/** Information about the TLS certificate provided by the client.
 
@@ -707,28 +798,53 @@ final class HTTPServerRequest : HTTPRequest {
 	@property URL fullURL()
 	const {
 		URL url;
-		auto fh = this.headers.get("X-Forwarded-Host", "");
-		if (!fh.empty) {
-			url.schema = this.headers.get("X-Forwarded-Proto", "http");
-			url.host = fh;
-		} else {
-			if (!this.host.empty) url.host = this.host;
-			else if (!m_settings.hostName.empty) url.host = m_settings.hostName;
-			else url.host = m_settings.bindAddresses[0];
 
-			if (this.tls) {
-				url.schema = "https";
-				if (m_port != 443) url.port = m_port;
+		auto xfh = this.headers.get("X-Forwarded-Host");
+		auto xfp = this.headers.get("X-Forwarded-Port");
+		auto xfpr = this.headers.get("X-Forwarded-Proto");
+
+		// Set URL host segment.
+		if (xfh.length) {
+			url.host = xfh;
+		} else if (!this.host.empty) {
+			url.host = this.host;
+		} else if (!m_settings.hostName.empty) {
+			url.host = m_settings.hostName;
+		} else {
+			url.host = m_settings.bindAddresses[0];
+		}
+
+		// Set URL schema segment.
+		if (xfpr.length) {
+			url.schema = xfpr;
+		} else if (this.tls) {
+			url.schema = "https";
+		} else {
+			url.schema = "http";
+		}
+
+		// Set URL port segment.
+		if (xfp.length) {
+			try {
+				url.port = xfp.to!ushort;
+			} catch (ConvException) {
+				// TODO : Consider responding with a 400/etc. error from here.
+				logWarn("X-Forwarded-Port header was not valid port (%s)", xfp);
+			}
+		} else if (!xfh) {
+			if (url.schema == "https") {
+				if (m_port != 443U) url.port = m_port;
 			} else {
-				url.schema = "http";
-				if (m_port != 80) url.port = m_port;
+				if (m_port != 80U)  url.port = m_port;
 			}
 		}
+
 		url.host = url.host.split(":")[0];
 		url.username = this.username;
 		url.password = this.password;
 		url.path = Path(path);
 		url.queryString = queryString;
+
 		return url;
 	}
 
@@ -795,10 +911,6 @@ final class HTTPServerResponse : HTTPResponse {
 	/** Determines if the response is sent over an encrypted connection.
 	*/
 	bool tls() const { return m_tls; }
-
-	/// Compatibility alias - use `tls` instead.
-	deprecated("Use .tls instead.")
-	alias ssl = tls;
 
 	/// Writes the entire response body at once.
 	void writeBody(in ubyte[] data, string content_type = null)
@@ -876,8 +988,16 @@ final class HTTPServerResponse : HTTPResponse {
 		writeRawBody(stream, num_bytes);
 	}
 
+
 	/// Writes a JSON message with the specified status
-	void writeJsonBody(T)(T data, int status = HTTPStatus.OK, string content_type = "application/json; charset=UTF-8", bool allow_chunked = false)
+	void writeJsonBody(T)(T data, int status, string content_type = "application/json; charset=UTF-8", bool allow_chunked = false)
+	{
+		statusCode = status;
+		writeJsonBody(data, content_type, allow_chunked);
+	}
+	
+	/// ditto
+	void writeJsonBody(T)(T data, string content_type = "application/json; charset=UTF-8", bool allow_chunked = false)
 	{
 		import std.traits;
 		import vibe.stream.wrapper;
@@ -886,7 +1006,6 @@ final class HTTPServerResponse : HTTPResponse {
 			static assert(!is(T == Appender!(typeof(data.data()))), "Passed an Appender!T to writeJsonBody - this is most probably not doing what's indended.");
 		}
 
-		statusCode = status;
 		headers["Content-Type"] = content_type;
 
 		// set an explicit content-length field if chunked encoding is not allowed
@@ -1038,7 +1157,8 @@ final class HTTPServerResponse : HTTPResponse {
 		scope conn = new ConnectionProxyStream(m_conn, m_rawConnection);
 		del(conn);
 		finalize();
-		m_rawConnection.close(); // connection not reusable after a protocol upgrade
+		if (m_rawConnection !is null && m_rawConnection.connected)
+			m_rawConnection.close(); // connection not reusable after a protocol upgrade
 	}
 
 	/** Special method for handling CONNECT proxy tunnel
@@ -1383,21 +1503,14 @@ private {
 
 	HTTPServerContext[] getContexts()
 	{
-		static if (__VERSION__ >= 2067) {
-			version (Win64) return cast(HTTPServerContext[])g_contexts;
-			else return cast(HTTPServerContext[])atomicLoad(g_contexts);
-		}
-		else
-			return cast(HTTPServerContext[])g_contexts;
+		version (Win64) return cast(HTTPServerContext[])g_contexts;
+		else return cast(HTTPServerContext[])atomicLoad(g_contexts);
 	}
 
 	void addContext(HTTPServerContext ctx)
 	{
 		synchronized (g_listenersMutex) {
-			static if (__VERSION__ >= 2067)
-				atomicStore(g_contexts, g_contexts ~ cast(shared)ctx);
-			else
-				g_contexts = g_contexts ~ cast(shared)ctx;
+			atomicStore(g_contexts, g_contexts ~ cast(shared)ctx);
 		}
 	}
 
@@ -1406,10 +1519,7 @@ private {
 		// write a new complete array reference to avoid race conditions during removal
 		auto contexts = g_contexts;
 		auto newarr = contexts[0 .. idx] ~ contexts[idx+1 .. $];
-		static if (__VERSION__ >= 2067)
-			atomicStore(g_contexts, newarr);
-		else
-			g_contexts = newarr;
+		atomicStore(g_contexts, newarr);
 	}
 }
 
@@ -1527,7 +1637,7 @@ private void handleHTTPConnection(TCPConnection connection, HTTPListenInfo liste
 
 	version(VibeNoSSL) {} else {
 		import std.traits : ReturnType;
-  //ReturnType!createTLSStreamFL tls_stream;
+		ReturnType!createTLSStreamFL tls_stream;
 	}
 
 	if (!connection.waitForData(10.seconds())) {
@@ -1541,9 +1651,8 @@ private void handleHTTPConnection(TCPConnection connection, HTTPListenInfo liste
 		else {
 			logDebug("Accept TLS connection: %s", listen_info.tlsContext.kind);
 			// TODO: reverse DNS lookup for peer_name of the incoming connection for TLS client certificate verification purposes
-//			tls_stream = createTLSStreamFL(http_stream, listen_info.tlsContext, TLSStreamState.accepting, null, connection.remoteAddress);
-//			http_stream = tls_stream;
-   createTLSStreamFL(http_stream, listen_info.tlsContext, TLSStreamState.accepting, null, connection.remoteAddress);
+			tls_stream = createTLSStreamFL(http_stream, listen_info.tlsContext, TLSStreamState.accepting, null, connection.remoteAddress);
+			http_stream = tls_stream;
 		}
 	}
 
