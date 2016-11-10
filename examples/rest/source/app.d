@@ -8,11 +8,13 @@ import vibe.appmain;
 import vibe.core.core;
 import vibe.core.log;
 import vibe.data.json;
-import vibe.http.rest;
 import vibe.http.router;
 import vibe.http.server;
+import vibe.web.rest;
 
 import core.time;
+import std.typecons : Nullable;
+
 
 /* --------- EXAMPLE 1 ---------- */
 
@@ -36,13 +38,13 @@ interface Example1API
 
 	/* Parameters are supported in a similar fashion.
 	 * Despite this is only an interface, make sure parameter names are not omitted, those are used for serialization.
-	 * If it is a GET reuqest, parameters are embedded into query URL.
+	 * If it is a GET request, parameters are embedded into query URL.
 	 * Stored in POST data for POST, of course.
 	 */
 	int postSum(int a, int b);
 
 	/* @property getters are always GET. @property setters are always PUT.
-	 * All supported convention prefixes are documentated : http://vibed.org/api/vibe.http.rest/registerRestInterface
+	 * All supported convention prefixes are documentated : http://vibed.org/api/vibe.web.rest/registerRestInterface
 	 * Rather obvious and thus omitted in this example interface.
 	 */
 	@property string getter();
@@ -106,7 +108,7 @@ interface Example2API
 	}
 
 	/* As you may see, using aggregate types in parameters is just as easy.
-	 * Macthing request for this function will be "GET /ACCUMULATE_ALL?input=<encoded json data>"
+	 * Matching request for this function will be "GET /ACCUMULATE_ALL?input=<encoded json data>"
 	 * Answer will be of "application/json" type.
 	 */
 	Aggregate queryAccumulateAll(Aggregate[] input);
@@ -215,7 +217,7 @@ unittest
 @rootPathFromName
 interface Example4API
 {
-	/* vibe.http.rest module provides two pre-defined UDA - @path and @method
+	/* vibe.web.rest module provides two pre-defined UDA - @path and @method
 	 * You can use any one of those or both. In case @path is used, not method style
 	 * adjustment is made.
 	 */
@@ -285,7 +287,7 @@ unittest
 @rootPathFromName
 interface Example5API
 {
-	import vibe.http.rest : before, after;
+	import vibe.web.rest : before, after;
 
 	@before!authenticate("user") @after!addBrackets()
 	string getSecret(int num, User user);
@@ -409,6 +411,7 @@ override:
 
 	string getConcat(FooType myFoo)
 	{
+		import std.conv : to;
 		return to!string(myFoo.a)~myFoo.s~to!string(myFoo.d);
 	}
 }

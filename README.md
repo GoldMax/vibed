@@ -15,13 +15,25 @@ Visit the website at <http://vibed.org/> for more information.
 Support
 -------
 
-Vibe.d aims to support the 3 latest minor releases of D.
-At the moment, it means that the following compilers are supported and tested:
-- DMD 2.068
-- DMD 2.067
+Vibe.d aims to support at least the 3 latest minor releases of D.
+At the moment, the following compilers are supported and tested:
+- DMD 2.072.0
+- DMD 2.071.2
+- DMD 2.070.2
+- DMD 2.069.2
+- DMD 2.068.2
+- LDC 1.0.0 (FE: 2.070.2)
+- LDC 0.17.0-beta.2 (FE: 2.068.2)
+
+Up to 0.7.29:
+- DMD 2.067.1
+- LDC 0.16.1
+
+Up to 0.7.27:
 - DMD 2.066
-- GDC 4.9.2 (FE: 2.066)
-- LDC 0.15.1 (FE: 2.066)
+- GDC 5.2.0
+- GDC 4.9.2
+- LDC 0.15.1
 
 
 Installation
@@ -32,7 +44,7 @@ Instead of explicitly installing vibe.d, it is recommended to use
 applications. Once DUB is installed, you can create and run a new project
 using the following shell commands:
 
-    dub init <name> vibe.d
+    dub init <name> -t vibe.d
     cd <name>
     dub
 
@@ -87,15 +99,15 @@ Install vibe.d's dependencies (*)
 On 32-bit linux: Install DMD-i386
 
     sudo apt-get install g++ gcc-multilib xdg-utils
-    wget "http://downloads.dlang.org/releases/2014/dmd_2.066.1-0_i386.deb"
-    sudo dpkg -i dmd_2.066.1-0_i386.deb
+    wget "http://downloads.dlang.org/releases/2.x/2.068.2/dmd_2.068.2-0_i386.deb"
+    sudo dpkg -i dmd_2.068.2-0_i386.deb
 
 
 On 64-bit linux: Install DMD-amd64
 
     sudo apt-get install g++ gcc-multilib xdg-utils
-    wget "http://downloads.dlang.org/releases/2014/dmd_2.066.1-0_amd64.deb"
-    sudo dpkg -i dmd_2.066.1-0_amd64.deb
+    wget "http://downloads.dlang.org/releases/2.x/2.068.2/dmd_2.068.2-0_amd64.deb"
+    sudo dpkg -i dmd_2.068.2-0_amd64.deb
 
 
 Optionally, run `./setup-linux.sh` to create a user/group pair for privilege lowering.

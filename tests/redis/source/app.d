@@ -2,8 +2,12 @@
 
 module app;
 
-import vibe.vibe;
+import vibe.core.core;
+import vibe.core.log;
+import vibe.db.redis.redis;
+import core.time;
 import std.algorithm : sort, equal;
+import std.exception : assertThrown;
 
 void runTest()
 {
@@ -78,6 +82,12 @@ void runTest()
 		assert(db.smembers("test1").empty);
 		assert(db.smembers("test2").empty);
 		assert(!db.smembers("test1").hasNext());
+
+		// test blpop
+		assert(db.blpop("nonexistent", 1).isNull());
+		db.lpush("test_list", "foo");
+		assert(db.blpop("test_list", 1).get() == tuple("test_list", "foo"));
+		db.del("test_list");
 	}
 	
 	testLocking(redis.getDatabase(0));
@@ -112,6 +122,10 @@ void runTest()
 	logInfo("LISTEN Stopped");
 	assert(!sub.isListening);
 	redis.getDatabase(0).publish("SomeChannel", "Messageeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee");
+
+	assertThrown(redis.getDatabase(0).eval("foo!!!", null));
+	assert(redis.getDatabase(0).get("test1") == "");
+
 	logInfo("Redis Test Succeeded.");
 }
 
