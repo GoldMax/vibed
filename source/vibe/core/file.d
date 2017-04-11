@@ -229,6 +229,7 @@ void removeFile(string path)
 {
 	import core.thread : Thread;
 	new Thread((){ std.file.remove(path); }).start();
+
 }
 
 /**

@@ -23,6 +23,7 @@ vibe\core\drivers\winrt.d=0
 vibe\core\file.d=0
 vibe\core\log.d=0
 vibe\core\net.d=0
+vibe\core\path.d=0
 vibe\core\stream.d=0
 vibe\core\sync.d=0
 vibe\core\task.d=0

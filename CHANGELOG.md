@@ -1,6 +1,67 @@
 ﻿Changelog
 =========
 
+v0.7.31 - 2017-04-10
+--------------------
+
+This release is a backport release of the smaller changes that got into 0.8.0. The 0.7.x branch will continue to be maintained for a short while, but only bug fixes will be included from now on. Applications should switch to the 0.8.x branch as soon as possible.
+
+### Features and improvements ###
+
+- Compiles on DMD 2.068.2 up to DMD 2.074.0
+- HTTP server
+  - Added support for simple range queries in the HTTP file server (by Jan Jurzitza aka WebFreak001) - [issue #716][issue716], [pull #1634][issue1634], [pull #1636][issue1636]
+  - The HTTP file server only sets a default content type header if none was already set (by Remi A. Solås aka rexso) - [pull #1642][issue1642]
+  - `HTTPServerResponse.writeJsonBody` only sets a default content type header if none was already set
+  - `HTTPServerResponse.writeBody` only sets a default content type if none is already set - [issue #1655][issue1655]
+  - Added `HTTPServerResponse.writePrettyJsonBody`
+  - The REST interface server now responds with prettified JSON if built in debug mode
+  - Diet templates are rendered as pretty HTML by default if diet-ng is used (can be disabled using `VibeOutputCompactHTML`)
+- Reduced synchronization overhead in the libevent driver for entities that are single-threaded
+- Stack traces are only written in REST server responses in debug mode - [issue #1623][issue1623]
+- The trigger mode for `FileDescriptorEvent` can now be configured (by Jack Applegame) - [pull #1596][issue1596]
+- Added `.byValue`/`.byKeyValue`/`.byIndexValue` properties to `Bson` and `Json` as a replacement for `opApply` based iteration (see [issue #1688][issue1688])
+
+### Bug fixes ###
+
+- Fixed compile error for deserializing optional `class`/ struct` fields
+- Fixed GET requests in the REST client to not send a body
+- Fixed REST request responses that return void to not send a body
+- Fixed a possible idle loop in `Task.join()` if called from outside of an event loop
+- Fixed `TaskPipe.waitForData` to actually time out if a timeout value was passed - [issue #1605][issue1605]
+- Fixed a compilation error for GDC master - [issue #1602][issue1602]
+- Fixed a linker issue for LDC on Windows - [issue #1629][issue1629]
+- Fixed a (single-threaded) concurrent AA iteration/write issue that could result in an access violation in the Win32 driver - [issue #1608][issue1608]
+- Fixed the JavaScript REST client generator to handle XHR errors (by Timoses) - [pull #1645][issue1645], [pull #1646][issue1646]
+- Fixed a possible `InvalidMemoryOperationError` in `SystemRNG`
+- Fixed `runApplication` to be able to handle extraneous command line arguments
+- Fixed a possible crash in `RedisSubscriber.blisten` due to a faulty shutdown procedure
+- Fixed detection of non-keep-alive connections in the HTTP server (upgraded connections were treated as keep-alive)
+- Fixed bogus static assertion failure in `RestInterfaceClient!I` when `I` is annotated with `@requiresAuth` - [issue #1648][issue1648]
+- Fixed a missing `toRedis` conversion in `RedisHash.setIfNotExist` (by Tuukka Kurtti aka Soletek) - [pull #1659][issue1659]
+- Fixed an assertion failure for malformed HTML form upload filenames - [issue #1630][issue1630]
+- Fixed the HTTP server to not use chunked encoding for HTTP/1.0 requests - [issue #1721][issue1721], [pull #1722][issue1722]
+
+[issue716]: https://github.com/rejectedsoftware/vibe.d/issues/716
+[issue1596]: https://github.com/rejectedsoftware/vibe.d/issues/1596
+[issue1605]: https://github.com/rejectedsoftware/vibe.d/issues/1605
+[issue1608]: https://github.com/rejectedsoftware/vibe.d/issues/1608
+[issue1623]: https://github.com/rejectedsoftware/vibe.d/issues/1623
+[issue1629]: https://github.com/rejectedsoftware/vibe.d/issues/1629
+[issue1630]: https://github.com/rejectedsoftware/vibe.d/issues/1630
+[issue1634]: https://github.com/rejectedsoftware/vibe.d/issues/1634
+[issue1636]: https://github.com/rejectedsoftware/vibe.d/issues/1636
+[issue1642]: https://github.com/rejectedsoftware/vibe.d/issues/1642
+[issue1645]: https://github.com/rejectedsoftware/vibe.d/issues/1645
+[issue1646]: https://github.com/rejectedsoftware/vibe.d/issues/1646
+[issue1648]: https://github.com/rejectedsoftware/vibe.d/issues/1648
+[issue1655]: https://github.com/rejectedsoftware/vibe.d/issues/1655
+[issue1659]: https://github.com/rejectedsoftware/vibe.d/issues/1659
+[issue1688]: https://github.com/rejectedsoftware/vibe.d/issues/1688
+[issue1721]: https://github.com/rejectedsoftware/vibe.d/issues/1721
+[issue1722]: https://github.com/rejectedsoftware/vibe.d/issues/1722
+
+
 v0.7.30 - 2016-10-31
 --------------------
 
@@ -8,7 +69,7 @@ v0.7.30 - 2016-10-31
 
 - General changes
   - Compiles on DMD 2.068.2 up to 2.072.0
-  - Added `runApplication` as a single API entry point to properly initialize and run a vibe.d application (this will serve as the basis for slowly fading out 
+  - Added `runApplication` as a single API entry point to properly initialize and run a vibe.d application (this will serve as the basis for slowly phasing out the `VibeDefaultMain` convenience mechanism)
   - Started using an SDLang based DUB package recipe (upgrade to DUB 1.0.0 if you haven't already)
   - Defining both, `VibeDefaultMain` and `VibeCustomMain`, results in a compile-time error to help uncover hidden build issues (by John Colvin) - [pull #1551][issue1551]
 - Web/REST interface generator

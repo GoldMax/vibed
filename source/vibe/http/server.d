@@ -223,7 +223,11 @@ version (Have_diet_ng)
 
 	@dietTraits
 	private struct DefaultFilters {
+		import diet.html : HTMLOutputStyle;
 		import std.string : splitLines;
+
+		version (VibeOutputCompactHTML) enum HTMLOutputStyle htmlOutputStyle = HTMLOutputStyle.compact;
+		else enum HTMLOutputStyle htmlOutputStyle = HTMLOutputStyle.pretty;
 
 		static string filterCss(I)(I text, size_t indent = 0)
 		{
@@ -912,17 +916,24 @@ final class HTTPServerResponse : HTTPResponse {
 	*/
 	bool tls() const { return m_tls; }
 
-	/// Writes the entire response body at once.
+	/** Writes the entire response body at once.
+
+		Params:
+			data = The data to write as the body contents
+			status = Optional response status code to set
+			content_tyoe = Optional content type to apply to the response.
+				If no content type is given and no "Content-Type" header is
+				set in the response, this will default to
+				`"application/octet-stream"`.
+
+		See_Also: `HTTPStatusCode`
+	*/
 	void writeBody(in ubyte[] data, string content_type = null)
 	{
-		if (content_type != "") headers["Content-Type"] = content_type;
+		if (content_type.length) headers["Content-Type"] = content_type;
+		else if ("Content-Type" !in headers) headers["Content-Type"] = "application/octet-stream";
 		headers["Content-Length"] = formatAlloc(m_requestAlloc, "%d", data.length);
 		bodyWriter.write(data);
-	}
-	/// ditto
-	void writeBody(string data, string content_type = "text/plain; charset=UTF-8")
-	{
-		writeBody(cast(ubyte[])data, content_type);
 	}
 	/// ditto
 	void writeBody(in ubyte[] data, int status, string content_type = null)
@@ -931,16 +942,37 @@ final class HTTPServerResponse : HTTPResponse {
 		writeBody(data, content_type);
 	}
 	/// ditto
-	void writeBody(string data, int status, string content_type = "text/plain; charset=UTF-8")
+	void writeBody(scope InputStream data, string content_type = null)
+	{
+		if (content_type.length) headers["Content-Type"] = content_type;
+		else if ("Content-Type" !in headers) headers["Content-Type"] = "application/octet-stream";
+		bodyWriter.write(data);
+	}
+
+	/** Writes the entire response body as a single string.
+
+		Params:
+			data = The string to write as the body contents
+			status = Optional response status code to set
+			content_type = Optional content type to apply to the response.
+				If no content type is given and no "Content-Type" header is
+				set in the response, this will default to
+				`"text/plain; charset=UTF-8"`.
+
+		See_Also: `HTTPStatusCode`
+	*/
+	/// ditto
+	void writeBody(string data, string content_type = null)
+	{
+		if (!content_type.length && "Content-Type" !in headers)
+			content_type = "text/plain; charset=UTF-8";
+		writeBody(cast(const(ubyte)[])data, content_type);
+	}
+	/// ditto
+	void writeBody(string data, int status, string content_type = null)
 	{
 		statusCode = status;
 		writeBody(data, content_type);
-	}
-	/// ditto
-	void writeBody(scope InputStream data, string content_type = null)
-	{
-		if (content_type != "") headers["Content-Type"] = content_type;
-		bodyWriter.write(data);
 	}
 
 	/** Writes the whole response body at once, without doing any further encoding.
@@ -990,14 +1022,36 @@ final class HTTPServerResponse : HTTPResponse {
 
 
 	/// Writes a JSON message with the specified status
-	void writeJsonBody(T)(T data, int status, string content_type = "application/json; charset=UTF-8", bool allow_chunked = false)
+	void writeJsonBody(T)(T data, int status, bool allow_chunked = false)
+	{
+		statusCode = status;
+		writeJsonBody(data, allow_chunked);
+	}
+	/// ditto
+	void writeJsonBody(T)(T data, int status, string content_type, bool allow_chunked = false)
 	{
 		statusCode = status;
 		writeJsonBody(data, content_type, allow_chunked);
 	}
-	
+
 	/// ditto
-	void writeJsonBody(T)(T data, string content_type = "application/json; charset=UTF-8", bool allow_chunked = false)
+	void writeJsonBody(T)(T data, string content_type, bool allow_chunked = false)
+	{
+		headers["Content-Type"] = content_type;
+		writeJsonBody(data, allow_chunked);
+	}
+	/// ditto
+	void writeJsonBody(T)(T data, bool allow_chunked = false)
+	{
+		doWriteJsonBody!(T, false)(data, allow_chunked);
+	}
+	/// ditto
+	void writePrettyJsonBody(T)(T data, bool allow_chunked = false)
+	{
+		doWriteJsonBody!(T, true)(data, allow_chunked);
+	}
+
+	private void doWriteJsonBody(T, bool PRETTY)(T data, bool allow_chunked = false)
 	{
 		import std.traits;
 		import vibe.stream.wrapper;
@@ -1006,19 +1060,23 @@ final class HTTPServerResponse : HTTPResponse {
 			static assert(!is(T == Appender!(typeof(data.data()))), "Passed an Appender!T to writeJsonBody - this is most probably not doing what's indended.");
 		}
 
-		headers["Content-Type"] = content_type;
+		if ("Content-Type" !in headers)
+			headers["Content-Type"] = "application/json; charset=UTF-8";
+
 
 		// set an explicit content-length field if chunked encoding is not allowed
 		if (!allow_chunked) {
 			import vibe.internal.rangeutil;
 			long length = 0;
 			auto counter = RangeCounter(&length);
-			serializeToJson(counter, data);
+			static if (PRETTY) serializeToPrettyJson(counter, data);
+			else serializeToJson(counter, data);
 			headers["Content-Length"] = formatAlloc(m_requestAlloc, "%d", length);
 		}
 
 		auto rng = StreamOutputRange(bodyWriter);
-		serializeToJson(&rng, data);
+		static if (PRETTY) serializeToPrettyJson(&rng, data);
+		else serializeToJson(&rng, data);
 	}
 
 	/**
@@ -1072,6 +1130,11 @@ final class HTTPServerResponse : HTTPResponse {
 			writeHeader();
 			m_countingWriter.writeLimit = (*pcl).to!ulong;
 			m_bodyWriter = m_countingWriter;
+		} else if (httpVersion <= HTTPVersion.HTTP_1_0) {
+			if ("Connection" in headers)
+				headers.remove("Connection"); // default to "close"
+			writeHeader();
+			m_bodyWriter = m_conn;
 		} else {
 			headers["Transfer-Encoding"] = "chunked";
 			writeHeader();
@@ -1503,15 +1566,27 @@ private {
 
 	HTTPServerContext[] getContexts()
 	{
-		version (Win64) return cast(HTTPServerContext[])g_contexts;
-		else return cast(HTTPServerContext[])atomicLoad(g_contexts);
+		static if (g_contexts.sizeof == 16 && has128BitCAS || g_contexts.sizeof == 8 && has64BitCAS) {
+			return cast(HTTPServerContext[])atomicLoad(g_contexts);
+		} else {
+			synchronized (g_listenersMutex)
+				return cast(HTTPServerContext[])g_contexts;
+		}
 	}
 
 	void addContext(HTTPServerContext ctx)
 	{
-		synchronized (g_listenersMutex) {
-			atomicStore(g_contexts, g_contexts ~ cast(shared)ctx);
+		static if (g_contexts.sizeof == 16 && has128BitCAS || g_contexts.sizeof == 8 && has64BitCAS) {
+			// NOTE: could optimize this using a CAS, but not really worth it
+			synchronized (g_listenersMutex) {
+				atomicStore(g_contexts, g_contexts ~ cast(shared)ctx);
+			}
+		} else {
+			synchronized (g_listenersMutex) {
+				g_contexts = g_contexts ~ cast(shared)ctx;
+			}
 		}
+
 	}
 
 	void removeContext(size_t idx)

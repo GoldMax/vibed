@@ -86,10 +86,13 @@ version (Windows)
 	See_also: ` vibe.core.args.finalizeCommandLineOptions`, `lowerPrivileges`,
 		`runEventLoop`
 */
-int runApplication(string[]* args_out = null)
+int runApplication(scope void delegate(string[]) args_out = null)
 {
-	try if (!finalizeCommandLineOptions()) return 0;
-	catch (Exception e) {
+	try {
+		string[] args;
+		if (!finalizeCommandLineOptions(args_out is null ? null : &args)) return 0;
+		if (args_out) args_out(args);
+	} catch (Exception e) {
 		logDiagnostic("Error processing command line: %s", e.msg);
 		return 1;
 	}
@@ -621,12 +624,12 @@ private TaskFuncInfo makeTaskFuncInfo(CALLABLE, ARGS...)(ref CALLABLE callable, 
 
 import core.cpuid : threadsPerCPU;
 /**
-	Sets up num worker threads.
+	Sets up the thread pool used for executing worker tasks.
 
 	This function gives explicit control over the number of worker threads.
-	Note, to have an effect the function must be called prior to related worker
-	tasks functions which set up the default number of worker threads
-	implicitly.
+	Note, to have an effect the function must be called before any worker
+	tasks are started. Otherwise the default number of worker threads
+	(`logicalProcessorCount`) will be used automatically.
 
 	Params:
 		num = The number of worker threads to initialize. Defaults to
@@ -821,15 +824,16 @@ Timer createTimer(void delegate() callback)
 	Params:
 		file_descriptor = The Posix file descriptor to watch
 		event_mask = Specifies which events will be listened for
+		event_mode = Specifies event waiting mode
 
 	Returns:
 		Returns a newly created FileDescriptorEvent associated with the given
 		file descriptor.
 */
-FileDescriptorEvent createFileDescriptorEvent(int file_descriptor, FileDescriptorEvent.Trigger event_mask)
+FileDescriptorEvent createFileDescriptorEvent(int file_descriptor, FileDescriptorEvent.Trigger event_mask, FileDescriptorEvent.Mode event_mode = FileDescriptorEvent.Mode.persistent)
 {
 	auto drv = getEventDriver();
-	return drv.createFileDescriptorEvent(file_descriptor, event_mask);
+	return drv.createFileDescriptorEvent(file_descriptor, event_mask, event_mode);
 }
 
 
@@ -940,7 +944,7 @@ void setTaskEventCallback(TaskEventCb func)
 /**
 	A version string representing the current vibe.d version
 */
-enum vibeVersionString = "0.7.30";
+enum vibeVersionString = "0.7.31";
 
 
 /**
@@ -1180,10 +1184,9 @@ private class CoreTask : TaskFiber {
 		super(&run, s_taskStackSize);
 	}
 
-	@property State state()
-	@trusted const nothrow {
-		return super.state;
-	}
+	// expose Fiber.state as @safe on older DMD versions
+	static if (!__traits(compiles, () @safe { return Fiber.init.state; } ()))
+		@property State state() @trusted const nothrow { return super.state; }
 
 	@property size_t taskCounter() const { return m_taskCounter; }
 
@@ -1283,7 +1286,7 @@ private class CoreTask : TaskFiber {
 			m_yielders ~= caller;
 		} else assert(Thread.getThis() is this.thread, "Joining tasks in different threads is not yet supported.");
 		auto run_count = m_taskCounter;
-		if (caller == Task.init) .yield(); // let the task continue (it must be yielded currently)
+		if (caller == Task.init) s_core.resumeYieldedTasks(); // let the task continue (it must be yielded currently)
 		while (m_running && run_count == m_taskCounter) rawYield();
 	}
 

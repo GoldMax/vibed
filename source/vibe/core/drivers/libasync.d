@@ -14,7 +14,6 @@ import vibe.core.driver;
 import vibe.core.drivers.threadedfile;
 import vibe.core.drivers.timerqueue;
 import vibe.core.log;
-import vibe.inet.path;
 import vibe.utils.array : FixedRingBuffer;
 
 import libasync;
@@ -324,7 +323,7 @@ final class LibasyncDriver : EventDriver {
 		return new LibasyncManualEvent(this);
 	}
 
-	FileDescriptorEvent createFileDescriptorEvent(int file_descriptor, FileDescriptorEvent.Trigger triggers)
+	FileDescriptorEvent createFileDescriptorEvent(int file_descriptor, FileDescriptorEvent.Trigger triggers, FileDescriptorEvent.Mode mode)
 	{
 		assert(false);
 	}
@@ -457,6 +456,8 @@ final class LibasyncDriver : EventDriver {
 /// Writes or reads asynchronously (in another thread) for sizes > 64kb to benefit from kernel page cache
 /// in lower size operations.
 final class LibasyncFileStream : FileStream {
+	import vibe.inet.path : Path;
+
 	private {
 		Path m_path;
 		ulong m_size;
@@ -1308,7 +1309,7 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 		logTrace("%s", "Acquire Reader");
 		assert(!amReadOwner());
 		m_settings.reader.task = Task.getThis();
-		logTrace("Task waiting in: %p", this);
+		logTrace("Task waiting in: %X", cast(void*) this);
 		m_settings.reader.isWaiting = true;
 	}
 

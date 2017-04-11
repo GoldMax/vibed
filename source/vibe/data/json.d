@@ -460,6 +460,17 @@ struct Json {
 		return 0;
 	}
 
+	/// Iterates over all key/value pairs of an object.
+	@property auto byKeyValue() @trusted { checkType!(Json[string])("byKeyValue"); return m_object.byKeyValue; }
+	/// Iterates over all index/value pairs of an array.
+	@property auto byIndexValue() { checkType!(Json[])("byIndexValue"); return zip(iota(0, m_array.length), m_array); }
+	/// Iterates over all values of an object or array.
+	@property auto byValue() @trusted {
+		checkType!(Json[], Json[string])("byValue");
+		return choose(m_type == Type.array, m_array, m_object.byValue);
+	}
+
+
 	/**
 		Converts the JSON value to the corresponding D type - types must match exactly.
 
@@ -971,12 +982,12 @@ struct Json {
 	@trusted {
 		// DMD BUG: this should actually be all @safe, but for some reason
 		// @safe inference for writeJsonString doesn't work.
-		static struct DummyRange {
+		static struct DummyRangeS {
 			void delegate(const(char)[]) @safe sink;
 			void put(const(char)[] str) @safe { sink(str); }
 			void put(char ch) @trusted { sink((&ch)[0 .. 1]); }
 		}
-		auto r = DummyRange(sink);
+		auto r = DummyRangeS(sink);
 		writeJsonString(r, this);
 	}
 	/// ditto

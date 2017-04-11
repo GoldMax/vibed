@@ -15,7 +15,6 @@ import vibe.core.driver;
 import vibe.core.drivers.timerqueue;
 import vibe.core.drivers.utils;
 import vibe.core.log;
-import vibe.inet.url;
 import vibe.internal.win32;
 import vibe.internal.meta.traits : synchronizedIsNothrow;
 import vibe.utils.array;
@@ -329,7 +328,7 @@ final class Win32EventDriver : EventDriver {
 		return new Win32ManualEvent(this);
 	}
 
-	FileDescriptorEvent createFileDescriptorEvent(int file_descriptor, FileDescriptorEvent.Trigger events)
+	FileDescriptorEvent createFileDescriptorEvent(int file_descriptor, FileDescriptorEvent.Trigger events, FileDescriptorEvent.Mode mode)
 	{
 		assert(false, "Not implemented.");
 	}
@@ -705,7 +704,7 @@ final class Win32FileStream : FileStream {
 
 	void write(in ubyte[] bytes_)
 	{
-		assert(this.writable);
+		assert(this.writable, "File is not writable");
 		acquire();
 		scope(exit) release();
 
@@ -1323,11 +1322,7 @@ final class Win32TCPConnection : TCPConnection, SocketEventHandler {
 				acquireWriter();
 				m_bytesTransferred = 0;
 				m_driver.m_fileWriters[this] = true;
-				scope(exit) {
-					if (this in m_driver.m_fileWriters)
-						m_driver.m_fileWriters.remove(this);
-					releaseWriter();
-				}
+				scope(exit) releaseWriter();
 				logDebug("Using sendfile! %s %s %s", fstream.m_handle, fstream.tell(), fstream.size);
 
 				if( TransmitFile(m_socket, fstream.m_handle, 0, 0, &m_fileOverlapped, null, 0) )
