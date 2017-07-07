@@ -1,7 +1,7 @@
 [General]
 ExtraArgs="-version=VibePragmaLib -version=VibeLibeventDriver -version=Have_openssl "
 Includes=
-Libs=
+Libs=crypto
 SourceRoot=source
 
 [Files]
