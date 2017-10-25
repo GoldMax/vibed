@@ -8,7 +8,6 @@
 module vibe.core.file;
 
 public import vibe.core.stream;
-public import vibe.inet.url;
 
 import vibe.core.drivers.threadedfile; // temporarily needed tp get mkstemps to work
 import vibe.core.driver;
@@ -20,10 +19,11 @@ import std.file;
 import std.path;
 import std.string;
 
-
 version(Posix){
 	private extern(C) int mkstemps(char* templ, int suffixlen);
 }
+
+@safe:
 
 
 /**
@@ -136,9 +136,12 @@ FileStream createTempFile(string suffix = null)
 {
 	version(Windows){
 		import std.conv : to;
-		char[L_tmpnam] tmp;
-		tmpnam(tmp.ptr);
-		auto tmpname = to!string(tmp.ptr);
+		string tmpname;
+		() @trusted {
+			auto fn = tmpnam(null);
+			enforce(fn !is null, "Failed to generate temporary name.");
+			tmpname = to!string(fn);
+		} ();
 		if( tmpname.startsWith("\\") ) tmpname = tmpname[1 .. $];
 		tmpname ~= suffix;
 		return openFile(tmpname, FileMode.createTrunc);
@@ -149,7 +152,7 @@ FileStream createTempFile(string suffix = null)
 		templ[pattern.length .. $-1] = (suffix)[];
 		templ[$-1] = '\0';
 		assert(suffix.length <= int.max);
-		auto fd = mkstemps(templ.ptr, cast(int)suffix.length);
+		auto fd = () @trusted { return mkstemps(templ.ptr, cast(int)suffix.length); } ();
 		enforce(fd >= 0, "Failed to create temporary file.");
 		return new ThreadedFileStream(fd, Path(templ[0 .. $-1].idup), FileMode.createTrunc);
 	}
@@ -206,7 +209,7 @@ void copyFile(Path from, Path to, bool overwrite = false)
 		enforce(overwrite || !existsFile(to), "Destination file already exists.");
 		auto dst = openFile(to, FileMode.createTrunc);
 		scope(exit) dst.close();
-		dst.write(src);
+		src.pipe(dst);
 	}
 
 	// TODO: retain attributes and time stamps
@@ -227,9 +230,7 @@ void removeFile(Path path)
 /// ditto
 void removeFile(string path)
 {
-	import core.thread : Thread;
-	new Thread((){ std.file.remove(path); }).start();
-
+	std.file.remove(path);
 }
 
 /**
@@ -250,7 +251,7 @@ bool existsFile(string path) nothrow
 	Throws: A `FileException` is thrown if the file does not exist.
 */
 FileInfo getFileInfo(Path path)
-{
+@trusted {
 	auto ent = DirEntry(path.toNativeString());
 	return makeFileInfo(ent);
 }
@@ -277,7 +278,7 @@ void createDirectory(string path)
 	Enumerates all files in the specified directory.
 */
 void listDirectory(Path path, scope bool delegate(FileInfo info) del)
-{
+@trusted {
 	foreach( DirEntry ent; dirEntries(path.toNativeString(), SpanMode.shallow) )
 		if( !del(makeFileInfo(ent)) )
 			break;
@@ -324,7 +325,7 @@ DirectoryWatcher watchDirectory(string path, bool recursive = true)
 */
 Path getWorkingDirectory()
 {
-	return Path(std.file.getcwd());
+	return Path(() @trusted { return std.file.getcwd(); } ());
 }
 
 
@@ -368,6 +369,8 @@ enum FileMode {
 	Accesses the contents of a file as a stream.
 */
 interface FileStream : RandomAccessStream {
+@safe:
+
 	/// The path of the file.
 	@property Path path() const nothrow;
 
@@ -386,6 +389,8 @@ interface FileStream : RandomAccessStream {
 	for changes, such as file additions, deletions or modifications.
 */
 interface DirectoryWatcher {
+@safe:
+
 	/// The path of the watched directory
 	@property Path path() const;
 
@@ -433,7 +438,7 @@ struct DirectoryChange {
 
 
 private FileInfo makeFileInfo(DirEntry ent)
-{
+@trusted {
 	FileInfo ret;
 	ret.name = baseName(ent.name);
 	if( ret.name.length == 0 ) ret.name = ent.name;

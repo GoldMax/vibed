@@ -24,7 +24,7 @@ import std.typecons : Nullable;
 	(e.g. "HTML") should be written all caps
 */
 string adjustMethodStyle(string name, MethodStyle style)
-{
+@safe {
 	if (!name.length) {
 		return "";
 	}
@@ -97,7 +97,7 @@ string adjustMethodStyle(string name, MethodStyle style)
 	}
 }
 
-unittest
+@safe unittest
 {
 	assert(adjustMethodStyle("methodNameTest", MethodStyle.unaltered) == "methodNameTest");
 	assert(adjustMethodStyle("methodNameTest", MethodStyle.camelCase) == "methodNameTest");
@@ -290,7 +290,7 @@ unittest
     $(D ubyte[]).
 */
 ContentTypeAttribute contentType(string data)
-{
+@safe {
 	if (!__ctfe)
 		assert(false, onlyAsUda!__FUNCTION__);
 	return ContentTypeAttribute(data);
@@ -304,7 +304,7 @@ ContentTypeAttribute contentType(string data)
 	are any "get", "query" or similar prefixes, they are filtered out.
  */
 MethodAttribute method(HTTPMethod data)
-{
+@safe {
 	if (!__ctfe)
 		assert(false, onlyAsUda!__FUNCTION__);
 	return MethodAttribute(data);
@@ -333,7 +333,7 @@ unittest {
 	See_Also: $(D rootPathFromName) for automatic name generation.
 */
 PathAttribute path(string data)
-{
+@safe {
 	if (!__ctfe)
 		assert(false, onlyAsUda!__FUNCTION__);
 	return PathAttribute(data);
@@ -371,7 +371,7 @@ unittest {
 
 /// Convenience alias to generate a name from the interface's name.
 @property PathAttribute rootPathFromName()
-{
+@safe {
 	if (!__ctfe)
 		assert(false, onlyAsUda!__FUNCTION__);
 	return PathAttribute("");
@@ -411,6 +411,8 @@ class RestException : HTTPStatusException {
 	private {
 		Json m_jsonResult;
 	}
+
+	@safe:
 
 	///
 	this(int status, Json jsonResult, string file = __FILE__, int line = __LINE__, Throwable next = null)
@@ -461,11 +463,13 @@ package struct WebParamAttribute {
 	string field;
 }
 
+
 /**
  * Declare that a parameter will be transmitted to the API through the body.
  *
  * It will be serialized as part of a JSON object.
  * The serialization format is currently not customizable.
+ * If no fieldname is given, the entire body is serialized into the object.
  *
  * Params:
  * - identifier: The name of the parameter to customize. A compiler error will be issued on mismatch.
@@ -478,11 +482,25 @@ package struct WebParamAttribute {
  * // { "package": 42 }
  * ----
  */
-WebParamAttribute bodyParam(string identifier, string field) {
+WebParamAttribute bodyParam(string identifier, string field) @safe
+in {
+	assert(field.length > 0, "fieldname can't be empty.");
+}
+body
+{
 	import vibe.web.internal.rest.common : ParameterKind;
 	if (!__ctfe)
 		assert(false, onlyAsUda!__FUNCTION__);
 	return WebParamAttribute(ParameterKind.body_, identifier, field);
+}
+
+/// ditto
+WebParamAttribute bodyParam(string identifier)
+@safe {
+	import vibe.web.internal.rest.common : ParameterKind;
+	if (!__ctfe)
+		assert(false, onlyAsUda!__FUNCTION__);
+	return WebParamAttribute(ParameterKind.body_, identifier, "");
 }
 
 /**
@@ -503,7 +521,7 @@ WebParamAttribute bodyParam(string identifier, string field) {
  * ----
  */
 WebParamAttribute headerParam(string identifier, string field)
-{
+@safe {
 	import vibe.web.internal.rest.common : ParameterKind;
 	if (!__ctfe)
 		assert(false, onlyAsUda!__FUNCTION__);
@@ -528,7 +546,7 @@ WebParamAttribute headerParam(string identifier, string field)
  * ----
  */
 WebParamAttribute queryParam(string identifier, string field)
-{
+@safe {
 	import vibe.web.internal.rest.common : ParameterKind;
 	if (!__ctfe)
 		assert(false, onlyAsUda!__FUNCTION__);
@@ -583,7 +601,7 @@ enum NestedNameStyle {
 // in resulting URL. `trailing` defines of result URL must
 // end with slash
 package string concatURL(string prefix, string url, bool trailing = false)
-{
+@safe {
 	import std.algorithm : startsWith, endsWith;
 
 	auto pre = prefix.endsWith("/");
@@ -603,7 +621,7 @@ package string concatURL(string prefix, string url, bool trailing = false)
 	}
 }
 
-unittest {
+@safe unittest {
 	assert(concatURL("/test/", "/it/", false) == "/test/it/");
 	assert(concatURL("/test", "it/", false) == "/test/it/");
 	assert(concatURL("/test", "it", false) == "/test/it");
@@ -668,9 +686,11 @@ package ParamResult readFormParamRec(T)(scope HTTPServerRequest req, ref T dst, 
 	} else static if (isNullable!T) {
 		typeof(dst.get()) el = void;
 		auto r = readFormParamRec(req, el, fieldname, false, style, err);
-		if (r == ParamResult.ok)
-			dst.setVoid(el);
-		else dst.setVoid(T.init);
+		final switch (r) {
+			case ParamResult.ok: dst.setVoid(el); break;
+			case ParamResult.skipped: dst.setVoid(T.init); break;
+			case ParamResult.error: return ParamResult.error;
+		}
 	} else static if (is(T == struct) &&
 		!is(typeof(T.fromString(string.init))) &&
 		!is(typeof(T.fromStringValidate(string.init, null))) &&
@@ -723,9 +743,10 @@ nothrow {
 			dst.setVoid(str.to!T());
 		}
 	} catch (Exception e) {
+		import vibe.core.log : logDebug;
 		import std.encoding : sanitize;
 		err.text = e.msg;
-		try err.debugText = e.toString().sanitize;
+		debug try logDebug("Error converting web field: %s", e.toString().sanitize);
 		catch (Exception) {}
 		return false;
 	}
@@ -763,7 +784,7 @@ private string getArrayFieldName(T)(NestedNameStyle style, string prefix, T inde
 }
 
 private string getMemberFieldName(NestedNameStyle style, string prefix, string member)
-{
+@safe {
 	import std.format : format;
 	final switch (style) {
 		case NestedNameStyle.underscore: return format("%s_%s", prefix, member);

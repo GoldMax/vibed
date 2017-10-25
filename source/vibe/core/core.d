@@ -126,7 +126,7 @@ unittest {
 	{
 		// first, perform any application specific setup (privileged ports still
 		// available if run as root)
-		listenTCP(7, (conn) { conn.write(conn); });
+		listenTCP(7, (conn) { conn.pipe(conn); });
 
 		// then use runApplication to perform the remaining initialization and
 		// to run the event loop
@@ -151,7 +151,7 @@ unittest {
 		if (!finalizeCommandLineOptions()) return 0;
 
 		// then set up the application
-		listenTCP(7, (conn) { conn.write(conn); });
+		listenTCP(7, (conn) { conn.pipe(conn); });
 
 		// finally, perform privilege lowering (safe to skip for non-server
 		// applications)
@@ -232,7 +232,9 @@ void exitEventLoop(bool shutdown_all_threads = false)
 {
 	logDebug("exitEventLoop called (%s)", shutdown_all_threads);
 
-	assert(s_eventLoopRunning || shutdown_all_threads);
+	assert(s_eventLoopRunning || shutdown_all_threads,
+		"Trying to exit event loop when no loop is running.");
+
 	if (shutdown_all_threads) {
 		atomicStore(st_term, true);
 		st_threadsSignal.emit();
@@ -265,14 +267,25 @@ bool processEvents()
 	be triggered immediately after processing any events that have arrived in the
 	meantime. Returning false will instead wait until another event has arrived first.
 */
-void setIdleHandler(void delegate() del)
+void setIdleHandler(void delegate() @safe del)
 {
 	s_idleHandler = { del(); return false; };
 }
 /// ditto
-void setIdleHandler(bool delegate() del)
+void setIdleHandler(bool delegate() @safe del)
 {
 	s_idleHandler = del;
+}
+
+/// Scheduled for deprecation - use a `@safe` callback instead.
+void setIdleHandler(void delegate() @system del)
+@system {
+	s_idleHandler = () @trusted { del(); return false; };
+}
+/// ditto
+void setIdleHandler(bool delegate() @system del)
+@system {
+	s_idleHandler = () @trusted => del();
 }
 
 /**
@@ -284,6 +297,12 @@ void setIdleHandler(bool delegate() del)
 
 	Note that the maximum size of all args must not exceed `maxTaskParameterSize`.
 */
+Task runTask(ARGS...)(void delegate(ARGS) @safe task, ARGS args)
+{
+	auto tfi = makeTaskFuncInfo(task, args);
+	return runTask_internal(tfi);
+}
+/// ditto
 Task runTask(ARGS...)(void delegate(ARGS) task, ARGS args)
 {
 	auto tfi = makeTaskFuncInfo(task, args);
@@ -326,6 +345,10 @@ private Task runTask_internal(ref TaskFuncInfo tfi)
 	}
 
 	return handle;
+}
+
+@safe unittest {
+	runTask({});
 }
 
 /**
@@ -381,7 +404,7 @@ Task runWorkerTaskH(FT, ARGS...)(FT func, auto ref ARGS args)
 		mixin(callWithMove!ARGS("func", "args"));
 	}
 	runWorkerTask_unsafe(&taskFun, caller, func, args);
-	return cast(Task)receiveOnlyCompat!PrivateTask();
+	return () @trusted { return cast(Task)receiveOnlyCompat!PrivateTask(); } ();
 }
 /// ditto
 Task runWorkerTaskH(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
@@ -405,7 +428,7 @@ Task runWorkerTaskH(alias method, T, ARGS...)(shared(T) object, auto ref ARGS ar
 	assert(caller != Task.init, "runWorkderTaskH can currently only be called from within a task.");
 	static void taskFun(Task caller, FT func, ARGS args) {
 		PrivateTask callee = Task.getThis();
-		caller.prioritySendCompat(callee);
+		() @trusted { caller.prioritySendCompat(callee); } ();
 		mixin(callWithMove!ARGS("func", "args"));
 	}
 	runWorkerTask_unsafe(&taskFun, caller, func, args);
@@ -527,8 +550,10 @@ private void runWorkerTask_unsafe(CALLABLE, ARGS...)(CALLABLE callable, ref ARGS
 
 	auto tfi = makeTaskFuncInfo(callable, args);
 
-	synchronized (st_threadsMutex) st_workerTasks ~= tfi;
-	st_threadsSignal.emit();
+	() @trusted {
+		synchronized (st_threadsMutex) st_workerTasks ~= tfi;
+		st_threadsSignal.emit();
+	} ();
 }
 
 
@@ -637,22 +662,24 @@ import core.cpuid : threadsPerCPU;
 	See_also: `runWorkerTask`, `runWorkerTaskH`, `runWorkerTaskDist`
 */
 public void setupWorkerThreads(uint num = logicalProcessorCount())
-{
+@safe {
 	static bool s_workerThreadsStarted = false;
 	if (s_workerThreadsStarted) return;
 	s_workerThreadsStarted = true;
 
-	synchronized (st_threadsMutex) {
-		if (st_threads.any!(t => t.isWorker))
-			return;
+	() @trusted {
+		synchronized (st_threadsMutex) {
+			if (st_threads.any!(t => t.isWorker))
+				return;
 
-		foreach (i; 0 .. num) {
-			auto thr = new Thread(&workerThreadFunc);
-			thr.name = format("Vibe Task Worker #%s", i);
-			st_threads ~= ThreadContext(thr, true);
-			thr.start();
+			foreach (i; 0 .. num) {
+				auto thr = new Thread(&workerThreadFunc);
+				thr.name = format("Vibe Task Worker #%s", i);
+				st_threads ~= ThreadContext(thr, true);
+				thr.start();
+			}
 		}
-	}
+	} ();
 }
 
 
@@ -744,7 +771,7 @@ void rawYield()
 	used in vibe.d applications.
 */
 void sleep(Duration timeout)
-{
+@safe {
 	assert(timeout >= 0.seconds, "Argument to sleep must not be negative.");
 	if (timeout <= 0.seconds) return;
 	auto tm = setTimer(timeout, null);
@@ -770,6 +797,9 @@ unittest {
 
 	Note that timers can only work if an event loop is running.
 
+	Passing a `@system` callback is scheduled for deprecation. Use a
+	`@safe` callback instead.
+
 	Params:
 		timeout = Determines the minimum amount of time that elapses before the timer fires.
 		callback = This delegate will be called when the timer fires
@@ -780,16 +810,21 @@ unittest {
 
 	See_also: createTimer
 */
-Timer setTimer(Duration timeout, void delegate() callback, bool periodic = false)
-{
+Timer setTimer(Duration timeout, void delegate() @safe callback, bool periodic = false)
+@safe {
 	auto tm = createTimer(callback);
 	tm.rearm(timeout, periodic);
 	return tm;
 }
+/// ditto
+Timer setTimer(Duration timeout, void delegate() @system callback, bool periodic = false)
+@system {
+	return setTimer(timeout, () @trusted => callback(), periodic);
+}
 ///
 unittest {
 	void printTime()
-	{
+	@safe {
 		import std.datetime;
 		logInfo("The time is: %s", Clock.currTime());
 	}
@@ -798,7 +833,7 @@ unittest {
 	{
 		import vibe.core.core;
 		// start a periodic timer that prints the time every second
-		setTimer(1.seconds, toDelegate(&printTime), true);
+		setTimer(1.seconds, &printTime, true);
 	}
 }
 
@@ -806,12 +841,20 @@ unittest {
 /**
 	Creates a new timer without arming it.
 
+	Passing a `@system` callback is scheduled for deprecation. Use a
+	`@safe` callback instead.
+
 	See_also: setTimer
 */
-Timer createTimer(void delegate() callback)
-{
+Timer createTimer(void delegate() @safe callback)
+@safe {
 	auto drv = getEventDriver();
 	return Timer(drv, drv.createTimer(callback));
+}
+/// ditto
+Timer createTimer(void delegate() @system callback)
+@system {
+	return createTimer(() @trusted => callback());
 }
 
 
@@ -903,7 +946,7 @@ void disableDefaultSignalHandlers()
 	Note that this function is called automatically by vibe.d's default main
 	implementation, as well as by `runApplication`.
 */
-void lowerPrivileges(string uname, string gname)
+void lowerPrivileges(string uname, string gname) @safe
 {
 	if (!isRoot()) return;
 	if (uname != "" || gname != "") {
@@ -922,7 +965,7 @@ void lowerPrivileges(string uname, string gname)
 }
 
 // ditto
-void lowerPrivileges()
+void lowerPrivileges() @safe
 {
 	lowerPrivileges(s_privilegeLoweringUserName, s_privilegeLoweringGroupName);
 }
@@ -944,7 +987,7 @@ void setTaskEventCallback(TaskEventCb func)
 /**
 	A version string representing the current vibe.d version
 */
-enum vibeVersionString = "0.7.31";
+enum vibeVersionString = "0.8.1";
 
 
 /**
@@ -959,6 +1002,8 @@ enum maxTaskParameterSize = 128;
 	Represents a timer.
 */
 struct Timer {
+@safe:
+
 	private {
 		EventDriver m_driver;
 		size_t m_id;
@@ -999,7 +1044,7 @@ struct Timer {
 
 	/** Resets the timer and avoids any firing.
 	*/
-	void stop() { m_driver.stopTimer(m_id); }
+	void stop() nothrow { m_driver.stopTimer(m_id); }
 
 	/** Waits until the timer fires.
 	*/
@@ -1269,7 +1314,7 @@ private class CoreTask : TaskFiber {
 
 				s_availableFibers.put(this);
 			}
-		} catch(UncaughtException th) {
+		} catch (UncaughtException th) {
 			logCritical("CoreTaskFiber was terminated unexpectedly: %s", th.msg);
 			logDiagnostic("Full error: %s", th.toString().sanitize());
 			s_fiberCount--;
@@ -1284,9 +1329,9 @@ private class CoreTask : TaskFiber {
 			assert(caller.fiber !is this, "A task cannot join itself.");
 			assert(caller.thread is this.thread, "Joining tasks in foreign threads is currently not supported.");
 			m_yielders ~= caller;
-		} else assert(Thread.getThis() is this.thread, "Joining tasks in different threads is not yet supported.");
+		} else assert(() @trusted { return Thread.getThis(); } () is this.thread, "Joining tasks in different threads is not yet supported.");
 		auto run_count = m_taskCounter;
-		if (caller == Task.init) s_core.resumeYieldedTasks(); // let the task continue (it must be yielded currently)
+		if (caller == Task.init) () @trusted { return s_core; } ().resumeYieldedTasks(); // let the task continue (it must be yielded currently)
 		while (m_running && run_count == m_taskCounter) rawYield();
 	}
 
@@ -1308,6 +1353,8 @@ private class CoreTask : TaskFiber {
 
 
 private class VibeDriverCore : DriverCore {
+@safe:
+
 	private {
 		Duration m_gcCollectTimeout;
 		Timer m_gcTimer;
@@ -1385,19 +1432,13 @@ private class VibeDriverCore : DriverCore {
 		// do nothing if the task is aready scheduled to be resumed
 		if (ctask.m_queue) return;
 
-		auto uncaught_exception = () @trusted nothrow { return ctask.call!(Fiber.Rethrow.no)(); } ();
-
-		if (uncaught_exception) {
-			auto th = cast(Throwable)uncaught_exception;
-			assert(th, "Fiber returned exception object that is not a Throwable!?");
+		try () @trusted { ctask.call!(Fiber.Rethrow.yes)(); } ();
+		catch (Exception e) {
 			extrap();
 
 			assert(() @trusted nothrow { return ctask.state; } () == Fiber.State.TERM);
-			logError("Task terminated with unhandled exception: %s", th.msg);
-			logDebug("Full error: %s", () @trusted { return th.toString().sanitize; } ());
-
-			// always pass Errors on
-			if (auto err = cast(Error)th) throw err;
+			logError("Task terminated with unhandled exception: %s", e.msg);
+			logDebug("Full error: %s", () @trusted { return e.toString().sanitize; } ());
 		}
 	}
 
@@ -1421,7 +1462,7 @@ private class VibeDriverCore : DriverCore {
 		}
 		if (!s_yieldedTasks.empty) logDebug("Exiting from idle processing although there are still yielded tasks (exit=%s)", getExitFlag());
 
-		if (Thread.getThis() is st_mainThread) {
+		if (() @trusted { return Thread.getThis() is st_mainThread; } ()) {
 			if (!m_ignoreIdleForGC && m_gcTimer) {
 				m_gcTimer.rearm(m_gcCollectTimeout);
 			} else m_ignoreIdleForGC = false;
@@ -1437,7 +1478,7 @@ private class VibeDriverCore : DriverCore {
 	}
 
 	private void resumeYieldedTasks()
-	nothrow {
+	nothrow @safe {
 		for (auto limit = s_yieldedTasks.length; limit > 0 && !s_yieldedTasks.empty; limit--) {
 			auto tf = s_yieldedTasks.front;
 			s_yieldedTasks.popFront();
@@ -1488,8 +1529,10 @@ private class VibeDriverCore : DriverCore {
 	{
 		import core.memory;
 		logTrace("gc idle collect");
-		GC.collect();
-		GC.minimize();
+		() @trusted {
+			GC.collect();
+			GC.minimize();
+		} ();
 		m_ignoreIdleForGC = true;
 	}
 }
@@ -1504,29 +1547,29 @@ private struct ThreadContext {
 
 private struct TaskFuncInfo {
 	void function(TaskFuncInfo*) func;
-	void[2*size_t.sizeof] callable = void;
-	void[maxTaskParameterSize] args = void;
+	void[2*size_t.sizeof] callable;
+	void[maxTaskParameterSize] args;
 
 	@property ref C typedCallable(C)()
-	{
+	@trusted {
 		static assert(C.sizeof <= callable.sizeof);
 		return *cast(C*)callable.ptr;
 	}
 
 	@property ref A typedArgs(A)()
-	{
+	@trusted {
 		static assert(A.sizeof <= args.sizeof);
 		return *cast(A*)args.ptr;
 	}
 
 	void initCallable(C)()
-	{
+	@trusted {
 		C cinit;
 		this.callable[0 .. C.sizeof] = cast(void[])(&cinit)[0 .. 1];
 	}
 
 	void initArgs(A)()
-	{
+	@trusted {
 		A ainit;
 		this.args[0 .. A.sizeof] = cast(void[])(&ainit)[0 .. 1];
 	}
@@ -1556,7 +1599,7 @@ private {
 
 	bool s_exitEventLoop = false;
 	bool s_eventLoopRunning = false;
-	bool delegate() s_idleHandler;
+	bool delegate() @safe s_idleHandler;
 	CoreTaskQueue s_yieldedTasks;
 	Variant[string] s_taskLocalStorageGlobal; // for use outside of a task
 	FixedRingBuffer!CoreTask s_availableFibers;
@@ -1570,7 +1613,7 @@ private {
 private static @property VibeDriverCore driverCore() @trusted nothrow { return s_core; }
 
 private bool getExitFlag()
-{
+@trusted nothrow {
 	return s_exitEventLoop || atomicLoad(st_term);
 }
 
@@ -1623,7 +1666,7 @@ shared static this()
 		static if (need_wsa) {
 			logTrace("init winsock");
 			// initialize WinSock2
-			import std.c.windows.winsock;
+			import core.sys.windows.winsock2;
 			WSADATA data;
 			WSAStartup(0x0202, &data);
 
@@ -1771,19 +1814,14 @@ nothrow {
 		if (!getExitFlag()) runEventLoop();
 		logDebug("Worker thread exit.");
 	} catch (Exception e) {
-		scope (failure) exit(-1);
+		scope (failure) abort();
 		logFatal("Worker thread terminated due to uncaught exception: %s", e.msg);
 		logDebug("Full error: %s", e.toString().sanitize());
-	} catch (InvalidMemoryOperationError e) {
-		import std.stdio;
-		scope(failure) assert(false);
-		writeln("Error message: ", e.msg);
-		writeln("Full error: ", e.toString().sanitize());
-		exit(-1);
 	} catch (Throwable th) {
-		logFatal("Worker thread terminated due to uncaught error: %s", th.msg);
+		scope (exit) abort();
+		logFatal("Worker thread terminated due to uncaught error: %s (%s)", th.msg);
+		logFatal("Error type: %s", th.classinfo.name);
 		logDebug("Full error: %s", th.toString().sanitize());
-		exit(-1);
 	}
 }
 
@@ -1865,50 +1903,50 @@ nothrow {
 
 version(Posix)
 {
-	private bool isRoot() { return geteuid() == 0; }
+	private bool isRoot() @safe { return geteuid() == 0; }
 
-	private void setUID(int uid, int gid)
+	private void setUID(int uid, int gid) @safe
 	{
 		logInfo("Lowering privileges to uid=%d, gid=%d...", uid, gid);
 		if (gid >= 0) {
-			enforce(getgrgid(gid) !is null, "Invalid group id!");
+			enforce(() @trusted { return getgrgid(gid); }() !is null, "Invalid group id!");
 			enforce(setegid(gid) == 0, "Error setting group id!");
 		}
 		//if( initgroups(const char *user, gid_t group);
 		if (uid >= 0) {
-			enforce(getpwuid(uid) !is null, "Invalid user id!");
+			enforce(() @trusted { return getpwuid(uid); }() !is null, "Invalid user id!");
 			enforce(seteuid(uid) == 0, "Error setting user id!");
 		}
 	}
 
-	private int getUID(string name)
+	private int getUID(string name) @safe
 	{
-		auto pw = getpwnam(name.toStringz());
+		auto pw = () @trusted { return getpwnam(name.toStringz()); }();
 		enforce(pw !is null, "Unknown user name: "~name);
 		return pw.pw_uid;
 	}
 
-	private int getGID(string name)
+	private int getGID(string name) @safe
 	{
-		auto gr = getgrnam(name.toStringz());
+		auto gr = () @trusted { return getgrnam(name.toStringz()); }();
 		enforce(gr !is null, "Unknown group name: "~name);
 		return gr.gr_gid;
 	}
 } else version(Windows){
-	private bool isRoot() { return false; }
+	private bool isRoot() @safe { return false; }
 
-	private void setUID(int uid, int gid)
+	private void setUID(int uid, int gid) @safe
 	{
 		enforce(false, "UID/GID not supported on Windows.");
 	}
 
-	private int getUID(string name)
+	private int getUID(string name) @safe
 	{
 		enforce(false, "Privilege lowering not supported on Windows.");
 		assert(false);
 	}
 
-	private int getGID(string name)
+	private int getGID(string name) @safe
 	{
 		enforce(false, "Privilege lowering not supported on Windows.");
 		assert(false);
@@ -2007,4 +2045,14 @@ unittest {
 	static assert(!needsMove!U);
 	static assert(needsMove!V);
 	static assert(!needsMove!W);
+}
+
+// DMD currently has no option to set merging of coverage files at compile-time
+// This needs to be done via a Druntime API
+// As this option is solely for Vibed's internal testsuite, it's hidden behind
+// a long version
+version(VibedSetCoverageMerge)
+shared static this() {
+	import core.runtime : dmd_coverSetMerge;
+	dmd_coverSetMerge(true);
 }

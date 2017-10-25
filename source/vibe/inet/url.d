@@ -1,13 +1,13 @@
 /**
 	URL parsing routines.
 
-	Copyright: © 2012 RejectedSoftware e.K.
+	Copyright: © 2012-2017 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
 module vibe.inet.url;
 
-public import vibe.inet.path;
+public import vibe.core.path;
 
 import vibe.textfilter.urlencode;
 import vibe.utils.string;
@@ -16,12 +16,14 @@ import std.array;
 import std.conv;
 import std.exception;
 import std.string;
+import std.traits : isInstanceOf;
 
 
 /**
 	Represents a URL decomposed into its components.
 */
 struct URL {
+@safe:
 	private {
 		string m_schema;
 		string m_pathString;
@@ -34,17 +36,41 @@ struct URL {
 	}
 
 	/// Constructs a new URL object from its components.
-	this(string schema, string host, ushort port, Path path)
+	this(string schema, string host, ushort port, InetPath path)
 	{
 		m_schema = schema;
 		m_host = host;
 		m_port = port;
-		m_pathString = urlEncode(path.toString(), "/");
+		version (Have_vibe_core) m_pathString = path.toString();
+		else m_pathString = urlEncode(path.toString(), "/");
 	}
 	/// ditto
-	this(string schema, Path path)
+	this(string schema, InetPath path)
 	{
 		this(schema, null, 0, path);
+	}
+
+	version (Have_vibe_core) {
+		/// ditto
+		this(string schema, string host, ushort port, PosixPath path)
+		{
+			this(schema, host, port, cast(InetPath)path);
+		}
+		/// ditto
+		this(string schema, PosixPath path)
+		{
+			this(schema, null, 0, cast(InetPath)path);
+		}
+		/// ditto
+		this(string schema, string host, ushort port, WindowsPath path)
+		{
+			this(schema, host, port, cast(InetPath)path);
+		}
+		/// ditto
+		this(string schema, WindowsPath path)
+		{
+			this(schema, null, 0, cast(InetPath)path);
+		}
 	}
 
 	/** Constructs a URL from its string representation.
@@ -62,71 +88,59 @@ struct URL {
 			str = str[idx+1 .. $];
 			bool requires_host = false;
 
-			switch(m_schema){
-				case "http":
-				case "https":
-				case "ftp":
-				case "spdy":
-				case "sftp":
-				case "ws":
-				case "wss":
-				case "file":
-				case "http+unix":
-				case "https+unix":
-				case "redis":
-					// proto://server/path style
-					enforce(str.startsWith("//"), "URL must start with proto://...");
-					requires_host = true;
-					str = str[2 .. $];
-					if (m_schema == "file")
-						break;
-					goto default;
-				default:
-					auto si = str.indexOfCT('/');
-					if( si < 0 ) si = str.length;
-					auto ai = str[0 .. si].indexOfCT('@');
-					sizediff_t hs = 0;
-					if( ai >= 0 ){
-						hs = ai+1;
-						auto ci = str[0 .. ai].indexOfCT(':');
-						if( ci >= 0 ){
-							m_username = str[0 .. ci];
-							m_password = str[ci+1 .. ai];
-						} else m_username = str[0 .. ai];
-						enforce(m_username.length > 0, "Empty user name in URL.");
+			if (isDoubleSlashSchema(m_schema)) {
+				// proto://server/path style
+				enforce(str.startsWith("//"), "URL must start with proto://...");
+				requires_host = true;
+				str = str[2 .. $];
+			}
+
+			if (schema != "file") {
+				auto si = str.indexOfCT('/');
+				if( si < 0 ) si = str.length;
+				auto ai = str[0 .. si].indexOfCT('@');
+				sizediff_t hs = 0;
+				if( ai >= 0 ){
+					hs = ai+1;
+					auto ci = str[0 .. ai].indexOfCT(':');
+					if( ci >= 0 ){
+						m_username = str[0 .. ci];
+						m_password = str[ci+1 .. ai];
+					} else m_username = str[0 .. ai];
+					enforce(m_username.length > 0, "Empty user name in URL.");
+				}
+
+				m_host = str[hs .. si];
+
+				auto findPort ( string src )
+				{
+					auto pi = src.indexOfCT(':');
+					if(pi > 0) {
+						enforce(pi < src.length-1, "Empty port in URL.");
+						m_port = to!ushort(src[pi+1..$]);
 					}
+					return pi;
+				}
 
-					m_host = str[hs .. si];
 
-					auto findPort ( string src )
-					{
-						auto pi = src.indexOfCT(':');
-						if(pi > 0) {
-							enforce(pi < src.length-1, "Empty port in URL.");
-							m_port = to!ushort(src[pi+1..$]);
-						}
-						return pi;
+				auto ip6 = m_host.indexOfCT('[');
+				if (ip6 == 0) { // [ must be first char
+					auto pe = m_host.indexOfCT(']');
+					if (pe > 0) {
+						findPort(m_host[pe..$]);
+						m_host = m_host[1 .. pe];
 					}
-
-
-					auto ip6 = m_host.indexOfCT('[');
-					if (ip6 == 0) { // [ must be first char
-						auto pe = m_host.indexOfCT(']');
-						if (pe > 0) {
-							findPort(m_host[pe..$]);
-							m_host = m_host[1 .. pe];
-						}
+				}
+				else {
+					auto pi = findPort(m_host);
+					if(pi > 0) {
+						m_host = m_host[0 .. pi];
 					}
-					else {
-						auto pi = findPort(m_host);
-						if(pi > 0) {
-							m_host = m_host[0 .. pi];
-						}
-					}
+				}
 
-					enforce(!requires_host || m_schema == "file" || m_host.length > 0,
-							"Empty server name in URL.");
-					str = str[si .. $];
+				enforce(!requires_host || m_schema == "file" || m_host.length > 0,
+						"Empty server name in URL.");
+				str = str[si .. $];
 			}
 		}
 
@@ -164,12 +178,25 @@ struct URL {
 	}
 
 	/// The path part of the URL
-	@property Path path() const { return Path(urlDecode(m_pathString)); }
-	/// ditto
-	@property void path(Path p)
-	{
-		auto pstr = p.toString();
-		m_pathString = urlEncode(pstr, "/");
+	@property InetPath path() const {
+		version (Have_vibe_core)
+			return InetPath(m_pathString);
+		else
+			return Path(urlDecode(m_pathString));
+	}
+	version (Have_vibe_core) {
+		/// ditto
+		@property void path(Path)(Path p)
+			if (isInstanceOf!(GenericPath, Path))
+		{
+			m_pathString = (cast(InetPath)p).toString();
+		}
+	} else {
+		/// ditto
+		@property void path(Path p)
+		{
+			m_pathString = p.toString().urlEncode("/");
+		}
 	}
 
 	/// The host part of the URL (depends on the schema)
@@ -195,7 +222,7 @@ struct URL {
 		}
 	}
 	/// ditto
-	ushort defaultPort() {
+	ushort defaultPort() const {
 		return defaultPort(m_schema);
 	}
 
@@ -270,19 +297,8 @@ struct URL {
 		auto dst = appender!string();
 		dst.put(schema);
 		dst.put(":");
-		switch(schema){
-			default: break;
-			case "file":
-			case "http":
-			case "https":
-			case "ftp":
-			case "spdy":
-			case "sftp":
-			case "http+unix":
-			case "https+unix":
-				dst.put("//");
-				break;
-		}
+		if (isDoubleSlashSchema(schema))
+			dst.put("//");
 		if (m_username.length || m_password.length) {
 			dst.put(username);
 			dst.put(':');
@@ -306,13 +322,15 @@ struct URL {
 		if( m_schema != rhs.m_schema ) return false;
 		if( m_host != rhs.m_host ) return false;
 		// FIXME: also consider user, port, querystring, anchor etc
-		return this.path.startsWith(rhs.path);
+		version (Have_vibe_core)
+			return this.path.bySegment.startsWith(rhs.path.bySegment);
+		else return this.path.startsWith(rhs.path);
 	}
 
-	URL opBinary(string OP)(Path rhs) const if( OP == "~" ) { return URL(m_schema, m_host, m_port, this.path ~ rhs); }
-	URL opBinary(string OP)(PathEntry rhs) const if( OP == "~" ) { return URL(m_schema, m_host, m_port, this.path ~ rhs); }
-	void opOpAssign(string OP)(Path rhs) if( OP == "~" ) { this.path = this.path ~ rhs; }
-	void opOpAssign(string OP)(PathEntry rhs) if( OP == "~" ) { this.path = this.path ~ rhs; }
+	URL opBinary(string OP, Path)(Path rhs) const if (OP == "~" && isAnyPath!Path) { return URL(m_schema, m_host, m_port, this.path ~ rhs); }
+	URL opBinary(string OP, Path)(Path.Segment rhs) const if (OP == "~" && isAnyPath!Path) { return URL(m_schema, m_host, m_port, this.path ~ rhs); }
+	void opOpAssign(string OP, Path)(Path rhs) if (OP == "~" && isAnyPath!Path) { this.path = this.path ~ rhs; }
+	void opOpAssign(string OP, Path)(Path.Segment rhs) if (OP == "~" && isAnyPath!Path) { this.path = this.path ~ rhs; }
 
 	/// Tests two URLs for equality using '=='.
 	bool opEquals(ref const URL rhs) const {
@@ -332,13 +350,26 @@ struct URL {
 	}
 }
 
+private enum isAnyPath(P) = is(P == InetPath) || is(P == PosixPath) || is(P == WindowsPath);
+
+private bool isDoubleSlashSchema(string schema)
+@safe nothrow @nogc {
+	switch (schema) {
+		case "ftp", "http", "https", "http+unix", "https+unix":
+		case "spdy", "sftp", "ws", "wss", "file", "redis", "tcp":
+			return true;
+		default:
+			return false;
+	}
+}
+
 unittest { // IPv6
 	auto urlstr = "http://[2003:46:1a7b:6c01:64b:80ff:fe80:8003]:8091/abc";
 	auto url = URL.parse(urlstr);
 	assert(url.schema == "http", url.schema);
 	assert(url.host == "2003:46:1a7b:6c01:64b:80ff:fe80:8003", url.host);
 	assert(url.port == 8091);
-	assert(url.path == Path("/abc"), url.path.toString());
+	assert(url.path == InetPath("/abc"), url.path.toString());
 	assert(url.toString == urlstr);
 
 	url.host = "abcd:46:1a7b:6c01:64b:80ff:fe80:8abc";
@@ -352,7 +383,7 @@ unittest {
 	auto url = URL.parse(urlstr);
 	assert(url.schema == "https", url.schema);
 	assert(url.host == "www.example.net", url.host);
-	assert(url.path == Path("/index.html"), url.path.toString());
+	assert(url.path == InetPath("/index.html"), url.path.toString());
 	assert(url.toString == urlstr);
 
 	urlstr = "http://jo.doe:password@sub.www.example.net:4711/sub2/index.html?query#anchor";
@@ -404,11 +435,11 @@ unittest {
 }
 
 unittest {
-	Path p = Path("/foo bar/boo oom/");
+	auto p = PosixPath("/foo bar/boo oom/");
 	URL url = URL("http", "example.com", 0, p); // constructor test
-	assert(url.path == p);
+	assert(url.path == cast(InetPath)p);
 	url.path = p;
-	assert(url.path == p);					   // path assignement test
+	assert(url.path == cast(InetPath)p);					   // path assignement test
 	assert(url.pathString == "/foo%20bar/boo%20oom/");
 	assert(url.toString() == "http://example.com/foo%20bar/boo%20oom/");
 	url.pathString = "/foo%20bar/boo%2foom/";
@@ -418,7 +449,7 @@ unittest {
 
 unittest {
 	auto url = URL("http://example.com/some%2bpath");
-	assert(url.path.toString() == "/some+path", url.path.toString());
+	assert((cast(PosixPath)url.path).toString() == "/some+path", url.path.toString());
 }
 
 unittest {
@@ -450,4 +481,10 @@ unittest {
 unittest {
 	import vibe.data.serialization;
 	static assert(isStringSerializable!URL);
+}
+
+unittest { // issue #1732
+	auto url = URL("tcp://0.0.0.0:1234");
+	url.port = 4321;
+	assert(url.toString == "tcp://0.0.0.0:4321", url.toString);
 }

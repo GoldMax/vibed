@@ -2,54 +2,63 @@ platform: x64
 environment:
  matrix:
   - DC: dmd
-    DVersion: 2.073.1
+    DVersion: 2.076.0
+    arch: x86_mscoff
+    config: vibe-core
+  - DC: dmd
+    DVersion: 2.076.0
+    arch: x86
+    config: win32
+  - DC: dmd
+    DVersion: 2.076.0
     arch: x64
     config: win32
   - DC: dmd
-    DVersion: 2.073.1
-    arch: x86
-    config: win32
-  - DC: dmd
-    DVersion: 2.073.1
+    DVersion: 2.076.0
     arch: x86_mscoff
     config: win32
   - DC: dmd
-    DVersion: 2.073.1
-    arch: x86
-    config: libevent
-  - DC: dmd
-    DVersion: 2.073.1
-    arch: x86
-    config: libasync
-  - DC: dmd
-    DVersion: 2.073.1
+    DVersion: 2.075.1
     arch: x86_mscoff
     config: win32
+  - DC: dmd
+    DVersion: 2.074.1
+    arch: x86_mscoff
+    config: win32
+  - DC: dmd
+    DVersion: 2.073.2
+    arch: x86_mscoff
+    config: win32
+  - DC: dmd
+    DVersion: 2.073.2
+    arch: x86
+    config: vibe-core
+  - DC: dmd
+    DVersion: 2.073.2
+    arch: x86_mscoff
+    config: vibe-core
   - DC: dmd
     DVersion: 2.072.2
     arch: x64
-    config: win32
+    config: vibe-core
   - DC: dmd
-    DVersion: 2.071.1
+    DVersion: 2.071.2
     arch: x86
-    config: win32
-  - DC: dmd
-    DVersion: 2.070.0
+    config: vibe-core
+  - DC: ldc
+    DVersion: 1.3.0
     arch: x64
-    config: win32
+    config: vibe-core
+  - DC: ldc
+    DVersion: 1.2.0
+    arch: x64
+    config: vibe-core
   - DC: ldc
     DVersion: 1.1.0
     arch: x64
-    config: win32
-  - DC: ldc
-    DVersion: 1.0.0
-    arch: x64
-    config: win32
+    config: vibe-core
 
 skip_tags: false
-branches:
-  only:
-    - master
 
 install:
   - ps: function SetUpDCompiler
@@ -126,12 +135,15 @@ test_script:
  - echo %DC%
  - echo %PATH%
  - '%DC% --version'
-
  - dub test :utils --arch=%Darch% --compiler=%DC%
  - dub test :data --arch=%Darch% --compiler=%DC%
  - dub test :core --arch=%Darch% --compiler=%DC% --config=%CONFIG%
+ - dub test :stream --arch=%Darch% --compiler=%DC% --override-config=vibe-d:core/%CONFIG%
+ - dub test :crypto --arch=%Darch% --compiler=%DC% --override-config=vibe-d:core/%CONFIG%
+ - dub test :tls --arch=%Darch% --compiler=%DC% --override-config=vibe-d:core/%CONFIG%
+ - dub test :textfilter --arch=%Darch% --compiler=%DC% --override-config=vibe-d:core/%CONFIG%
+ - dub test :inet --arch=%Darch% --compiler=%DC% --override-config=vibe-d:core/%CONFIG%
  - dub test :mail --arch=%Darch% --compiler=%DC% --override-config=vibe-d:core/%CONFIG%
- - dub test :diet --arch=%Darch% --compiler=%DC% --override-config=vibe-d:core/%CONFIG%
  - dub test :http --arch=%Darch% --compiler=%DC% --override-config=vibe-d:core/%CONFIG%
  - dub test :mongodb --arch=%Darch% --compiler=%DC% --override-config=vibe-d:core/%CONFIG%
  - dub test :redis --arch=%Darch% --compiler=%DC% --override-config=vibe-d:core/%CONFIG%

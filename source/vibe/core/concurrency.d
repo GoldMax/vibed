@@ -17,7 +17,7 @@ import std.typetuple;
 import std.variant;
 import std.string;
 import vibe.core.task;
-import vibe.utils.memory;
+import vibe.internal.allocator;
 import vibe.internal.meta.traits : StripHeadConst;
 
 public import std.concurrency;
@@ -1080,6 +1080,8 @@ template isCopyable(T)
 	value.
 */
 struct Future(T) {
+	import vibe.internal.freelistref : FreeListRef;
+
 	private {
 		FreeListRef!(shared(T)) m_result;
 		Task m_task;
@@ -1099,7 +1101,7 @@ struct Future(T) {
 	{
 		if (!ready) m_task.join();
 		assert(ready, "Task still running after join()!?");
-		return *cast(T*)m_result.get(); // casting away shared is safe, because this is a unique reference
+		return *cast(T*)&m_result.get(); // casting away shared is safe, because this is a unique reference
 	}
 
 	alias getResult this;
@@ -1131,6 +1133,8 @@ struct Future(T) {
 Future!(StripHeadConst!(ReturnType!CALLABLE)) async(CALLABLE, ARGS...)(CALLABLE callable, ARGS args)
 	if (is(typeof(callable(args)) == ReturnType!CALLABLE))
 {
+	import vibe.internal.freelistref : FreeListRef;
+
 	import vibe.core.core;
 	import std.functional : toDelegate;
 
@@ -1138,7 +1142,7 @@ Future!(StripHeadConst!(ReturnType!CALLABLE)) async(CALLABLE, ARGS...)(CALLABLE 
 	Future!RET ret;
 	ret.init();
 	static void compute(FreeListRef!(shared(RET)) dst, CALLABLE callable, ARGS args) {
-		*dst = cast(shared(RET))callable(args);
+		dst = cast(shared(RET))callable(args);
 	}
 	static if (isWeaklyIsolated!CALLABLE && isWeaklyIsolated!ARGS) {
 		ret.m_task = runWorkerTaskH(&compute, ret.m_result, callable, args);
@@ -1194,7 +1198,7 @@ unittest {
 
 unittest {
 	import vibe.core.core : sleep;
-	
+
 	auto f = async({
 		immutable byte b = 1;
 		return b;
@@ -1253,7 +1257,7 @@ package class VibedScheduler : Scheduler {
 
 		final switch (st_concurrencyPrimitive) with (ConcurrencyPrimitive) {
 			case task: runTask(op); break;
-			case workerTask: 
+			case workerTask:
 				static void wrapper(shared(void delegate()) op) {
 					(cast(void delegate())op)();
 				}
@@ -1430,9 +1434,9 @@ private bool callBool(F, T...)(F fnc, T args)
 	}
 }
 
-private bool delegate(Variant) opsFilter(OPS...)(OPS ops)
+private bool delegate(Variant) @safe opsFilter(OPS...)(OPS ops)
 {
-	return (Variant msg) {
+	return (Variant msg) @trusted { // Variant
 		if (msg.convertsTo!Throwable) return true;
 		foreach (i, OP; OPS)
 			if (matchesHandler!OP(msg))
@@ -1441,9 +1445,9 @@ private bool delegate(Variant) opsFilter(OPS...)(OPS ops)
 	};
 }
 
-private void delegate(Variant) opsHandler(OPS...)(OPS ops)
+private void delegate(Variant) @safe opsHandler(OPS...)(OPS ops)
 {
-	return (Variant msg) {
+	return (Variant msg) @trusted  { // Variant
 		foreach (i, OP; OPS) {
 			alias PTypes = ParameterTypeTuple!OP;
 			if (matchesHandler!OP(msg)) {

@@ -8,10 +8,10 @@
 module vibe.web.i18n;
 
 import vibe.http.server : HTTPServerRequest;
-import vibe.templ.parsertools;
 
 import std.algorithm : canFind, min, startsWith;
-
+import std.range.primitives : isForwardRange;
+import std.range : only;
 
 /**
 	Annotates an interface method or class with translation information.
@@ -31,6 +31,9 @@ import std.algorithm : canFind, min, startsWith;
 
 ///
 unittest {
+	import vibe.http.router : URLRouter;
+	import vibe.web.web : registerWebInterface;
+
 	struct TranslationContext {
 		import std.typetuple;
 		alias languages = TypeTuple!("en_US", "de_DE", "fr_FR");
@@ -45,14 +48,22 @@ unittest {
 			//render!("home.dt")
 		}
 	}
+
+	void test(URLRouter router)
+	{
+		router.registerWebInterface(new MyWebInterface);
+	}
 }
 
 /// Defining a custom function for determining the language.
 unittest {
+	import vibe.http.router : URLRouter;
 	import vibe.http.server;
+	import vibe.web.web : registerWebInterface;
 
 	struct TranslationContext {
 		import std.typetuple;
+		// A language can be in the form en_US, en-US or en. Put the languages you want to prioritize first.
 		alias languages = TypeTuple!("en_US", "de_DE", "fr_FR");
 		//mixin translationModule!"app";
 		//mixin translationModule!"somelib";
@@ -61,7 +72,7 @@ unittest {
 		// "Accept-Language" header
 		static string determineLanguage(scope HTTPServerRequest req)
 		{
-			if (!req.session) return null; // use default language
+			if (!req.session) return req.determineLanguageByHeader(languages); // default behaviour using "Accept-Language" header
 			return req.session.get("language", "");
 		}
 	}
@@ -73,6 +84,29 @@ unittest {
 			//render!("home.dt")
 		}
 	}
+
+	void test(URLRouter router)
+	{
+		router.registerWebInterface(new MyWebInterface);
+	}
+}
+
+@safe unittest {
+	import vibe.http.router : URLRouter;
+	import vibe.http.server : HTTPServerRequest;
+	import vibe.web.web : registerWebInterface;
+
+	struct TranslationContext {
+		import std.typetuple;
+		alias languages = TypeTuple!("en_US", "de_DE", "fr_FR");
+		static string determineLanguage(scope HTTPServerRequest req) { return "en_US"; }
+	}
+
+	@translationContext!TranslationContext
+	class MyWebInterface { void getHome() @safe {} }
+
+	auto router = new URLRouter;
+	router.registerWebInterface(new MyWebInterface);
 }
 
 
@@ -189,11 +223,98 @@ template tr(CTX, string LANG)
 	}
 }
 
+/// Determines a language code from the value of a header string.
+/// Returns: The best match from the Accept-Language header for a language. `null` if there is no supported language.
+public string determineLanguageByHeader(T)(string accept_language, T allowed_languages) @safe pure @nogc
+	if (isForwardRange!T)
+{
+	import std.algorithm : splitter, countUntil;
+	import std.string : indexOf;
+
+	// TODO: verify that allowed_languages doesn't contain a mix of languages with and without extra specifier for the same lanaguage (but only if one without specifier comes before those with specifier)
+	// Implementing that feature should try to give a compile time warning and not change the behaviour of this function.
+
+	if (!accept_language.length)
+		return null;
+
+	string fallback = null;
+	foreach (accept; accept_language.splitter(",")) {
+		auto sidx = accept.indexOf(';');
+		if (sidx >= 0)
+			accept = accept[0 .. sidx];
+
+		string alang, aextra;
+		auto asep = accept.countUntil!(a => a == '_' || a == '-');
+		if (asep < 0)
+			alang = accept;
+		else {
+			alang = accept[0 .. asep];
+			aextra = accept[asep + 1 .. $];
+		}
+
+		foreach (lang; allowed_languages) {
+			string lcode, lextra;
+			sidx = lang.countUntil!(a => a == '_' || a == '-');
+			if (sidx < 0)
+				lcode = lang;
+			else {
+				lcode = lang[0 .. sidx];
+				lextra = lang[sidx + 1 .. $];
+			}
+			// request en_US == serve en_US
+			if (lcode == alang && lextra == aextra)
+				return lang;
+			// request en_* == serve en
+			if (lcode == alang && !lextra.length)
+				return lang;
+			// request en* == serve en_* && be first occurence
+			if (lcode == alang && lextra.length && !fallback.length)
+				fallback = lang;
+		}
+	}
+
+	return fallback;
+}
+
+/// ditto
+public string determineLanguageByHeader(Tuple...)(string accept_language, Tuple allowed_languages) @safe pure @nogc
+{
+	return determineLanguageByHeader(accept_language, only(allowed_languages));
+}
+
+/// ditto
+public string determineLanguageByHeader(T)(HTTPServerRequest req, T allowed_languages) @safe pure
+	if (isForwardRange!T)
+{
+	return determineLanguageByHeader(req.headers.get("Accept-Language", null), allowed_languages);
+}
+
+/// ditto
+public string determineLanguageByHeader(Tuple...)(HTTPServerRequest req, Tuple allowed_languages) @safe pure
+{
+	return determineLanguageByHeader(req.headers.get("Accept-Language", null), only(allowed_languages));
+}
+
+@safe unittest {
+	assert(determineLanguageByHeader("de,de-DE;q=0.8,en;q=0.6,en-US;q=0.4", ["en-US", "de_DE", "de_CH"]) == "de_DE");
+	assert(determineLanguageByHeader("de,de-CH;q=0.8,en;q=0.6,en-US;q=0.4", ["en_US", "de_DE", "de-CH"]) == "de-CH");
+	assert(determineLanguageByHeader("en_CA,en_US", ["ja_JP", "en"]) == "en");
+	assert(determineLanguageByHeader("en", ["ja_JP", "en"]) == "en");
+	assert(determineLanguageByHeader("en", ["ja_JP", "en_US"]) == "en_US");
+	assert(determineLanguageByHeader("en_US", ["ja-JP", "en"]) == "en");
+	assert(determineLanguageByHeader("de,de-DE;q=0.8,en;q=0.6,en-US;q=0.4", ["ja_JP"]) is null);
+	assert(determineLanguageByHeader("de, de-DE ;q=0.8 , en ;q=0.6 , en-US;q=0.4", ["de-DE"]) == "de-DE");
+	assert(determineLanguageByHeader("en_GB", ["en_US"]) == "en_US");
+	assert(determineLanguageByHeader("de_DE", ["en_US"]) is null);
+	assert(determineLanguageByHeader("en_US,enCA", ["en_GB"]) == "en_GB");
+	assert(determineLanguageByHeader("en_US,enCA", ["en_GB", "en"]) == "en");
+	assert(determineLanguageByHeader("en_US,enCA", ["en", "en_GB"]) == "en");
+	// TODO from above (should be invalid input having a more generic language first in the list!)
+	//assert(determineLanguageByHeader("en_US,enCA", ["en", "en_US"]) == "en_US");
+}
+
 package string determineLanguage(alias METHOD)(scope HTTPServerRequest req)
 {
-	import std.string : indexOf;
-	import std.array;
-
 	alias CTX = GetTranslationContext!METHOD;
 
 	static if (!is(CTX == void)) {
@@ -202,27 +323,7 @@ package string determineLanguage(alias METHOD)(scope HTTPServerRequest req)
 				"determineLanguage in a translation context must return a language string.");
 			return CTX.determineLanguage(req);
 		} else {
-			auto accept_lang = req.headers.get("Accept-Language", null);
-
-			size_t csidx = 0;
-			while (accept_lang.length) {
-				auto cidx = accept_lang[csidx .. $].indexOf(',');
-				if (cidx < 0) cidx = accept_lang.length;
-				auto entry = accept_lang[csidx .. csidx + cidx];
-				auto sidx = entry.indexOf(';');
-				if (sidx < 0) sidx = entry.length;
-				auto entrylang = entry[0 .. sidx];
-
-				foreach (lang; CTX.languages) {
-					if (entrylang == replace(lang, "_", "-")) return lang;
-					if (entrylang == split(lang, "_")[0]) return lang; // FIXME: ensure that only one single-lang entry exists!
-				}
-
-				if (cidx >= accept_lang.length) break;
-				accept_lang = accept_lang[cidx+1 .. $];
-			}
-
-			return null;
+			return determineLanguageByHeader(req, CTX.languages);
 		}
 	} else return null;
 }
@@ -567,7 +668,7 @@ msgstr[1] "%d files were created."
 		// Note that this is normally handled by mixing in an external file.
 		enum en_US_unittest2 = components;
 	}
-	
+
 	auto newTr(string msgid, string msgid_plural, int count, string msgcntxt = null) {
 		return tr!(TranslationContext, "en_US")(msgid, msgid_plural, count, msgcntxt);
 	}
@@ -706,4 +807,32 @@ body {
 unittest {
 	auto res = parse_plural_expression("Plural-Forms: nplurals=2; plural=n != 1;\n");
 	assert(res == "n != 1", "Failed to parse the plural expression for a language.");
+}
+
+private string dstringUnescape(in string str)
+{
+	string ret;
+	size_t i, start = 0;
+	for( i = 0; i < str.length; i++ )
+		if( str[i] == '\\' ){
+			if( i > start ){
+				if( start > 0 ) ret ~= str[start .. i];
+				else ret = str[0 .. i];
+			}
+			assert(i+1 < str.length, "The string ends with the escape char: " ~ str);
+			switch(str[i+1]){
+				default: ret ~= str[i+1]; break;
+				case 'r': ret ~= '\r'; break;
+				case 'n': ret ~= '\n'; break;
+				case 't': ret ~= '\t'; break;
+			}
+			i++;
+			start = i+1;
+		}
+
+	if( i > start ){
+		if( start == 0 ) return str;
+		else ret ~= str[start .. i];
+	}
+	return ret;
 }

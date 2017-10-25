@@ -7,7 +7,7 @@
 */
 module vibe.utils.array;
 
-import vibe.utils.memory;
+import vibe.internal.utilallocator;
 
 import std.algorithm;
 import std.range : isInputRange, isOutputRange;
@@ -45,11 +45,11 @@ struct AllocAppender(ArrayType : E[], E) {
 	private {
 		ElemType[] m_data;
 		ElemType[] m_remaining;
-		Allocator m_alloc;
+		IAllocator m_alloc;
 		bool m_allocatedBuffer = false;
 	}
 
-	this(Allocator alloc, ElemType[] initial_buffer = null)
+	this(IAllocator alloc, ElemType[] initial_buffer = null)
 	{
 		m_alloc = alloc;
 		m_data = initial_buffer;
@@ -63,7 +63,7 @@ struct AllocAppender(ArrayType : E[], E) {
 	void reset(AppenderResetMode reset_mode = AppenderResetMode.keepData)
 	{
 		if (reset_mode == AppenderResetMode.keepData) m_data = null;
-		else if (reset_mode == AppenderResetMode.freeData) { if (m_allocatedBuffer) m_alloc.free(m_data); m_data = null; }
+		else if (reset_mode == AppenderResetMode.freeData) { if (m_allocatedBuffer) m_alloc.deallocate(m_data); m_data = null; }
 		m_remaining = m_data;
 	}
 
@@ -75,10 +75,10 @@ struct AllocAppender(ArrayType : E[], E) {
 
 	*/
 	void reserve(size_t amount)
-	{
+	@trusted {
 		size_t nelems = m_data.length - m_remaining.length;
 		if (!m_data.length) {
-			m_data = cast(ElemType[])m_alloc.alloc(amount*E.sizeof);
+			m_data = cast(ElemType[])m_alloc.allocate(amount*E.sizeof);
 			m_remaining = m_data;
 			m_allocatedBuffer = true;
 		}
@@ -87,9 +87,12 @@ struct AllocAppender(ArrayType : E[], E) {
 				import std.digest.crc;
 				auto checksum = crc32Of(m_data[0 .. nelems]);
 			}
-			if (m_allocatedBuffer) m_data = cast(ElemType[])m_alloc.realloc(m_data, (nelems+amount)*E.sizeof);
-			else {
-				auto newdata = cast(ElemType[])m_alloc.alloc((nelems+amount)*E.sizeof);
+			if (m_allocatedBuffer) {
+				void[] vdata = m_data;
+				m_alloc.reallocate(vdata, (nelems+amount)*E.sizeof);
+				m_data = () @trusted { return cast(ElemType[])vdata; } ();
+			} else {
+				auto newdata = cast(ElemType[])m_alloc.allocate((nelems+amount)*E.sizeof);
 				newdata[0 .. nelems] = m_data[0 .. nelems];
 				m_data = newdata;
 				m_allocatedBuffer = true;
@@ -100,45 +103,49 @@ struct AllocAppender(ArrayType : E[], E) {
 	}
 
 	void put(E el)
-	{
+	@safe {
 		if( m_remaining.length == 0 ) grow(1);
 		m_remaining[0] = el;
 		m_remaining = m_remaining[1 .. $];
 	}
 
 	void put(ArrayType arr)
-	{
+	@safe {
 		if (m_remaining.length < arr.length) grow(arr.length);
 		m_remaining[0 .. arr.length] = arr[];
 		m_remaining = m_remaining[arr.length .. $];
 	}
 
 	static if( !hasAliasing!E ){
-		void put(in ElemType[] arr){
+		void put(in ElemType[] arr)
+			@trusted
+		{
 			put(cast(ArrayType)arr);
 		}
 	}
 
 	static if( is(ElemType == char) ){
 		void put(dchar el)
+			@safe
 		{
 			if( el < 128 ) put(cast(char)el);
 			else {
 				char[4] buf;
 				auto len = std.utf.encode(buf, el);
-				put(cast(ArrayType)buf[0 .. len]);
+				put(() @trusted { return cast(ArrayType)buf[0 .. len]; }());
 			}
 		}
 	}
 
 	static if( is(ElemType == wchar) ){
 		void put(dchar el)
+			@safe
 		{
 			if( el < 128 ) put(cast(wchar)el);
 			else {
 				wchar[3] buf;
 				auto len = std.utf.encode(buf, el);
-				put(cast(ArrayType)buf[0 .. len]);
+				put(() @trusted { return cast(ArrayType)buf[0 .. len]; } ());
 			}
 		}
 	}
@@ -152,7 +159,7 @@ struct AllocAppender(ArrayType : E[], E) {
 			slice as desired and then has to return the number of elements
 			that should be appended (counting from the start of the slice).
 		*/
-		void append(scope size_t delegate(scope ElemType[] dst) del)
+		void append(scope size_t delegate(scope ElemType[] dst) @safe del)
 		{
 			auto n = del(m_remaining);
 			assert(n <= m_remaining.length);
@@ -173,7 +180,7 @@ struct AllocAppender(ArrayType : E[], E) {
 }
 
 unittest {
-	auto a = AllocAppender!string(defaultAllocator());
+	auto a = AllocAppender!string(theAllocator());
 	a.put("Hello");
 	a.put(' ');
 	a.put("World");
@@ -184,7 +191,7 @@ unittest {
 
 unittest {
 	char[4] buf;
-	auto a = AllocAppender!string(defaultAllocator(), buf);
+	auto a = AllocAppender!string(theAllocator(), buf);
 	a.put("He");
 	assert(a.data == "He");
 	assert(a.data.ptr == buf.ptr);
@@ -198,33 +205,33 @@ unittest {
 
 unittest {
 	char[4] buf;
-	auto a = AllocAppender!string(defaultAllocator(), buf);
+	auto a = AllocAppender!string(theAllocator(), buf);
 	a.put("Hello");
 	assert(a.data == "Hello");
 	assert(a.data.ptr != buf.ptr);
 }
 
 unittest {
-	auto app = AllocAppender!(int[])(defaultAllocator);
+	auto app = AllocAppender!(int[])(theAllocator);
 	app.reserve(2);
 	app.append((scope mem) {
 		assert(mem.length >= 2);
 		mem[0] = 1;
 		mem[1] = 2;
-		return 2;
+		return size_t(2);
 	});
 	assert(app.data == [1, 2]);
 }
 
 unittest {
-	auto app = AllocAppender!string(defaultAllocator);
+	auto app = AllocAppender!string(theAllocator);
 	app.reserve(3);
 	app.append((scope mem) {
 		assert(mem.length >= 3);
 		mem[0] = 'f';
 		mem[1] = 'o';
 		mem[2] = 'o';
-		return 3;
+		return size_t(3);
 	});
 	assert(app.data == "foo");
 }
@@ -417,7 +424,7 @@ struct FixedRingBuffer(T, size_t N = 0, bool INITIALIZE = true) {
 		popFrontN(dst.length);
 	}
 
-	int opApply(scope int delegate(ref T itm) del)
+	int opApply(scope int delegate(ref T itm)  @safe del)
 	{
 		if( m_start+m_fill > m_buffer.length ){
 			foreach(i; m_start .. m_buffer.length)
@@ -435,7 +442,7 @@ struct FixedRingBuffer(T, size_t N = 0, bool INITIALIZE = true) {
 	}
 
 	/// iterate through elements with index
-	int opApply(scope int delegate(size_t i, ref T itm) del)
+	int opApply(scope int delegate(size_t i, ref T itm) @safe del)
 	{
 		if( m_start+m_fill > m_buffer.length ){
 			foreach(i; m_start .. m_buffer.length)
@@ -562,19 +569,81 @@ unittest {
 
 struct ArraySet(Key)
 {
+	import std.experimental.allocator : makeArray, expandArray, dispose;
+	import std.experimental.allocator.building_blocks.affix_allocator : AffixAllocator;
+
 	private {
+		static if (__VERSION__ < 2074) {
+			struct AW { // work around AffixAllocator limitations
+				IAllocator alloc;
+				alias alloc this;
+				enum alignment = max(Key.alignof, int.alignof);
+				void[] resolveInternalPointer(void* p) { void[] ret; alloc.resolveInternalPointer(p, ret); return ret; }
+			}
+			alias AllocatorType = AffixAllocator!(AW, int);
+		} else {
+			IAllocator AW(IAllocator a) { return a; }
+			alias AllocatorType = AffixAllocator!(IAllocator, int);
+		}
 		Key[4] m_staticEntries;
 		Key[] m_entries;
+		AllocatorType m_allocator;
+	}
+
+	~this()
+	@trusted {
+		static if (__VERSION__ <= 2071)
+			scope (failure) assert(false);
+		if (m_entries.ptr) {
+			if (--allocator.prefix(m_entries) <= 0) {
+				try allocator.dispose(m_entries);
+				catch (Exception e) assert(false, e.msg); // should never happen
+			}
+		}
+	}
+
+	this(this)
+	@trusted {
+		static if (__VERSION__ <= 2071)
+			scope (failure) assert(false);
+		if (m_entries.ptr) {
+			allocator.prefix(m_entries)++;
+		}
 	}
 
 	@property ArraySet dup()
 	{
-		return ArraySet(m_staticEntries, m_entries.dup);
+		static if (__VERSION__ <= 2071)
+			scope (failure) assert(false);
+		ArraySet ret;
+		ret.m_staticEntries = m_staticEntries;
+		ret.m_allocator = m_allocator;
+
+		if (m_entries.length) {
+			Key[] duped;
+			() @trusted {
+				try duped = allocator.makeArray!(Key)(m_entries.length);
+				catch (Exception e) assert(false, e.msg);
+				if (!duped.length)
+					assert(false, "Failed to allocate memory for duplicated "~ArraySet.stringof);
+				allocator.prefix(duped) = 1;
+			} ();
+			duped[] = m_entries[];
+			ret.m_entries = duped;
+		}
+
+		return ret;
+	}
+
+	void setAllocator(IAllocator allocator)
+	in { assert(m_entries.ptr is null, "Cannot set allocator after elements have been inserted."); }
+	body {
+		m_allocator = AllocatorType(AW(allocator));
 	}
 
 	bool opBinaryRight(string op)(Key key) if (op == "in") { return contains(key); }
 
-	int opApply(int delegate(ref Key) del)
+	int opApply(int delegate(ref Key) @safe del)
 	{
 		foreach (ref k; m_staticEntries)
 			if (k != Key.init)
@@ -597,17 +666,37 @@ struct ArraySet(Key)
 	void insert(Key key)
 	{
 		if (contains(key)) return;
+
 		foreach (ref k; m_staticEntries)
 			if (k == Key.init) {
 				k = key;
 				return;
 			}
+
 		foreach (ref k; m_entries)
 			if (k == Key.init) {
 				k = key;
 				return;
 			}
-		m_entries ~= key;
+
+		size_t oldlen = m_entries.length;
+
+		() @trusted {
+			try {
+				if (!oldlen) {
+					m_entries = allocator.makeArray!Key(64);
+					assert(m_entries.length, "Failed to allocate memory for "~ArraySet.stringof);
+					allocator.prefix(m_entries) = 1;
+				} else {
+					int oldrc = allocator.prefix(m_entries);
+					if (!allocator.expandArray(m_entries, max(64, oldlen * 3 / 4)))
+						assert(false, "Failed to allocate memory for "~ArraySet.stringof);
+					allocator.prefix(m_entries) = oldrc;
+				}
+			} catch (Exception e) assert(false, e.msg);
+		} ();
+
+		m_entries[oldlen] = key;
 	}
 
 	void remove(Key key)
@@ -615,4 +704,69 @@ struct ArraySet(Key)
 		foreach (ref k; m_staticEntries) if (k == key) { k = Key.init; return; }
 		foreach (ref k; m_entries) if (k == key) { k = Key.init; return; }
 	}
+
+	ref allocator()
+	nothrow @trusted {
+		try {
+			static if (__VERSION__ < 2074) auto palloc = m_allocator.parent;
+			else auto palloc = m_allocator._parent;
+			if (!palloc) {
+				assert(vibeThreadAllocator !is null, "No theAllocator set!?");
+				m_allocator = AllocatorType(AW(vibeThreadAllocator));
+			}
+		} catch (Exception e) assert(false, e.msg); // should never throw
+		return m_allocator;
+	}
+}
+
+@safe nothrow unittest {
+	import std.experimental.allocator : allocatorObject;
+	import std.experimental.allocator.mallocator : Mallocator;
+
+	ArraySet!int s;
+	s.setAllocator(() @trusted { return Mallocator.instance.allocatorObject; } ());
+
+	ArraySet!int t;
+	t = s;
+
+	s.insert(1);
+	s.insert(2);
+	s.insert(3);
+	s.insert(4);
+	assert(s.contains(1));
+	assert(s.contains(2));
+	assert(s.contains(3));
+	assert(s.contains(4));
+	assert(!t.contains(1));
+
+	s.insert(5);
+	assert(s.contains(5));
+
+	t = s;
+	assert(t.contains(5));
+	assert(t.contains(1));
+
+	s.insert(6);
+	assert(s.contains(6));
+	assert(t.contains(6));
+
+	s = ArraySet!int.init;
+	assert(!s.contains(1));
+	assert(t.contains(1));
+	assert(t.contains(6));
+
+	s = t.dup;
+	assert(s.contains(1));
+	assert(s.contains(6));
+
+	t.remove(1);
+	assert(!t.contains(1));
+	assert(s.contains(1));
+	assert(t.contains(2));
+	assert(t.contains(6));
+
+	t.remove(6);
+	assert(!t.contains(6));
+	assert(s.contains(6));
+	assert(t.contains(5));
 }

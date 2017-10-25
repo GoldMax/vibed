@@ -11,8 +11,6 @@
 */
 module vibe.core.stream;
 
-import vibe.utils.memory : FreeListRef;
-
 import core.time;
 import std.algorithm;
 import std.conv;
@@ -22,6 +20,39 @@ import std.conv;
 /* Public functions                                                                               */
 /**************************************************************************************************/
 
+/** Pipes an InputStream directly into this OutputStream.
+
+	The number of bytes written is either the whole input stream when `nbytes == 0`, or exactly
+	`nbytes` for `nbytes > 0`. If the input stream contains less than `nbytes` of data, an
+	exception is thrown.
+*/
+void pipe(IS : InputStream, OS : OutputStream)(IS source, OS sink, ulong nbytes = 0)
+@safe {
+	import vibe.internal.allocator : dispose, makeArray, theAllocator;
+
+	auto buffer = () @trusted { return theAllocator.makeArray!ubyte(64*1024); } ();
+	scope (exit) () @trusted { theAllocator.dispose(buffer); } ();
+
+	//logTrace("default write %d bytes, empty=%s", nbytes, stream.empty);
+	if (nbytes == 0 || nbytes == ulong.max) {
+		while (!source.empty) {
+			size_t chunk = min(source.leastSize, buffer.length);
+			assert(chunk > 0, "leastSize returned zero for non-empty stream.");
+			//logTrace("read pipe chunk %d", chunk);
+			source.read(buffer[0 .. chunk], IOMode.all);
+			sink.write(buffer[0 .. chunk], IOMode.all);
+		}
+	} else {
+		while (nbytes > 0) {
+			size_t chunk = min(nbytes, buffer.length);
+			//logTrace("read pipe chunk %d", chunk);
+			source.read(buffer[0 .. chunk], IOMode.all);
+			sink.write(buffer[0 .. chunk], IOMode.all);
+			nbytes -= chunk;
+		}
+	}
+}
+
 /**
 	Returns a `NullOutputStream` instance.
 
@@ -29,7 +60,7 @@ import std.conv;
 	all subsequent calls from the same thread.
 */
 NullOutputStream nullSink()
-{
+@safe {
 	static NullOutputStream ret;
 	if (!ret) ret = new NullOutputStream;
 	return ret;
@@ -39,21 +70,36 @@ NullOutputStream nullSink()
 /* Public types                                                                                   */
 /**************************************************************************************************/
 
+/** Controls the waiting behavior of read/write operations.
+
+	Note that this is currently ignored for all device streams. Use the "vibe-core" package if you
+	need this functionality.
+*/
+enum IOMode {
+	immediate, /// not supported
+	once,      /// not supported
+	all        /// Writes/reads the whole buffer
+}
+
 /**
 	Interface for all classes implementing readable streams.
 */
 interface InputStream {
+@safe:
+
 	/** Returns true $(I iff) the end of the input stream has been reached.
 	*/
 	@property bool empty();
 
-	/**	Returns the maximum number of bytes that are known to remain in this stream until the
-		end is reached. After leastSize() bytes have been read, the stream will either have
-		reached EOS and empty() returns true, or leastSize() returns again a number > 0.
+	/**	(Scheduled for deprecation) Returns the maximum number of bytes that are known to remain in this stream until the
+		end is reached.
+
+		After `leastSize()` bytes have been read, the stream will either have
+		reached EOS and `empty()` returns `true`, or `leastSize()` returns again a number `> 0`.
 	*/
 	@property ulong leastSize();
 
-	/** Queries if there is data available for immediate, non-blocking read.
+	/** (Scheduled for deprecation) Queries if there is data available for immediate, non-blocking read.
 	*/
 	@property bool dataAvailableForRead();
 
@@ -72,16 +118,24 @@ interface InputStream {
 
 		Throws: An exception if the operation reads past the end of the stream
 	*/
-	void read(ubyte[] dst);
+	size_t read(scope ubyte[] dst, IOMode);
+	/// ditto
+	final void read(scope ubyte[] dst) { read(dst, IOMode.all); }
 }
 
 /**
 	Interface for all classes implementing writeable streams.
 */
 interface OutputStream {
+@safe:
+
 	/** Writes an array of bytes to the stream.
 	*/
-	void write(in ubyte[] bytes);
+	size_t write(in ubyte[] bytes, IOMode mode);
+	/// ditto
+	final void write(in ubyte[] bytes) { write(bytes, IOMode.all); }
+	/// ditto
+	final void write(in char[] bytes) { write(cast(const(ubyte)[])bytes); }
 
 	/** Flushes the stream and makes sure that all data is being written to the output device.
 	*/
@@ -94,45 +148,16 @@ interface OutputStream {
 	*/
 	void finalize();
 
-	/** Writes an array of chars to the stream.
-	*/
-	final void write(in char[] bytes)
-	{
-		write(cast(const(ubyte)[])bytes);
-	}
-
 	/** Pipes an InputStream directly into this OutputStream.
 
 		The number of bytes written is either the whole input stream when nbytes == 0, or exactly
 		nbytes for nbytes > 0. If the input stream contains less than nbytes of data, an exception
 		is thrown.
 	*/
-	void write(InputStream stream, ulong nbytes = 0);
-
-	protected final void writeDefault(InputStream stream, ulong nbytes = 0)
+	deprecated("Use pipe(source, sink) instead.")
+	final void write(InputStream stream, ulong nbytes = 0)
 	{
-		static struct Buffer { ubyte[64*1024] bytes = void; }
-		auto bufferobj = FreeListRef!(Buffer, false)();
-		auto buffer = bufferobj.bytes[];
-
-		//logTrace("default write %d bytes, empty=%s", nbytes, stream.empty);
-		if( nbytes == 0 ){
-			while( !stream.empty ){
-				size_t chunk = min(stream.leastSize, buffer.length);
-				assert(chunk > 0, "leastSize returned zero for non-empty stream.");
-				//logTrace("read pipe chunk %d", chunk);
-				stream.read(buffer[0 .. chunk]);
-				write(buffer[0 .. chunk]);
-			}
-		} else {
-			while( nbytes > 0 ){
-				size_t chunk = min(nbytes, buffer.length);
-				//logTrace("read pipe chunk %d", chunk);
-				stream.read(buffer[0 .. chunk]);
-				write(buffer[0 .. chunk]);
-				nbytes -= chunk;
-			}
-		}
+		stream.pipe(this, nbytes);
 	}
 }
 
@@ -152,6 +177,8 @@ interface Stream : InputStream, OutputStream {
 	See_also: vibe.core.net.TCPConnection
 */
 interface ConnectionStream : Stream {
+@safe:
+
 	/** Determines The current connection status.
 
 		If connected is false, writing to the connection will trigger an
@@ -195,6 +222,8 @@ interface ConnectionStream : Stream {
 	Interface for all streams supporting random access.
 */
 interface RandomAccessStream : Stream {
+@safe:
+
 	/// Returns the total size of the file.
 	@property ulong size() const nothrow;
 
@@ -219,11 +248,27 @@ interface RandomAccessStream : Stream {
 	the output of a particular stream is not needed but the stream needs to be drained.
 */
 final class NullOutputStream : OutputStream {
-	void write(in ubyte[] bytes) {}
-	void write(InputStream stream, ulong nbytes = 0)
-	{
-		writeDefault(stream, nbytes);
-	}
+	size_t write(in ubyte[] bytes, IOMode) { return bytes.length; }
+	alias write = OutputStream.write;
 	void flush() {}
 	void finalize() {}
 }
+
+
+alias InputStreamProxy = InputStream;
+alias OutputStreamProxy = OutputStream;
+alias StreamProxy = Stream;
+alias ConnectionStreamProxy = ConnectionStream;
+alias RandomAccessStreamProxy = RandomAccessStream;
+
+enum isInputStream(T) = is(T : InputStream);
+enum isOutputStream(T) = is(T : OutputStream);
+enum isStream(T) = is(T : Stream);
+enum isConnectionStream(T) = is(T : ConnectionStream);
+enum isRandomAccessStream(T) = is(T : RandomAccessStream);
+
+mixin template validateInputStream(T) { static assert(isInputStream!T); }
+mixin template validateOutputStream(T) { static assert(isOutputStream!T); }
+mixin template validateStream(T) { static assert(isStream!T); }
+mixin template validateConnectionStream(T) { static assert(isConnectionStream!T); }
+mixin template validateRandomAccessStream(T) { static assert(isRandomAccessStream!T); }

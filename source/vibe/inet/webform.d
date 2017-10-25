@@ -9,6 +9,7 @@ module vibe.inet.webform;
 
 import vibe.core.file;
 import vibe.core.log;
+import vibe.core.path;
 import vibe.inet.message;
 import vibe.stream.operations;
 import vibe.textfilter.urlencode;
@@ -23,7 +24,7 @@ import std.string;
 
 
 /**
-	Parses form data according to an HTTP Content-Type header.
+	Parses form data according 	to an HTTP Content-Type header.
 
 	Writes the form fields into a key-value of type $(D FormFields), parsed from the
 	specified $(D InputStream) and using the corresponding Content-Type header. Parsing
@@ -38,7 +39,7 @@ import std.string;
 		max_line_length = The byte-sized maximum length of lines used as boundary delimitors in Multi-Part forms.
 */
 bool parseFormData(ref FormFields fields, ref FilePartFormFields files, string content_type, InputStream body_reader, size_t max_line_length)
-{
+@safe {
 	auto ct_entries = content_type.split(";");
 	if (!ct_entries.length) return false;
 
@@ -63,7 +64,7 @@ bool parseFormData(ref FormFields fields, ref FilePartFormFields files, string c
 	characters are considered as ' ' spaces.
 */
 void parseURLEncodedForm(string str, ref FormFields params)
-{
+@safe {
 	while (str.length > 0) {
 		// name part
 		auto idx = str.indexOf("=");
@@ -126,15 +127,16 @@ unittest
 		body_reader = A valid $(D InputSteram) data stream consumed by the parser.
 		max_line_length = The byte-sized maximum length of lines used as boundary delimitors in Multi-Part forms.
 */
-void parseMultiPartForm(ref FormFields fields, ref FilePartFormFields files,
+void parseMultiPartForm(InputStream)(ref FormFields fields, ref FilePartFormFields files,
 	string content_type, InputStream body_reader, size_t max_line_length)
+	if (isInputStream!InputStream)
 {
 	import std.algorithm : strip;
 
 	auto pos = content_type.indexOf("boundary=");
 	enforce(pos >= 0 , "no boundary for multipart form found");
 	auto boundary = content_type[pos+9 .. $].strip('"');
-	auto firstBoundary = cast(string)body_reader.readLine(max_line_length);
+	auto firstBoundary = () @trusted { return cast(string)body_reader.readLine(max_line_length); } ();
 	enforce(firstBoundary == "--" ~ boundary, "Invalid multipart form data!");
 
 	while (parseMultipartFormPart(body_reader, fields, files, cast(const(ubyte)[])("\r\n--" ~ boundary), max_line_length)) {}
@@ -143,13 +145,13 @@ void parseMultiPartForm(ref FormFields fields, ref FilePartFormFields files,
 alias FormFields = DictionaryList!(string, true, 16);
 alias FilePartFormFields = DictionaryList!(FilePart, true, 0);
 
-unittest
+@safe unittest
 {
 	import vibe.stream.memory;
 
 	auto content_type = "multipart/form-data; boundary=\"AaB03x\"";
 
-	auto input = new MemoryStream(cast(ubyte[])(
+	auto input = createMemoryStream(cast(ubyte[])(
 			"--AaB03x\r\n" ~
 			"Content-Disposition: form-data; name=\"submit-name\"\r\n" ~
 			"\r\n" ~
@@ -175,7 +177,7 @@ unittest { // issue #1220 - wrong handling of Content-Length
 
 	auto content_type = "multipart/form-data; boundary=\"AaB03x\"";
 
-	auto input = new MemoryStream(cast(ubyte[])(
+	auto input = createMemoryStream(cast(ubyte[])(
 			"--AaB03x\r\n" ~
 			"Content-Disposition: form-data; name=\"submit-name\"\r\n" ~
 			"\r\n" ~
@@ -202,6 +204,33 @@ unittest { // issue #1220 - wrong handling of Content-Length
 	assert(files["files"].filename == "file1.txt");
 }
 
+unittest { // use of unquoted strings in Content-Disposition
+	import vibe.stream.memory;
+
+	auto content_type = "multipart/form-data; boundary=\"AaB03x\"";
+
+	auto input = createMemoryStream(cast(ubyte[])(
+			"--AaB03x\r\n" ~
+			"Content-Disposition: form-data; name=submitname\r\n" ~
+			"\r\n" ~
+			"Larry\r\n" ~
+			"--AaB03x\r\n" ~
+			"Content-Disposition: form-data; name=files; filename=file1.txt\r\n" ~
+			"Content-Type: text/plain\r\n" ~
+			"Content-Length: 29\r\n" ~
+			"\r\n" ~
+			"... contents of file1.txt ...\r\n" ~
+			"--AaB03x--\r\n").dup, false);
+
+	FormFields fields;
+	FilePartFormFields files;
+
+	parseMultiPartForm(fields, files, content_type, input, 4096);
+
+	assert(fields["submitname"] == "Larry");
+	assert(files["files"].filename == "file1.txt");
+}
+
 /**
 	Single part of a multipart form.
 
@@ -210,43 +239,75 @@ unittest { // issue #1220 - wrong handling of Content-Length
 */
 struct FilePart {
 	InetHeaderMap headers;
-	PathEntry filename;
-	Path tempPath;
+	NativePath.Segment filename;
+	NativePath tempPath;
 }
 
 
-private bool parseMultipartFormPart(InputStream stream, ref FormFields form, ref FilePartFormFields files, const(ubyte)[] boundary, size_t max_line_length)
+private bool parseMultipartFormPart(InputStream)(InputStream stream, ref FormFields form, ref FilePartFormFields files, const(ubyte)[] boundary, size_t max_line_length)
+	if (isInputStream!InputStream)
 {
+	//find end of quoted string
+	auto indexOfQuote(string str) {
+		foreach (i, ch; str) {
+			if (ch == '"' && (i == 0 || str[i-1] != '\\')) return i;
+		}
+		return -1;
+	}
+
+	auto parseValue(ref string str) {
+		string res;
+		if (str[0]=='"') {
+			str = str[1..$];
+			auto pos = indexOfQuote(str);
+			res = str[0..pos].replace(`\"`, `"`);
+			str = str[pos..$];
+		}
+		else {
+			auto pos = str.indexOf(';');
+			if (pos < 0) {
+				res = str;
+				str = "";
+			} else {
+				res = str[0 .. pos];
+				str = str[pos..$];
+			}
+		}
+
+		return res;
+	}
+
 	InetHeaderMap headers;
 	stream.parseRFC5322Header(headers);
 	auto pv = "Content-Disposition" in headers;
 	enforce(pv, "invalid multipart");
 	auto cd = *pv;
 	string name;
-	auto pos = cd.indexOf("name=\"");
+	auto pos = cd.indexOf("name=");
 	if (pos >= 0) {
-		cd = cd[pos+6 .. $];
-		pos = cd.indexOf("\"");
-		name = cd[0 .. pos];
+		cd = cd[pos+5 .. $];
+		name = parseValue(cd);
 	}
 	string filename;
-	pos = cd.indexOf("filename=\"");
+	pos = cd.indexOf("filename=");
 	if (pos >= 0) {
-		cd = cd[pos+10 .. $];
-		pos = cd.indexOf("\"");
-		filename = cd[0 .. pos];
+		cd = cd[pos+9 .. $];
+		filename = parseValue(cd);
 	}
 
 	if (filename.length > 0) {
 		FilePart fp;
 		fp.headers = headers;
-		fp.filename = PathEntry.validateFilename(filename);
+		version (Have_vibe_core)
+			fp.filename = NativePath.Segment(filename);
+		else
+			fp.filename = PathEntry.validateFilename(filename);
 
 		auto file = createTempFile();
 		fp.tempPath = file.path;
 		if (auto plen = "Content-Length" in headers) {
 			import std.conv : to;
-			file.write(stream, (*plen).to!long);
+			stream.pipe(file, (*plen).to!long);
 			enforce(stream.skipBytes(boundary), "Missing multi-part end boundary marker.");
 		} else stream.readUntil(file, boundary);
 		logDebug("file: %s", fp.tempPath.toString());
@@ -256,18 +317,18 @@ private bool parseMultipartFormPart(InputStream stream, ref FormFields form, ref
 
 		// TODO: temp files must be deleted after the request has been processed!
 	} else {
-		auto data = cast(string)stream.readUntil(boundary);
+		auto data = () @trusted { return cast(string)stream.readUntil(boundary); } ();
 		form.addField(name, data);
 	}
-	
+
 	ubyte[2] ub;
-	stream.read(ub);
+	stream.read(ub, IOMode.all);
 	if (ub == "--")
 	{
-		nullSink().write(stream);
+		stream.pipe(nullSink());
 		return false;
 	}
-	enforce(ub == cast(ubyte[])"\r\n");
+	enforce(ub == cast(const(ubyte)[])"\r\n");
 	return true;
 }
 
@@ -282,8 +343,8 @@ private bool parseMultipartFormPart(InputStream stream, ref FormFields form, ref
 		map	= An iterable key-value map iterable with $(D foreach(string key, string value; map)).
 		sep	= A valid form separator, common values are '&' or ';'
 */
-void formEncode(R, T)(ref R dst, T map, char sep = '&')
-	if (isFormMap!T)
+void formEncode(R, T)(auto ref R dst, T map, char sep = '&')
+	if (isFormMap!T && isOutputRange!(R, char))
 {
 	formEncodeImpl(dst, map, sep, true);
 }
@@ -327,8 +388,8 @@ string formEncode(T)(T map, char sep = '&')
 		dst	= The destination $(D OutputRange) where the resulting string must be written to.
 		map	= An iterable key-value map iterable with $(D foreach(string key, string value; map)).
 */
-void urlEncode(R, T)(ref R dst, T map)
-	if (isFormMap!T)
+void urlEncode(R, T)(auto ref R dst, T map)
+	if (isFormMap!T && isOutputRange!(R, char))
 {
 	formEncodeImpl(dst, map, "&", false);
 }
@@ -431,7 +492,7 @@ private string formEncodeImpl(T)(T map, char sep, bool form_encode)
 	return dst.data;
 }
 
-private void formEncodeImpl(R, T)(ref R dst, T map, char sep, bool form_encode)
+private void formEncodeImpl(R, T)(auto ref R dst, T map, char sep, bool form_encode)
 	if (isOutputRange!(R, string) && isStringMap!T)
 {
 	bool flag;
@@ -447,7 +508,7 @@ private void formEncodeImpl(R, T)(ref R dst, T map, char sep, bool form_encode)
 	}
 }
 
-private void formEncodeImpl(R, T)(ref R dst, T map, char sep, bool form_encode)
+private void formEncodeImpl(R, T)(auto ref R dst, T map, char sep, bool form_encode)
 	if (isOutputRange!(R, string) && isJsonLike!T)
 {
 	bool flag;

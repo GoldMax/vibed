@@ -83,23 +83,23 @@ struct MongoCursor(Q = Bson, R = Bson, S = Bson) {
 	*/
 	MongoCursor sort(T)(T order)
 	{
-		m_data.sort(serializeToBson(order));
+		m_data.sort(() @trusted { return serializeToBson(order); } ());
 		return this;
 	}
 
 	///
-	unittest {
+	@safe unittest {
 		import vibe.core.log;
 		import vibe.db.mongo.mongo;
 
 		void test()
-		{
+		@safe {
 			auto db = connectMongoDB("127.0.0.1").getDatabase("test");
 			auto coll = db["testcoll"];
 
 			// find all entries in reverse date order
 			foreach (entry; coll.find().sort(["date": -1]))
-				logInfo("Entry: %s", entry);
+				() @safe { logInfo("Entry: %s", entry); } ();
 
 			// the same, but using a struct to avoid memory allocations
 			static struct Order { int date; }
@@ -149,6 +149,29 @@ struct MongoCursor(Q = Bson, R = Bson, S = Bson) {
 		return this;
 	}
 
+	@safe unittest {
+		import vibe.core.log;
+		import vibe.db.mongo.mongo;
+
+		void test()
+		@safe {
+			auto db = connectMongoDB("127.0.0.1").getDatabase("test");
+			auto coll = db["testcoll"];
+
+			try { coll.drop(); } catch (Exception) {}
+
+			for (int i = 0; i < 10000; i++)
+				coll.insert(["i": i]);
+
+			static struct Order { int i; }
+			auto data = coll.find().sort(Order(1)).skip(2000).limit(2000).array;
+
+			assert(data.length == 2000);
+			assert(data[0]["i"].get!int == 2000);
+			assert(data[$ - 1]["i"].get!int == 3999);
+		}
+	}
+
 	/**
 		Advances the cursor to the next document of the response.
 
@@ -164,39 +187,16 @@ struct MongoCursor(Q = Bson, R = Bson, S = Bson) {
 
 		Throws: An exception if there is a query or communication error.
 	*/
-	int opApply(int delegate(ref R doc) del)
+	auto byPair()
 	{
-		if (!m_data) return 0;
-
-		while (!m_data.empty) {
-			auto doc = m_data.front;
-			m_data.popFront();
-			if (auto ret = del(doc))
-				return ret;
+		import std.typecons : Tuple, tuple;
+		static struct Rng {
+			private MongoCursorData!(Q, R, S) data;
+			@property bool empty() { return data.empty; }
+			@property Tuple!(size_t, R) front() { return tuple(data.index, data.front); }
+			void popFront() { data.popFront(); }
 		}
-		return 0;
-	}
-
-	/**
-		Iterates over all remaining documents.
-
-		Note that iteration is one-way - elements that have already been visited
-		will not be visited again if another iteration is done.
-
-		Throws: An exception if there is a query or communication error.
-	*/
-	int opApply(int delegate(ref size_t idx, ref R doc) del)
-	{
-		if (!m_data) return 0;
-
-		while (!m_data.empty) {
-			auto idx = m_data.index;
-			auto doc = m_data.front;
-			m_data.popFront();
-			if (auto ret = del(idx, doc))
-				return ret;
-		}
-		return 0;
+		return Rng(m_data);
 	}
 }
 
@@ -236,9 +236,9 @@ private class MongoCursorData(Q, R, S) {
 	}
 
 	@property bool empty()
-	{
+	@safe {
 		if (!m_iterationStarted) startIterating();
-		if (m_limit > 0 && m_currentDoc >= m_limit) {
+		if (m_limit > 0 && index >= m_limit) {
 			destroy();
 			return true;
 		}
@@ -253,24 +253,25 @@ private class MongoCursorData(Q, R, S) {
 	}
 
 	@property size_t index()
-	{
+	@safe {
 		return m_offset + m_currentDoc;
 	}
 
 	@property R front()
-	{
+	@safe {
 		if (!m_iterationStarted) startIterating();
 		assert(!empty(), "Cursor has no more data.");
 		return m_documents[m_currentDoc];
 	}
 
 	void sort(Bson order)
-	{
+	@safe {
 		assert(!m_iterationStarted, "Cursor cannot be modified after beginning iteration");
 		m_sort = order;
 	}
 
-	void limit(size_t count) {
+	void limit(size_t count)
+	@safe {
 		// A limit() value of 0 (e.g. “.limit(0)”) is equivalent to setting no limit.
 		if (count > 0) {
 			if (m_nret == 0 || m_nret > count)
@@ -281,31 +282,33 @@ private class MongoCursorData(Q, R, S) {
 		}
 	}
 
-	void skip(int count) {
+	void skip(int count)
+	@safe {
 		// A skip() value of 0 (e.g. “.skip(0)”) is equivalent to setting no skip.
 		m_nskip = max(m_nskip, count);
 	}
 
 	void popFront()
-	{
+	@safe {
 		if (!m_iterationStarted) startIterating();
 		assert(!empty(), "Cursor has no more data.");
 		m_currentDoc++;
 	}
 
-	private void startIterating() {
+	private void startIterating()
+	@safe {
 		auto conn = m_client.lockConnection();
 
 		ubyte[256] selector_buf = void;
 		ubyte[256] query_buf = void;
 
-		Bson selector = serializeToBson(m_returnFieldSelector, selector_buf);
+		Bson selector = () @trusted { return serializeToBson(m_returnFieldSelector, selector_buf); } ();
 
 		Bson query;
 		static if (is(Q == Bson)) {
 			query = m_query;
 		} else {
-			query = serializeToBson(m_query, query_buf);
+			query = () @trusted { return serializeToBson(m_query, query_buf); } ();
 		}
 
 		Bson full_query;
@@ -326,10 +329,10 @@ private class MongoCursorData(Q, R, S) {
 	}
 
 	private void destroy()
-	{
+	@safe {
 		if (m_cursor == 0) return;
 		auto conn = m_client.lockConnection();
-		conn.killCursors((&m_cursor)[0 .. 1]);
+		conn.killCursors(() @trusted { return (&m_cursor)[0 .. 1]; } ());
 		m_cursor = 0;
 	}
 
@@ -337,7 +340,7 @@ private class MongoCursorData(Q, R, S) {
 	{
 		// FIXME: use MongoDB exceptions
 		enforce(!(flags & ReplyFlags.CursorNotFound), "Invalid cursor handle.");
-		enforce(!(flags & ReplyFlags.QueryFailure), "Query failed.");
+		enforce(!(flags & ReplyFlags.QueryFailure), "Query failed. Does the database exist?");
 
 		m_cursor = cursor;
 		m_offset = first_doc;

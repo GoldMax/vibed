@@ -10,13 +10,8 @@ module vibe.core.drivers.utils;
 import std.exception;
 
 version (Windows) {
-	static if (__VERSION__ >= 2070) {
-		import core.sys.windows.windows;
-		import core.sys.windows.winsock2;
-	} else {
-		import std.c.windows.windows;
-		import std.c.windows.winsock;
-	}
+	import core.sys.windows.windows;
+	import core.sys.windows.winsock2;
 
 	alias EWOULDBLOCK = WSAEWOULDBLOCK;
 
@@ -49,12 +44,13 @@ version (Windows) {
 } else alias SystemSocketException = ErrnoException;
 
 version (linux) {
+	import core.sys.posix.sys.socket;
 	static if (!is(typeof(SO_REUSEPORT))) {
 		enum { SO_REUSEPORT = 15 }
 	}
 }
 
 T socketEnforce(T)(T value, lazy string msg = null, string file = __FILE__, size_t line = __LINE__)
-{
+@trusted {
 	return enforceEx!SystemSocketException(value, msg, file, line);
 }

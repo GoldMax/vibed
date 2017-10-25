@@ -19,12 +19,12 @@ import std.process;
 
 
 /**
-	Listens for HTTP connections on the spefified load balancer using the given HTTP server settings.
+	Listens for HTTP connections on the specified load balancer using the given HTTP server settings.
 
-	This function is usable as direct replacement of
+	This function is usable as direct replacement of listenHTTP
 */
 void listenHTTPDist(HTTPServerSettings settings, HTTPServerRequestDelegate handler, string balancer_address, ushort balancer_port = 11000)
-{
+@safe {
 	Json regmsg = Json.emptyObject;
 	regmsg["host_name"] = settings.hostName;
 	regmsg["port"] = settings.port;

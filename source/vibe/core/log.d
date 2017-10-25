@@ -317,8 +317,6 @@ final class FileLogger : Logger {
 	}
 }
 
-import vibe.textfilter.html; // http://d.puremagic.com/issues/show_bug.cgi?id=7016
-
 /**
 	Logger implementation for logging to an HTML file with dynamic filtering support.
 */
@@ -485,6 +483,19 @@ final class HTMLLogger : Logger {
 </html>`);
 		m_logFile.flush();
 	}
+
+	private static void filterHTMLEscape(R, S)(ref R dst, S str)
+	{
+		for (;!str.empty;str.popFront()) {
+			auto ch = str.front;
+			switch (ch) {
+				default: dst.put(ch); break;
+				case '<': dst.put("&lt;"); break;
+				case '>': dst.put("&gt;"); break;
+				case '&': dst.put("&amp;"); break;
+			}
+		}
+	}
 }
 
 import std.conv;
@@ -613,11 +624,11 @@ final class SyslogLogger : Logger {
 
 		auto text = msg.text;
 		import std.format : formattedWrite;
-		import vibe.stream.wrapper : StreamOutputRange;
-		auto str = StreamOutputRange(m_ostream);
+		auto str = appender!string(); // FIXME: avoid GC allocation
 		(&str).formattedWrite(SYSLOG_MESSAGE_FORMAT_VERSION1, priVal,
 			timestamp, m_hostName, BOM ~ m_appName, procId, msgId,
 			structuredData, BOM);
+		m_ostream.write(str.data);
 	}
 
 	override void put(scope const(char)[] text)
@@ -675,6 +686,7 @@ private string hostName()
 
 	version (Posix) {
 		import core.sys.posix.sys.utsname;
+		import core.sys.posix.unistd : gethostname;
 		utsname name;
 		if (uname(&name)) return hostName;
 		hostName = name.nodename.to!string();
@@ -683,8 +695,33 @@ private string hostName()
 		auto ih = new InternetHost;
 		if (!ih.getHostByName(hostName)) return hostName;
 		hostName = ih.name;
+
+		if (!hostName.length) {
+			char[256] buf;
+			if (gethostname(buf.ptr, cast(int) buf.length) == 0) {
+				ubyte len;
+				for (; len < buf.length && buf[len] != 0; len++) {}
+				hostName = buf[0 .. len].idup;
+			}
+		}
+	} else version (Windows) {
+		import core.sys.windows.winbase;
+		import core.sys.windows.winsock2 : gethostname;
+		wchar[512] buf;
+		uint size = cast(uint) buf.length;
+		if (GetComputerNameExW(COMPUTER_NAME_FORMAT.ComputerNamePhysicalDnsFullyQualified, buf.ptr, &size)) {
+			hostName = buf[0 .. size].to!string();
+		}
+
+		if (!hostName.length) {
+			char[256] name;
+			if (gethostname(name.ptr, cast(int) name.length) == 0) {
+				ubyte len;
+				for (; len < name.length && name[len] != 0; len++) {}
+				hostName = name[0 .. len].idup;
+			}
+		}
 	}
-	// TODO: determine proper host name on windows
 
 	return hostName;
 }
@@ -794,7 +831,7 @@ private struct LogOutputRange {
 	void put(dchar ch)
 	{
 		static import std.utf;
-		
+
 		if (ch < 128) put(cast(char)ch);
 		else {
 			char[4] buf;

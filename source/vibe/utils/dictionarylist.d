@@ -31,18 +31,29 @@ struct DictionaryList(VALUE, bool case_sensitive = true, size_t NUM_STATIC_FIELD
 	import std.typecons : Tuple;
 
 	private {
+		alias KeyValue = Tuple!(string, "key", ValueType, "value");
+
 		static struct Field {
 			static if (USE_HASHSUM) uint keyCheckSum;
 			else {
 				enum keyCheckSum = 0;
 				this(uint, string key, VALUE value) { this.key = key; this.value = value; }
 			}
-			string key;
-			VALUE value;
+			KeyValue tuple;
+			@property ref inout(string) key() inout { return tuple.key; }
+			@property ref inout(VALUE) value() inout { return tuple.value; }
 		}
 		Field[NUM_STATIC_FIELDS] m_fields;
 		size_t m_fieldCount = 0;
 		Field[] m_extendedFields;
+
+		enum bool safeValueCopy = __traits(compiles, (VALUE v) @safe { VALUE vc; vc = v; });
+		template typedGet(T) {
+			enum typedGet = __traits(compiles, (VALUE v) { return v.get!T; });
+		}
+		template canAssign(T) {
+			enum canAssign = __traits(compiles, (T t) { VALUE v = t; });
+		}
 	}
 
 	alias ValueType = VALUE;
@@ -65,6 +76,39 @@ struct DictionaryList(VALUE, bool case_sensitive = true, size_t NUM_STATIC_FIELD
 		FieldTuple[] ret;
 		foreach (k, ref v; this) ret ~= FieldTuple(k, v);
 		return ret;
+	}
+
+	/** Generates an associative-array equivalent string representation of the dictionary.
+	*/
+	void toString(scope void delegate(const(char)[] str) @safe sink)
+	const {
+		sink("[");
+		bool first = true;
+
+		foreach (k, v; this.byKeyValue) {
+			if (!first) sink(", ");
+			else first = false;
+			() @trusted {
+				import std.format : formattedWrite;
+				string[] ka = (&k)[0 .. 1];
+				ValueType[] va = (&v)[0 .. 1];
+				sink.formattedWrite("%(%s%): %(%s%)", ka, va);
+			} ();
+		}
+		sink("]");
+	}
+	/// ditto
+	void toString(scope void delegate(const(char)[] str) @system sink)
+	const {
+		toString(cast(void delegate(const(char)[]) @safe)sink);
+	}
+	/// ditto
+	string toString()
+	const {
+		import std.array : appender;
+		auto ret = appender!string();
+		toString((s) { ret.put(s); });
+		return ret.data;
 	}
 
 	/** Removes the first field that matches the given key.
@@ -121,6 +165,13 @@ struct DictionaryList(VALUE, bool case_sensitive = true, size_t NUM_STATIC_FIELD
 		else m_extendedFields ~= Field(keysum, key, value);
 	}
 
+	void addField(T)(string key, T value)
+	if (canAssign!T)
+	{
+		ValueType convertedValue = value;
+		addField(key, convertedValue);
+	}
+
 	/** Returns the first field that matches the given key.
 
 		If no field is found, def_val is returned.
@@ -131,19 +182,35 @@ struct DictionaryList(VALUE, bool case_sensitive = true, size_t NUM_STATIC_FIELD
 		return def_val;
 	}
 
+	// DMD bug: cannot set T.init as default value for def_val parameter,
+	// because compilation fails with message:
+	//      Error: undefined identifier 'T'
+	/// ditto
+	inout(T) get(T)(string key, lazy inout(T) def_val)
+	inout if (typedGet!T) {
+		if (auto pv = key in this) return (*pv).get!T;
+		return def_val;
+	}
+
+	/// ditto
+	inout(T) get(T)(string key) // Work around DMD bug
+	inout if (typedGet!T) {
+		return get!T(key, T.init);
+	}
+
 	/** Returns all values matching the given key.
 
 		Note that the version returning an array will allocate for each call.
 	*/
 	const(ValueType)[] getAll(string key)
-	const {
+	const @trusted { // appender
 		import std.array;
 		auto ret = appender!(const(ValueType)[])();
-		getAll(key, (v) { ret.put(v); });
+		getAll(key, (v) @trusted { ret.put(v); });
 		return ret.data;
 	}
 	/// ditto
-	void getAll(string key, scope void delegate(const(ValueType)) del)
+	void getAll(string key, scope void delegate(const(ValueType)) @safe del)
 	const {
 		static if (USE_HASHSUM) uint keysum = computeCheckSumI(key);
 		else enum keysum = 0;
@@ -181,6 +248,14 @@ struct DictionaryList(VALUE, bool case_sensitive = true, size_t NUM_STATIC_FIELD
 		return val;
 	}
 
+	/// ditto
+	ValueType opIndexAssign(T)(T val, string key)
+	if (canAssign!T)
+	{
+		ValueType convertedVal = val;
+		return opIndexAssign(convertedVal, key);
+	}
+
 	/** Returns a pointer to the first field that matches the given key.
 	*/
 	inout(ValueType)* opBinaryRight(string op)(string key) inout if(op == "in")
@@ -188,9 +263,9 @@ struct DictionaryList(VALUE, bool case_sensitive = true, size_t NUM_STATIC_FIELD
 		static if (USE_HASHSUM) uint keysum = computeCheckSumI(key);
 		else enum keysum = 0;
 		auto idx = getIndex(m_fields[0 .. m_fieldCount], key, keysum);
-		if( idx >= 0 ) return &m_fields[idx].value;
+		if (idx >= 0) return &m_fields[idx].tuple[1];
 		idx = getIndex(m_extendedFields, key, keysum);
-		if( idx >= 0 ) return &m_extendedFields[idx].value;
+		if (idx >= 0) return &m_extendedFields[idx].tuple[1];
 		return null;
 	}
 	/// ditto
@@ -200,36 +275,17 @@ struct DictionaryList(VALUE, bool case_sensitive = true, size_t NUM_STATIC_FIELD
 
 	/** Iterates over all fields, including duplicates.
 	*/
-	int opApply(scope int delegate(string key, ref ValueType val) del)
-	{
-		foreach (ref kv; m_fields[0 .. m_fieldCount]) {
-			if (auto ret = del(kv.key, kv.value))
-				return ret;
-		}
-		foreach (ref kv; m_extendedFields) {
-			if (auto ret = del(kv.key, kv.value))
-				return ret;
-		}
-		return 0;
-	}
-
+	auto byKeyValue() {return Rng!false(&this, 0); }
 	/// ditto
-	int opApply(scope int delegate(ref ValueType val) del)
-	{
-		return this.opApply((string key, ref ValueType val) { return del(val); });
-	}
-
+	auto byKeyValue() const { return Rng!true(&this, 0); }
 	/// ditto
-	int opApply(scope int delegate(string key, ref const(ValueType) val) del) const
-	{
-		return (cast() this).opApply(cast(int delegate(string, ref ValueType)) del);
-	}
-
+	auto byKey() inout { import std.algorithm.iteration : map; return byKeyValue().map!(p => p[0]); }
 	/// ditto
-	int opApply(scope int delegate(ref const(ValueType) val) del) const
-	{
-		return (cast() this).opApply(cast(int delegate(ref ValueType)) del);
-	}
+	auto byValue() inout { import std.algorithm.iteration : map; return byKeyValue().map!(p => p[1]); }
+
+	/// Deprecated in favor of `.byKeyValue` - enables foreach iteration over a `DictionaryList` with two loop variables.
+	deprecated("Iterate over .byKeyValue instead.")
+	alias byKeyValue this;
 
 	static if (is(typeof({ const(ValueType) v; ValueType w; w = v; }))) {
 		/** Duplicates the header map.
@@ -272,9 +328,31 @@ struct DictionaryList(VALUE, bool case_sensitive = true, size_t NUM_STATIC_FIELD
 		}
 		return csum;
 	}
+
+	private static struct Rng(bool CONST) {
+	@safe nothrow @nogc:
+		static if (CONST) {
+			alias KVT = const(KeyValue);
+			const(DictionaryList)* list;
+		} else {
+			alias KVT = KeyValue;
+			DictionaryList* list;
+		}
+		size_t idx;
+
+		@property bool empty() const { return idx >= list.length; }
+		@property ref KVT front() {
+			if (idx < list.m_fieldCount)
+				return list.m_fields[idx].tuple;
+			return list.m_extendedFields[idx - list.m_fieldCount].tuple;
+		}
+		void popFront() { idx++; }
+	}
 }
 
-unittest {
+static assert(DictionaryList!(string, true, 2).safeValueCopy);
+
+@safe unittest {
 	DictionaryList!(int, true) a;
 	a.addField("a", 1);
 	a.addField("a", 2);
@@ -296,4 +374,26 @@ unittest {
 	b.addField("A", 2);
 	assert(b["A"] == 1);
 	assert(b.getAll("a") == [1, 2]);
+}
+
+unittest {
+	import std.variant : Variant;
+	DictionaryList!(Variant) c;
+	c["a"] = true;
+	c["b"] = "Hello";
+	assert(c.get("a").type == typeid(bool));
+	assert(c.get!string("b") == "Hello");
+	assert(c.get!int("c") == int.init);
+	c.addField("d", 9);
+	c.addField("d", "bar");
+	assert(c.getAll("d") == [ cast(Variant) 9, cast(Variant) "bar" ]);
+}
+
+@safe unittest {
+	import std.conv : text;
+	DictionaryList!int l;
+	l["foo"] = 42;
+	l["bar"] = 43;
+	assert(text(l) == `["foo": 42, "bar": 43]`, text(l));
+	assert(l.toString() == `["foo": 42, "bar": 43]`, l.toString());
 }

@@ -46,7 +46,7 @@ struct Task {
 		auto fiber = () @trusted { return Fiber.getThis(); } ();
 		if (!fiber) return Task.init;
 		auto tfiber = cast(TaskFiber)fiber;
-		assert(tfiber !is null, "Invalid or null fiber used to construct Task handle.");
+		if (!tfiber) return Task.init;
 		if (!tfiber.m_running) return Task.init;
 		return () @trusted { return Task(tfiber, tfiber.m_taskCounter); } ();
 	}
@@ -75,11 +75,11 @@ struct Task {
 
 	T opCast(T)() const nothrow if (is(T == bool)) { return m_fiber !is null; }
 
-	void join() { if (running) fiber.join(); }
+	void join() @safe { if (running) fiber.join(); }
 	void interrupt() { if (running) fiber.interrupt(); }
 	void terminate() { if (running) fiber.terminate(); }
 
-	string toString() const { import std.string; return format("%s:%s", cast(void*)m_fiber, m_taskCounter); }
+	string toString() const @safe { import std.string; return format("%s:%s", () @trusted { return cast(void*)m_fiber; } (), m_taskCounter); }
 
 	bool opEquals(in ref Task other) const nothrow @safe { return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter; }
 	bool opEquals(in Task other) const nothrow @safe { return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter; }
@@ -128,7 +128,7 @@ class TaskFiber : Fiber {
 
 	/** Blocks until the task has ended.
 	*/
-	abstract void join();
+	abstract void join() @safe;
 
 	/** Throws an InterruptExeption within the task as soon as it calls a blocking function.
 	*/

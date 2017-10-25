@@ -9,16 +9,20 @@ module vibe.http.fileserver;
 
 import vibe.core.file;
 import vibe.core.log;
+import vibe.core.stream : RandomAccessStream, pipe;
 import vibe.http.server;
 import vibe.inet.message;
 import vibe.inet.mimetypes;
 import vibe.inet.url;
+import vibe.internal.interfaceproxy;
 
 import std.conv;
 import std.datetime;
 import std.digest.md;
 import std.string;
 import std.algorithm;
+
+@safe:
 
 
 /**
@@ -37,13 +41,14 @@ import std.algorithm;
 
 	See_Also: `serveStaticFile`, `sendFile`
 */
-HTTPServerRequestDelegateS serveStaticFiles(Path local_path, HTTPFileServerSettings settings = null)
+HTTPServerRequestDelegateS serveStaticFiles(NativePath local_path, HTTPFileServerSettings settings = null)
 {
+	import std.range.primitives : front;
 	if (!settings) settings = new HTTPFileServerSettings;
 	if (!settings.serverPathPrefix.endsWith("/")) settings.serverPathPrefix ~= "/";
 
 	void callback(scope HTTPServerRequest req, scope HTTPServerResponse res)
-	{
+	@safe {
 		string srv_path;
 		if (auto pp = "pathMatch" in req.params) srv_path = *pp;
 		else if (req.path.length > 0) srv_path = req.path;
@@ -55,7 +60,7 @@ HTTPServerRequestDelegateS serveStaticFiles(Path local_path, HTTPFileServerSetti
 		}
 
 		auto rel_path = srv_path[settings.serverPathPrefix.length .. $];
-		auto rpath = Path(rel_path);
+		auto rpath = PosixPath(rel_path);
 		logTrace("Processing '%s'", srv_path);
 
 		rpath.normalize();
@@ -63,7 +68,7 @@ HTTPServerRequestDelegateS serveStaticFiles(Path local_path, HTTPFileServerSetti
 		if (rpath.absolute) {
 			logDebug("Path is absolute, not responding");
 			return;
-		} else if (!rpath.empty && rpath[0] == "..")
+		} else if (!rpath.empty && rpath.bySegment.front.name == "..")
 			return; // don't respond to relative paths outside of the root path
 
 		sendFileImpl(req, res, local_path ~ rpath, settings);
@@ -74,7 +79,7 @@ HTTPServerRequestDelegateS serveStaticFiles(Path local_path, HTTPFileServerSetti
 /// ditto
 HTTPServerRequestDelegateS serveStaticFiles(string local_path, HTTPFileServerSettings settings = null)
 {
-	return serveStaticFiles(Path(local_path), settings);
+	return serveStaticFiles(NativePath(local_path), settings);
 }
 
 ///
@@ -134,7 +139,7 @@ unittest {
 
 	See_Also: `serveStaticFiles`, `sendFile`
 */
-HTTPServerRequestDelegateS serveStaticFile(Path local_path, HTTPFileServerSettings settings = null)
+HTTPServerRequestDelegateS serveStaticFile(NativePath local_path, HTTPFileServerSettings settings = null)
 {
 	if (!settings) settings = new HTTPFileServerSettings;
 	assert(settings.serverPathPrefix == "/", "serverPathPrefix is not supported for single file serving.");
@@ -149,7 +154,7 @@ HTTPServerRequestDelegateS serveStaticFile(Path local_path, HTTPFileServerSettin
 /// ditto
 HTTPServerRequestDelegateS serveStaticFile(string local_path, HTTPFileServerSettings settings = null)
 {
-	return serveStaticFile(Path(local_path), settings);
+	return serveStaticFile(NativePath(local_path), settings);
 }
 
 
@@ -176,7 +181,7 @@ HTTPServerRequestDelegateS serveStaticFile(string local_path, HTTPFileServerSett
 		settings = Optional settings object enabling customization of how the
 			file gets served.
 */
-void sendFile(scope HTTPServerRequest req, scope HTTPServerResponse res, Path path, HTTPFileServerSettings settings = null)
+void sendFile(scope HTTPServerRequest req, scope HTTPServerResponse res, NativePath path, HTTPFileServerSettings settings = null)
 {
 	static HTTPFileServerSettings default_settings;
 	if (!settings) {
@@ -253,7 +258,7 @@ enum HTTPFileServerOption {
 }
 
 
-private void sendFileImpl(scope HTTPServerRequest req, scope HTTPServerResponse res, Path path, HTTPFileServerSettings settings = null)
+private void sendFileImpl(scope HTTPServerRequest req, scope HTTPServerResponse res, NativePath path, HTTPFileServerSettings settings = null)
 {
 	auto pathstr = path.toNativeString();
 
@@ -382,7 +387,7 @@ private void sendFileImpl(scope HTTPServerRequest req, scope HTTPServerResponse 
 		// encoded file must be younger than original else warn
 		if (dirent.timeModified.toUTC() >= origLastModified){
 			logTrace("Using already encoded file '%s' -> '%s'", path, encodedFilepath);
-			path = Path(encodedFilepath);
+			path = NativePath(encodedFilepath);
 			res.headers["Content-Length"] = to!string(dirent.size);
 		} else {
 			logWarn("Encoded file '%s' is older than the original '%s'. Ignoring it.", encodedFilepath, path);
@@ -408,18 +413,18 @@ private void sendFileImpl(scope HTTPServerRequest req, scope HTTPServerResponse 
 		fil = openFile(path);
 	} catch( Exception e ){
 		// TODO: handle non-existant files differently than locked files?
-		logDebug("Failed to open file %s: %s", pathstr, e.toString());
+		logDebug("Failed to open file %s: %s", pathstr, () @trusted { return e.toString(); } ());
 		return;
 	}
 	scope(exit) fil.close();
 
 	if (prange) {
 		fil.seek(rangeStart);
-		res.bodyWriter.write(fil, rangeEnd - rangeStart + 1);
+		fil.pipe(res.bodyWriter, rangeEnd - rangeStart + 1);
 		logTrace("partially sent file %d-%d, %s!", rangeStart, rangeEnd, res.headers["Content-Type"]);
 	} else {
 		if (pce && !encodedFilepath.length)
-			res.bodyWriter.write(fil);
+			fil.pipe(res.bodyWriter);
 		else res.writeRawBody(fil);
 		logTrace("sent file %d, %s!", fil.size, res.headers["Content-Type"]);
 	}

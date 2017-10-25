@@ -1,7 +1,7 @@
 /**
 	Multicasts an input stream to multiple output streams.
 
-	Copyright: © 2014 RejectedSoftware e.K.
+	Copyright: © 2014-2016 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Eric Cornelius
 */
@@ -9,9 +9,13 @@ module vibe.stream.multicast;
 
 import vibe.core.core;
 import vibe.core.stream;
-import vibe.utils.memory;
 
 import std.exception;
+
+MulticastStream createMulticastStream(scope OutputStream[] outputs...)
+{
+	return new MulticastStream(outputs, true);
+}
 
 
 class MulticastStream : OutputStream {
@@ -19,7 +23,14 @@ class MulticastStream : OutputStream {
 		OutputStream[] m_outputs;
 	}
 
+	deprecated("Use createMulticastStream instead.")
 	this(OutputStream[] outputs ...)
+	{
+		this(outputs, true);
+	}
+
+	/// private
+	this(scope OutputStream[] outputs, bool dummy)
 	{
 		// NOTE: investigate .dup dmd workaround
 		m_outputs = outputs.dup;
@@ -36,14 +47,17 @@ class MulticastStream : OutputStream {
 			output.flush();
 	}
 
-	void write(in ubyte[] bytes)
+	size_t write(in ubyte[] bytes, IOMode mode)
 	{
-		foreach (output; m_outputs)
-			output.write(bytes);
+		if (!m_outputs.length) return bytes.length;
+
+		auto ret = m_outputs[0].write(bytes, mode);
+
+		foreach (output; m_outputs[1 .. $])
+			output.write(bytes[0 .. ret]);
+
+		return ret;
 	}
 
-	void write(InputStream source, ulong nbytes = 0)
-	{
-		writeDefault(source, nbytes);
-	}
+	alias write = OutputStream.write;
 }

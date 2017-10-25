@@ -10,7 +10,7 @@ module vibe.utils.string;
 public import std.string;
 
 import vibe.utils.array;
-import vibe.utils.memory;
+import vibe.internal.utilallocator;
 
 import std.algorithm;
 import std.array;
@@ -186,11 +186,11 @@ sizediff_t matchBracket(const(char)[] str, bool nested = true)
 }
 
 /// Same as std.string.format, just using an allocator.
-string formatAlloc(ARGS...)(Allocator alloc, string fmt, ARGS args)
+string formatAlloc(ARGS...)(IAllocator alloc, string fmt, ARGS args)
 {
 	auto app = AllocAppender!string(alloc);
-	formattedWrite(&app, fmt, args);
-	return app.data;
+	formattedWrite(() @trusted { return &app; } (), fmt, args);
+	return () @trusted { return app.data; } ();
 }
 
 /// Special version of icmp() with optimization for ASCII characters

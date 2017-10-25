@@ -35,6 +35,7 @@ interface Lockable {
 */
 struct ScopedMutexLock
 {
+@safe:
 	@disable this(this);
 	private {
 		Mutex m_mutex;
@@ -71,14 +72,14 @@ struct ScopedMutexLock
 	bool tryLock()
 	{
 		enforce(!m_locked);
-		return m_locked = m_mutex.tryLock();
+		return m_locked = () @trusted { return m_mutex.tryLock(); } ();
 	}
 
 	void lock()
 	{
 		enforce(!m_locked);
 		m_locked = true;
-		m_mutex.lock();
+		() @trusted { m_mutex.lock(); } ();
 	}
 }
 
@@ -120,10 +121,11 @@ unittest {
 */
 class LocalTaskSemaphore
 {
+@safe:
+
 	// requires a queue
 	import std.container.binaryheap;
 	import std.container.array;
-	import vibe.utils.memory;
 
 	private {
 		struct Waiter {
@@ -138,8 +140,8 @@ class LocalTaskSemaphore
 		uint m_seq;
 	}
 
-	this(uint max_locks) 
-	{ 
+	this(uint max_locks)
+	{
 		m_maxLocks = max_locks;
 	}
 
@@ -161,10 +163,10 @@ class LocalTaskSemaphore
 			than one.
 	*/
 	bool tryLock()
-	{		
-		if (available > 0) 
+	{
+		if (available > 0)
 		{
-			m_locks++; 
+			m_locks++;
 			return true;
 		}
 		return false;
@@ -176,39 +178,39 @@ class LocalTaskSemaphore
 		until the number of locks drops below the limit.
 	*/
 	void lock(ubyte priority = 0)
-	{ 
+	{
 		import std.algorithm : min;
 
 		if (tryLock())
 			return;
-		
+
 		Waiter w;
 		w.signal = getEventDriver().createManualEvent();
 		scope(exit)
-			destroy(w.signal);
+			() @trusted { return destroy(w.signal); } ();
 		w.priority = priority;
 		w.seq = min(0, m_seq - w.priority);
 		if (++m_seq == uint.max)
 			rewindSeq();
-		
-		m_waiters.insert(w);
+
+		() @trusted { m_waiters.insert(w); } ();
 		w.signal.waitUninterruptible(w.signal.emitCount);
 	}
 
 	/** Gives up an existing lock.
 	*/
-	void unlock() 
-	{		
+	void unlock()
+	{
 		if (m_waiters.length > 0) {
 			ManualEvent s = m_waiters.front().signal;
-			m_waiters.removeFront();
+			() @trusted { m_waiters.removeFront(); } ();
 			s.emit(); // resume one
 		} else m_locks--;
 	}
 
 	// if true, a goes after b. ie. b comes out front()
 	/// private
-	static bool asc(ref Waiter a, ref Waiter b) 
+	static bool asc(ref Waiter a, ref Waiter b)
 	{
 		if (a.seq == b.seq) {
 			if (a.priority == b.priority) {
@@ -223,7 +225,7 @@ class LocalTaskSemaphore
 	}
 
 	private void rewindSeq()
-	{
+	@trusted {
 		Array!Waiter waiters = m_waiters.release();
 		ushort min_seq;
 		import std.algorithm : min;
@@ -255,10 +257,12 @@ class LocalTaskSemaphore
 	See_Also: InterruptibleTaskMutex, RecursiveTaskMutex, core.sync.mutex.Mutex
 */
 class TaskMutex : core.sync.mutex.Mutex, Lockable {
+@safe:
+
 	private TaskMutexImpl!false m_impl;
 
-	this(Object o) { m_impl.setup(); super(o); }
-	this() { m_impl.setup(); }
+	this(Object o) @trusted { m_impl.setup(); super(o); }
+	this() @trusted { m_impl.setup(); }
 
 	override bool tryLock() nothrow { return m_impl.tryLock(); }
 	override void lock() nothrow { m_impl.lock(); }
@@ -303,21 +307,28 @@ unittest { // test deferred throwing
 
 	auto mutex = new TaskMutex;
 	auto t1 = runTask({
-		scope (failure) assert(false, "No exception expected in first task!");
-		mutex.lock();
-		scope (exit) mutex.unlock();
-		sleep(20.msecs);
+		try {
+			mutex.lock();
+			scope (exit) mutex.unlock();
+			sleep(20.msecs);
+		} catch (Exception e) {
+			assert(false, "No exception expected in first task: "~e.msg);
+		}
 	});
 
 	auto t2 = runTask({
-		scope (failure) assert(false, "Only InterruptException supposed to be thrown!");
-		mutex.lock();
+		try mutex.lock();
+		catch (Exception e) {
+			assert(false, "No exception supposed to be thrown: "~e.msg);
+		}
 		scope (exit) mutex.unlock();
 		try {
 			yield();
 			assert(false, "Yield is supposed to have thrown an InterruptException.");
 		} catch (InterruptException) {
 			// as expected!
+		} catch (Exception e) {
+			assert(false, "Only InterruptException supposed to be thrown: "~e.msg);
 		}
 	});
 
@@ -349,6 +360,8 @@ unittest {
 	See_Also: $(D TaskMutex), $(D InterruptibleRecursiveTaskMutex)
 */
 final class InterruptibleTaskMutex : Lockable {
+@safe:
+
 	private TaskMutexImpl!true m_impl;
 
 	this() { m_impl.setup(); }
@@ -382,6 +395,8 @@ unittest {
 	See_Also: TaskMutex, core.sync.mutex.Mutex
 */
 class RecursiveTaskMutex : core.sync.mutex.Mutex, Lockable {
+@safe:
+
 	private RecursiveTaskMutexImpl!false m_impl;
 
 	this(Object o) { m_impl.setup(); super(o); }
@@ -407,6 +422,8 @@ unittest {
 	See_Also: $(D RecursiveTaskMutex), $(D InterruptibleTaskMutex)
 */
 final class InterruptibleRecursiveTaskMutex : Lockable {
+@safe:
+
 	private RecursiveTaskMutexImpl!true m_impl;
 
 	this() { m_impl.setup(); }
@@ -541,6 +558,8 @@ private void runMutexUnitTests(M)()
 	See_Also: InterruptibleTaskCondition
 */
 class TaskCondition : core.sync.condition.Condition {
+@safe:
+
 	private TaskConditionImpl!(false, Mutex) m_impl;
 
 	this(core.sync.mutex.Mutex mtx) nothrow { m_impl.setup(mtx); super(mtx); }
@@ -603,6 +622,8 @@ unittest {
 	See_Also: `TaskCondition`
 */
 final class InterruptibleTaskCondition {
+@safe:
+
 	private TaskConditionImpl!(true, Lockable) m_impl;
 
 	this(core.sync.mutex.Mutex mtx) nothrow { m_impl.setup(mtx); }
@@ -619,15 +640,26 @@ final class InterruptibleTaskCondition {
 /** Creates a new signal that can be shared between fibers.
 */
 ManualEvent createManualEvent()
-nothrow {
+@safe nothrow {
 	return getEventDriver().createManualEvent();
 }
+
+/** Creates a new signal that can be shared between fibers.
+*/
+LocalManualEvent createLocalManualEvent()
+@safe nothrow {
+	return getEventDriver().createManualEvent();
+}
+
+alias LocalManualEvent = ManualEvent;
 
 /** A manually triggered cross-task event.
 
 	Note: the ownership can be shared between multiple fibers and threads.
 */
 interface ManualEvent {
+@safe:
+
 	/// A counter that is increased with every emit() call
 	@property int emitCount() const nothrow;
 
@@ -865,7 +897,7 @@ private struct TaskConditionImpl(bool INTERRUPTIBLE, LOCKABLE) {
  *  the actual functionality of their method calls.
  *
  *  The method implementations are based on two static parameters
- *  ($(D INTERRUPTIBLE) and $(D INTENT)), which are configured through 
+ *  ($(D INTERRUPTIBLE) and $(D INTENT)), which are configured through
  *  template arguments:
  *
  *  - $(D INTERRUPTIBLE) determines whether the mutex implementation
@@ -880,14 +912,15 @@ private struct TaskConditionImpl(bool INTERRUPTIBLE, LOCKABLE) {
  */
 private struct ReadWriteMutexState(bool INTERRUPTIBLE)
 {
+@safe:
     /** The policy with which the mutex should operate.
      *
-     *  The policy determines how the acquisition of the locks is 
+     *  The policy determines how the acquisition of the locks is
      *  performed and can be used to tune the mutex according to the
      *  underlying algorithm in which it is used.
      *
      *  According to the provided policy, the mutex will either favor
-     *  reading or writing tasks and could potentially starve the 
+     *  reading or writing tasks and could potentially starve the
      *  respective opposite.
      *
      *  cf. $(D core.sync.rwmutex.ReadWriteMutex.Policy)
@@ -899,7 +932,7 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
         /** Writers are prioritized, readers may be starved as a result. */
         PREFER_WRITERS
     }
-    
+
     /** The intent with which a locking operation is performed.
      *
      *  Since both locks share the same underlying algorithms, the actual
@@ -915,23 +948,23 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
          *  hold a lock at any given time. */
         READ_WRITE = 1
     }
-    
+
     private {
         //Queue counters
         /** The number of reading tasks waiting for the lock to become available. */
         shared(uint)  m_waitingForReadLock = 0;
         /** The number of writing tasks waiting for the lock to become available. */
         shared(uint)  m_waitingForWriteLock = 0;
-        
+
         //Lock counters
         /** The number of reading tasks that currently hold the lock. */
         uint  m_activeReadLocks = 0;
         /** The number of writing tasks that currently hold the lock (binary). */
         ubyte m_activeWriteLocks = 0;
-        
+
         /** The policy determining the lock's behavior. */
         Policy m_policy;
-        
+
         //Queue Events
         /** The event used to wake reading tasks waiting for the lock while it is blocked. */
         ManualEvent m_readyForReadLock;
@@ -941,7 +974,7 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
         /** The underlying mutex that gates the access to the shared state. */
         Mutex m_counterMutex;
     }
-    
+
     this(Policy policy)
     {
         m_policy = policy;
@@ -951,10 +984,10 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
     }
 
     @disable this(this);
-    
+
     /** The policy with which the lock has been created. */
     @property policy() const { return m_policy; }
-    
+
     version(RWMutexPrint)
     {
         /** Print out debug information during lock operations. */
@@ -964,17 +997,17 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
             try
             {
                 import std.stdio;
-                writefln("RWMutex: %s (%s), active: RO: %d, RW: %d; waiting: RO: %d, RW: %d", 
-                    OP.leftJustify(10,' '), 
-                    INTENT == LockingIntent.READ_ONLY ? "RO" : "RW", 
-                    m_activeReadLocks,    m_activeWriteLocks, 
+                writefln("RWMutex: %s (%s), active: RO: %d, RW: %d; waiting: RO: %d, RW: %d",
+                    OP.leftJustify(10,' '),
+                    INTENT == LockingIntent.READ_ONLY ? "RO" : "RW",
+                    m_activeReadLocks,    m_activeWriteLocks,
                     m_waitingForReadLock, m_waitingForWriteLock
                     );
             }
-            catch (Throwable t){}
+            catch (Exception t){}
         }
     }
-    
+
     /** An internal shortcut method to determine the queue event for a given intent. */
     @property ref auto queueEvent(LockingIntent INTENT)()
     {
@@ -983,7 +1016,7 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
         else
             return m_readyForWriteLock;
     }
-    
+
     /** An internal shortcut method to determine the queue counter for a given intent. */
     @property ref auto queueCounter(LockingIntent INTENT)()
     {
@@ -992,13 +1025,13 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
         else
             return m_waitingForWriteLock;
     }
-    
+
     /** An internal shortcut method to determine the current emitCount of the queue counter for a given intent. */
     int emitCount(LockingIntent INTENT)()
     {
         return queueEvent!INTENT.emitCount();
     }
-    
+
     /** An internal shortcut method to determine the active counter for a given intent. */
     @property ref auto activeCounter(LockingIntent INTENT)()
     {
@@ -1007,8 +1040,8 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
         else
             return m_activeWriteLocks;
     }
-    
-    /** An internal shortcut method to wait for the queue event for a given intent. 
+
+    /** An internal shortcut method to wait for the queue event for a given intent.
      *
      *  This method is used during the `lock()` operation, after a
      *  `tryLock()` operation has been unsuccessfully finished.
@@ -1022,8 +1055,8 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
         else
             return queueEvent!INTENT.waitUninterruptible(count);
     }
-    
-    /** An internal shortcut method to notify tasks waiting for the lock to become available again. 
+
+    /** An internal shortcut method to notify tasks waiting for the lock to become available again.
      *
      *  This method is called whenever the number of owners of the mutex hits
      *  zero; this is basically the counterpart to `wait()`.
@@ -1040,12 +1073,12 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
         { //If a writer unlocks the mutex, notify both readers and writers
             if (atomicLoad(m_waitingForReadLock) > 0)
                 m_readyForReadLock.emit();
-            
+
             if (atomicLoad(m_waitingForWriteLock) > 0)
                 m_readyForWriteLock.emit();
         }
     }
-    
+
     /** An internal method that performs the acquisition attempt in different variations.
      *
      *  Since both locks rely on a common TaskMutex object which gates the access
@@ -1053,15 +1086,15 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
      *  than for simple mutex variants. This method will thus be performing the
      *  `tryLock()` operation in two variations, depending on the callee:
      *
-     *  If called from the outside ($(D WAIT_FOR_BLOCKING_MUTEX) = false), the method 
-     *  will instantly fail if the underlying mutex is locked (i.e. during another 
-     *  `tryLock()` or `unlock()` operation), in order to guarantee the fastest 
+     *  If called from the outside ($(D WAIT_FOR_BLOCKING_MUTEX) = false), the method
+     *  will instantly fail if the underlying mutex is locked (i.e. during another
+     *  `tryLock()` or `unlock()` operation), in order to guarantee the fastest
      *  possible locking attempt.
      *
-     *  If used internally by the `lock()` method ($(D WAIT_FOR_BLOCKING_MUTEX) = true), 
+     *  If used internally by the `lock()` method ($(D WAIT_FOR_BLOCKING_MUTEX) = true),
      *  the operation will wait for the mutex to be available before deciding if
      *  the lock can be acquired, since the attempt would anyway be repeated until
-     *  it succeeds. This will prevent frequent retries under heavy loads and thus 
+     *  it succeeds. This will prevent frequent retries under heavy loads and thus
      *  should ensure better performance.
      */
     @trusted bool tryLock(LockingIntent INTENT, bool WAIT_FOR_BLOCKING_MUTEX)()
@@ -1069,7 +1102,7 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
         //Log a debug statement for the attempt
         version(RWMutexPrint)
             printInfo!("tryLock",INTENT)();
-        
+
         //Try to acquire the lock
         static if (!WAIT_FOR_BLOCKING_MUTEX)
         {
@@ -1078,43 +1111,43 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
         }
         else
             m_counterMutex.lock();
-        
+
         scope(exit)
             m_counterMutex.unlock();
-        
+
         //Log a debug statement for the attempt
         version(RWMutexPrint)
             printInfo!("checkCtrs",INTENT)();
-        
+
         //Check if there's already an active writer
         if (m_activeWriteLocks > 0)
             return false;
-        
+
         //If writers are preferred over readers, check whether there
         //currently is a writer in the waiting queue and abort if
         //that's the case.
         static if (INTENT == LockingIntent.READ_ONLY)
             if (m_policy.PREFER_WRITERS && m_waitingForWriteLock > 0)
                 return false;
-        
+
         //If we are locking the mutex for writing, make sure that
         //there's no reader active.
         static if (INTENT == LockingIntent.READ_WRITE)
             if (m_activeReadLocks > 0)
                 return false;
-        
+
         //We can successfully acquire the lock!
         //Log a debug statement for the success.
         version(RWMutexPrint)
             printInfo!("lock",INTENT)();
-        
-        //Increase the according counter 
+
+        //Increase the according counter
         //(number of active readers/writers)
         //and return a success code.
         activeCounter!INTENT += 1;
         return true;
     }
-    
+
     /** Attempt to acquire the lock for a given intent.
      *
      *  Returns:
@@ -1127,7 +1160,7 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
         //TaskMutex - fail if it is already blocked.
         return tryLock!(INTENT,false)();
     }
-    
+
     /** Acquire the lock for the given intent; yield and suspend until the lock has been acquired. */
     @trusted void lock(LockingIntent INTENT)()
     {
@@ -1139,29 +1172,29 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
         atomicOp!"+="(queueCounter!INTENT,1);
         scope(exit)
             atomicOp!"-="(queueCounter!INTENT,1);
-        
+
         //Try to lock the mutex
         auto locked = tryLock!(INTENT,true)();
         if (locked)
             return;
-        
+
         //Retry until we successfully acquired the lock
         while(!locked)
         {
             version(RWMutexPrint)
                 printInfo!("wait",INTENT)();
-            
+
             count  = wait!INTENT(count);
             locked = tryLock!(INTENT,true)();
         }
     }
-    
+
     /** Unlock the mutex after a successful acquisition. */
     @trusted void unlock(LockingIntent INTENT)()
     {
         version(RWMutexPrint)
             printInfo!("unlock",INTENT)();
-        
+
         debug assert(activeCounter!INTENT > 0);
 
         synchronized(m_counterMutex)
@@ -1173,7 +1206,7 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
             {
                 version(RWMutexPrint)
                     printInfo!("notify",INTENT)();
-                
+
                 notify!INTENT();
             }
         }
@@ -1184,52 +1217,54 @@ private struct ReadWriteMutexState(bool INTERRUPTIBLE)
  *
  *  This mutex can be used in exchange for a $(D core.sync.mutex.ReadWriteMutex),
  *  but does not block the event loop in contention situations. The `reader` and `writer`
- *  members are used for locking. Locking the `reader` mutex allows access to multiple 
+ *  members are used for locking. Locking the `reader` mutex allows access to multiple
  *  readers at once, while the `writer` mutex only allows a single writer to lock it at
- *  any given time. Locks on `reader` and `writer` are mutually exclusive (i.e. whenever a 
+ *  any given time. Locks on `reader` and `writer` are mutually exclusive (i.e. whenever a
  *  writer is active, no readers can be active at the same time, and vice versa).
- * 
+ *
  *  Notice:
  *      Mutexes implemented by this class cannot be interrupted
  *      using $(D vibe.core.task.Task.interrupt()). The corresponding
  *      InterruptException will be deferred until the next blocking
  *      operation yields the event loop.
- * 
+ *
  *      Use $(D InterruptibleTaskReadWriteMutex) as an alternative that can be
  *      interrupted.
- * 
+ *
  *  cf. $(D core.sync.mutex.ReadWriteMutex)
  */
 class TaskReadWriteMutex
 {
+@safe:
+
     private {
         alias State = ReadWriteMutexState!false;
         alias LockingIntent = State.LockingIntent;
         alias READ_ONLY  = LockingIntent.READ_ONLY;
         alias READ_WRITE = LockingIntent.READ_WRITE;
-        
+
         /** The shared state used by the reader and writer mutexes. */
         State m_state;
     }
-    
+
     /** The policy with which the mutex should operate.
      *
-     *  The policy determines how the acquisition of the locks is 
+     *  The policy determines how the acquisition of the locks is
      *  performed and can be used to tune the mutex according to the
      *  underlying algorithm in which it is used.
      *
      *  According to the provided policy, the mutex will either favor
-     *  reading or writing tasks and could potentially starve the 
+     *  reading or writing tasks and could potentially starve the
      *  respective opposite.
      *
      *  cf. $(D core.sync.rwmutex.ReadWriteMutex.Policy)
      */
     alias Policy = State.Policy;
-    
+
     /** A common baseclass for both of the provided mutexes.
      *
-     *  The intent for the according mutex is specified through the 
-     *  $(D INTENT) template argument, which determines if a mutex is 
+     *  The intent for the according mutex is specified through the
+     *  $(D INTENT) template argument, which determines if a mutex is
      *  used for read or write locking.
      */
     final class Mutex(LockingIntent INTENT): core.sync.mutex.Mutex, Lockable
@@ -1243,17 +1278,17 @@ class TaskReadWriteMutex
     }
     alias Reader = Mutex!READ_ONLY;
     alias Writer = Mutex!READ_WRITE;
-    
+
     Reader reader;
     Writer writer;
-    
+
     this(Policy policy = Policy.PREFER_WRITERS)
     {
         m_state = State(policy);
         reader = new Reader();
         writer = new Writer();
     }
-    
+
     /** The policy with which the lock has been created. */
     @property Policy policy() const { return m_state.policy; }
 }
@@ -1262,41 +1297,43 @@ class TaskReadWriteMutex
  *
  *  This class supports the use of $(D vibe.core.task.Task.interrupt()) while
  *  waiting in the `lock()` method.
- * 
+ *
  *  cf. $(D core.sync.mutex.ReadWriteMutex)
  */
 class InterruptibleTaskReadWriteMutex
 {
+@safe:
+
     private {
         alias State = ReadWriteMutexState!true;
         alias LockingIntent = State.LockingIntent;
         alias READ_ONLY  = LockingIntent.READ_ONLY;
         alias READ_WRITE = LockingIntent.READ_WRITE;
-        
+
         /** The shared state used by the reader and writer mutexes. */
         State m_state;
     }
-    
+
     /** The policy with which the mutex should operate.
      *
-     *  The policy determines how the acquisition of the locks is 
+     *  The policy determines how the acquisition of the locks is
      *  performed and can be used to tune the mutex according to the
      *  underlying algorithm in which it is used.
      *
      *  According to the provided policy, the mutex will either favor
-     *  reading or writing tasks and could potentially starve the 
+     *  reading or writing tasks and could potentially starve the
      *  respective opposite.
      *
      *  cf. $(D core.sync.rwmutex.ReadWriteMutex.Policy)
      */
     alias Policy = State.Policy;
-    
+
     /** A common baseclass for both of the provided mutexes.
      *
-     *  The intent for the according mutex is specified through the 
-     *  $(D INTENT) template argument, which determines if a mutex is 
+     *  The intent for the according mutex is specified through the
+     *  $(D INTENT) template argument, which determines if a mutex is
      *  used for read or write locking.
-     * 
+     *
      */
     final class Mutex(LockingIntent INTENT): core.sync.mutex.Mutex, Lockable
     {
@@ -1309,17 +1346,17 @@ class InterruptibleTaskReadWriteMutex
     }
     alias Reader = Mutex!READ_ONLY;
     alias Writer = Mutex!READ_WRITE;
-    
+
     Reader reader;
     Writer writer;
-    
+
     this(Policy policy = Policy.PREFER_WRITERS)
     {
         m_state = State(policy);
         reader = new Reader();
         writer = new Writer();
     }
-    
+
     /** The policy with which the lock has been created. */
     @property Policy policy() const { return m_state.policy; }
 }

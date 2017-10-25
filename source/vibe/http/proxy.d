@@ -12,6 +12,7 @@ import vibe.http.client;
 import vibe.http.server;
 import vibe.inet.message;
 import vibe.stream.operations;
+import vibe.internal.interfaceproxy : InterfaceProxy;
 
 import std.conv;
 import std.exception;
@@ -39,9 +40,12 @@ void listenHTTPReverseProxy(HTTPServerSettings settings, HTTPReverseProxySetting
 /// ditto
 void listenHTTPReverseProxy(HTTPServerSettings settings, string destination_host, ushort destination_port)
 {
+	URL url;
+	url.schema = "http";
+	url.host = destination_host;
+	url.port = destination_port;
 	auto proxy_settings = new HTTPReverseProxySettings;
-	proxy_settings.destinationHost = destination_host;
-	proxy_settings.destinationPort = destination_port;
+	proxy_settings.destination = url;
 	listenHTTPReverseProxy(settings, proxy_settings);
 }
 
@@ -57,13 +61,10 @@ HTTPServerRequestDelegateS reverseProxyRequest(HTTPReverseProxySettings settings
 		foreach (n; non_forward_headers)
 			non_forward_headers_map[n] = "";
 
-	URL url;
-	url.schema = "http";
-	url.host = settings.destinationHost;
-	url.port = settings.destinationPort;
+	auto url = settings.destination;
 
 	void handleRequest(scope HTTPServerRequest req, scope HTTPServerResponse res)
-	{
+	@safe {
 		auto rurl = url;
 		rurl.localURI = req.requestURL;
 
@@ -74,14 +75,17 @@ HTTPServerRequestDelegateS reverseProxyRequest(HTTPReverseProxySettings settings
 				throw new HTTPStatusException(HTTPStatus.methodNotAllowed);
 			}
 
-			auto ccon = connectTCP(settings.destinationHost, settings.destinationPort);
+			TCPConnection ccon;
+			try ccon = connectTCP(url.getFilteredHost, url.port);
+			catch (Exception e) {
+				throw new HTTPStatusException(HTTPStatus.badGateway, "Connection to upstream server failed: "~e.msg);
+			}
 			auto scon = res.connectProxy();
 			assert (scon);
 
 			import vibe.core.core : runTask;
-			runTask({ ccon.write(scon); });
-
-			scon.write(ccon);
+			runTask({ scon.pipe(ccon); });
+			ccon.pipe(scon);
 			return;
 		}
 
@@ -98,7 +102,7 @@ HTTPServerRequestDelegateS reverseProxyRequest(HTTPReverseProxySettings settings
 		{
 			creq.method = req.method;
 			creq.headers = req.headers.dup;
-			creq.headers["Host"] = settings.destinationHost;
+			creq.headers["Host"] = url.getFilteredHost;
 
 			//handle protocol upgrades
 			if (!isUpgrade) {
@@ -110,7 +114,7 @@ HTTPServerRequestDelegateS reverseProxyRequest(HTTPReverseProxySettings settings
 			if (auto pfp = "X-Forwarded-Proto" !in creq.headers) creq.headers["X-Forwarded-Proto"] = req.tls ? "https" : "http";
 			if (auto pff = "X-Forwarded-For" in req.headers) creq.headers["X-Forwarded-For"] = *pff ~ ", " ~ req.peer;
 			else creq.headers["X-Forwarded-For"] = req.peer;
-			creq.bodyWriter.write(req.bodyReader);
+			req.bodyReader.pipe(creq.bodyWriter);
 		}
 
 		void handleClientResponse(scope HTTPClientResponse cres)
@@ -128,18 +132,17 @@ HTTPServerRequestDelegateS reverseProxyRequest(HTTPReverseProxySettings settings
 				auto ccon = cres.switchProtocol("");
 
 				import vibe.core.core : runTask;
-				runTask({ scon.write(ccon); });
+				runTask({ ccon.pipe(scon); });
 
-				ccon.write(scon);
+				scon.pipe(ccon);
 				return;
 			}
 
 			// special case for empty response bodies
 			if ("Content-Length" !in cres.headers && "Transfer-Encoding" !in cres.headers || req.method == HTTPMethod.HEAD) {
-				foreach (key, value; cres.headers) {
+				foreach (key, ref value; cres.headers)
 					if (icmp2(key, "Connection") != 0)
 						res.headers[key] = value;
-				}
 				res.writeVoidBody();
 				return;
 			}
@@ -148,10 +151,9 @@ HTTPServerRequestDelegateS reverseProxyRequest(HTTPReverseProxySettings settings
 			// (Squid and some other proxies)
 			if (res.httpVersion == HTTPVersion.HTTP_1_0 && ("Transfer-Encoding" in cres.headers || "Content-Length" !in cres.headers)) {
 				// copy all headers that may pass from upstream to client
-				foreach (n, v; cres.headers) {
+				foreach (n, ref v; cres.headers)
 					if (n !in non_forward_headers_map)
 						res.headers[n] = v;
-				}
 
 				if ("Transfer-Encoding" in res.headers) res.headers.remove("Transfer-Encoding");
 				auto content = cres.bodyReader.readAll(1024*1024);
@@ -164,28 +166,29 @@ HTTPServerRequestDelegateS reverseProxyRequest(HTTPReverseProxySettings settings
 			// to perform a verbatim copy of the client response
 			if ("Content-Length" in cres.headers) {
 				if ("Content-Encoding" in res.headers) res.headers.remove("Content-Encoding");
-				foreach (key, value; cres.headers) {
+				foreach (key, ref value; cres.headers)
 					if (icmp2(key, "Connection") != 0)
 						res.headers[key] = value;
-				}
 				auto size = cres.headers["Content-Length"].to!size_t();
 				if (res.isHeadResponse) res.writeVoidBody();
-				else cres.readRawBody((scope reader) { res.writeRawBody(reader, size); });
+				else cres.readRawBody((scope InterfaceProxy!InputStream reader) { res.writeRawBody(reader, size); });
 				assert(res.headerWritten);
 				return;
 			}
 
 			// fall back to a generic re-encoding of the response
 			// copy all headers that may pass from upstream to client
-			foreach (n, v; cres.headers) {
+			foreach (n, ref v; cres.headers)
 				if (n !in non_forward_headers_map)
 					res.headers[n] = v;
-			}
 			if (res.isHeadResponse) res.writeVoidBody();
-			else res.bodyWriter.write(cres.bodyReader);
+			else cres.bodyReader.pipe(res.bodyWriter);
 		}
 
-		requestHTTP(rurl, &setupClientRequest, &handleClientResponse);
+		try requestHTTP(rurl, &setupClientRequest, &handleClientResponse);
+		catch (Exception e) {
+			throw new HTTPStatusException(HTTPStatus.badGateway, "Connection to upstream server failed: "~e.msg);
+		}
 	}
 
 	return &handleRequest;
@@ -193,9 +196,20 @@ HTTPServerRequestDelegateS reverseProxyRequest(HTTPReverseProxySettings settings
 /// ditto
 HTTPServerRequestDelegateS reverseProxyRequest(string destination_host, ushort destination_port)
 {
+	URL url;
+	url.schema = "http";
+	url.host = destination_host;
+	url.port = destination_port;
 	auto settings = new HTTPReverseProxySettings;
-	settings.destinationHost = destination_host;
-	settings.destinationPort = destination_port;
+	settings.destination = url;
+	return reverseProxyRequest(settings);
+}
+
+/// ditto
+HTTPServerRequestDelegateS reverseProxyRequest(URL destination)
+{
+	auto settings = new HTTPReverseProxySettings;
+	settings.destination = destination;
 	return reverseProxyRequest(settings);
 }
 
@@ -203,10 +217,17 @@ HTTPServerRequestDelegateS reverseProxyRequest(string destination_host, ushort d
 	Provides advanced configuration facilities for reverse proxy servers.
 */
 final class HTTPReverseProxySettings {
-	/// The destination host to forward requests to
-	string destinationHost;
-	/// The destination port to forward requests to
-	ushort destinationPort;
+	/// Scheduled for deprecation - use `destination.host` instead.
+	@property string destinationHost() const { return destination.host; }
+	/// ditto
+	@property void destinationHost(string host) { destination.host = host; }
+	/// Scheduled for deprecation - use `destination.port` instead.
+	@property ushort destinationPort() const { return destination.port; }
+	/// ditto
+	@property void destinationPort(ushort port) { destination.port = port; }
+
+	/// The destination URL to forward requests to
+	URL destination = URL("http", InetPath(""));
 	/// Avoids compressed transfers between proxy and destination hosts
 	bool avoidCompressedRequests;
 	/// Handle CONNECT requests for creating a tunnel to the destination host

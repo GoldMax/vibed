@@ -1,7 +1,7 @@
 /**
 	In-memory streams
 
-	Copyright: © 2012 RejectedSoftware e.K.
+	Copyright: © 2012-2016 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
@@ -9,33 +9,59 @@ module vibe.stream.memory;
 
 import vibe.core.stream;
 import vibe.utils.array;
-import vibe.utils.memory;
+import vibe.internal.allocator;
 
 import std.algorithm;
 import std.array;
 import std.exception;
 import std.typecons;
 
+MemoryOutputStream createMemoryOutputStream(IAllocator alloc = vibeThreadAllocator())
+@safe nothrow {
+	return new MemoryOutputStream(alloc, true);
+}
+
+/** Creates a new stream with the given data array as its contents.
+
+	Params:
+		data = The data array
+		writable = Flag that controls whether the data array may be changed
+		initial_size = The initial value that size returns - the file can grow up to data.length in size
+*/
+MemoryStream createMemoryStream(ubyte[] data, bool writable = true, size_t initial_size = size_t.max)
+@safe nothrow {
+	return new MemoryStream(data, writable, initial_size, true);
+}
+
 
 /** OutputStream that collects the written data in memory and allows to query it
 	as a byte array.
 */
 final class MemoryOutputStream : OutputStream {
+@safe:
+
 	private {
 		AllocAppender!(ubyte[]) m_destination;
 	}
 
-	this(Allocator alloc = defaultAllocator())
+	deprecated("Use createMemoryOutputStream isntead.")
+	this(IAllocator alloc = vibeThreadAllocator())
 	{
+		this(alloc, true);
+	}
+
+	/// private
+	this(IAllocator alloc, bool dummy)
+	nothrow {
 		m_destination = AllocAppender!(ubyte[])(alloc);
 	}
 
 	/// An array with all data written to the stream so far.
-	@property ubyte[] data() { return m_destination.data(); }
+	@property ubyte[] data() nothrow { return m_destination.data(); }
 
 	/// Resets the stream to its initial state containing no data.
 	void reset(AppenderResetMode mode = AppenderResetMode.keepData)
-	{
+	@system {
 		m_destination.reset(mode);
 	}
 
@@ -45,30 +71,32 @@ final class MemoryOutputStream : OutputStream {
 		m_destination.reserve(nbytes);
 	}
 
-	void write(in ubyte[] bytes)
+	size_t write(in ubyte[] bytes, IOMode)
 	{
-		m_destination.put(bytes);
+		() @trusted { m_destination.put(bytes); } ();
+		return bytes.length;
 	}
 
+	alias write = OutputStream.write;
+
 	void flush()
-	{
+	nothrow {
 	}
 
 	void finalize()
-	{
-	}
-
-	void write(InputStream stream, ulong nbytes = 0)
-	{
-		writeDefault(stream, nbytes);
+	nothrow {
 	}
 }
+
+mixin validateOutputStream!MemoryOutputStream;
 
 
 /**
 	Provides a random access stream interface for accessing an array of bytes.
 */
 final class MemoryStream : RandomAccessStream {
+@safe:
+
 	private {
 		ubyte[] m_data;
 		size_t m_size;
@@ -77,15 +105,15 @@ final class MemoryStream : RandomAccessStream {
 		size_t m_peekWindow;
 	}
 
-	/** Creates a new stream with the given data array as its contents.
-
-		Params:
-			data = The data array
-			writable = Flag that controls whether the data array may be changed
-			initial_size = The initial value that size returns - the file can grow up to data.length in size
-	*/
+	deprecated("Use createMemoryStream instead.")
 	this(ubyte[] data, bool writable = true, size_t initial_size = size_t.max)
 	{
+		this(data, writable, initial_size, true);
+	}
+
+	/// private
+	this(ubyte[] data, bool writable, size_t initial_size, bool dummy)
+	nothrow {
 		m_data = data;
 		m_size = min(initial_size, data.length);
 		m_writable = writable;
@@ -110,23 +138,31 @@ final class MemoryStream : RandomAccessStream {
 	ulong tell() nothrow { return m_ptr; }
 	const(ubyte)[] peek() { return m_data[m_ptr .. min(m_size, m_ptr+m_peekWindow)]; }
 
-	void read(ubyte[] dst)
+	size_t read(scope ubyte[] dst, IOMode mode)
 	{
-		assert(dst.length <= leastSize);
-		dst[] = m_data[m_ptr .. m_ptr+dst.length];
-		m_ptr += dst.length;
+		enforce(mode != IOMode.all || dst.length <= leastSize, "Reading past end of memory stream.");
+		auto len = min(leastSize, dst.length);
+		dst[0 .. len] = m_data[m_ptr .. m_ptr+len];
+		m_ptr += len;
+		return len;
 	}
 
-	void write(in ubyte[] bytes)
+	alias read = RandomAccessStream.read;
+
+	size_t write(in ubyte[] bytes, IOMode)
 	{
 		assert(writable);
 		enforce(bytes.length <= m_data.length - m_ptr, "Size limit of memory stream reached.");
 		m_data[m_ptr .. m_ptr+bytes.length] = bytes[];
 		m_ptr += bytes.length;
 		m_size = max(m_size, m_ptr);
+		return bytes.length;
 	}
+
+	alias write = RandomAccessStream.write;
 
 	void flush() {}
 	void finalize() {}
-	void write(InputStream stream, ulong nbytes = 0) { writeDefault(stream, nbytes); }
 }
+
+mixin validateRandomAccessStream!MemoryStream;

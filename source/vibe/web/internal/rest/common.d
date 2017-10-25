@@ -22,12 +22,15 @@ import std.meta : anySatisfy, Filter;
 /*package(vibe.web.web)*/ struct RestInterface(TImpl)
 	if (is(TImpl == class) || is(TImpl == interface))
 {
+@safe:
+
 	import std.traits : FunctionTypeOf, InterfacesTuple, MemberFunctionsTuple,
 		ParameterIdentifierTuple, ParameterStorageClass,
 		ParameterStorageClassTuple, ParameterTypeTuple, ReturnType;
 	import std.typetuple : TypeTuple;
 	import vibe.inet.url : URL;
 	import vibe.internal.meta.funcattr : IsAttributedParameter;
+	import vibe.internal.meta.traits : derivedMethod;
 	import vibe.internal.meta.uda;
 
 	/// The settings used to generate the interface
@@ -187,6 +190,7 @@ import std.meta : anySatisfy, Filter;
 				final switch (pi.kind) {
 					case ParameterKind.query: route.queryParameters ~= pi; break;
 					case ParameterKind.body_: route.bodyParameters ~= pi; break;
+					case ParameterKind.wholeBody: route.wholeBodyParameter = pi; break;
 					case ParameterKind.header: route.headerParameters ~= pi; break;
 					case ParameterKind.internal: route.internalParameters ~= pi; break;
 					case ParameterKind.attributed: route.attributedParameters ~= pi; break;
@@ -245,6 +249,8 @@ import std.meta : anySatisfy, Filter;
 	{
 		static import std.traits;
 		import vibe.web.auth : AuthInfo;
+		import std.algorithm.searching : any, count;
+		import std.meta : AliasSeq;
 
 		assert(__ctfe);
 
@@ -257,6 +263,11 @@ import std.meta : anySatisfy, Filter;
 		foreach (fi, func; RouteFunctions) {
 			StaticRoute route;
 			route.functionName = __traits(identifier, func);
+
+			static if (!is(TImpl == I))
+				alias cfunc = derivedMethod!(TImpl, func);
+			else
+				alias cfunc = func;
 
 			alias FuncType = FunctionTypeOf!func;
 			alias ParameterTypes = ParameterTypeTuple!FuncType;
@@ -292,14 +303,18 @@ import std.meta : anySatisfy, Filter;
 				}
 
 				// determine parameter source/destination
-				if (is(PT == AUTHTP)) {
+				static if (is(PT == AUTHTP)) {
 					pi.kind = ParameterKind.auth;
-				} else if (IsAttributedParameter!(func, pname)) {
+				} else static if (IsAttributedParameter!(func, pname)) {
+					pi.kind = ParameterKind.attributed;
+				} else static if (AliasSeq!(cfunc).length > 0 && IsAttributedParameter!(cfunc, pname)) {
 					pi.kind = ParameterKind.attributed;
 				} else static if (anySatisfy!(mixin(CompareParamName.Name), WPAT)) {
 					alias PWPAT = Filter!(mixin(CompareParamName.Name), WPAT);
 					pi.kind = PWPAT[0].origin;
 					pi.fieldName = PWPAT[0].field;
+					if (pi.kind == ParameterKind.body_ && pi.fieldName == "")
+						pi.kind = ParameterKind.wholeBody;
 				} else static if (pname.startsWith("_")) {
 					pi.kind = ParameterKind.internal;
 					pi.fieldName = parameterNames[i][1 .. $];
@@ -312,6 +327,11 @@ import std.meta : anySatisfy, Filter;
 
 				route.parameters ~= pi;
 			}
+
+			auto nhb = route.parameters.count!(p => p.kind == ParameterKind.wholeBody);
+			assert(nhb <= 1, "Multiple whole-body parameters defined for "~route.functionName~".");
+			assert(nhb == 0 || !route.parameters.any!(p => p.kind == ParameterKind.body_),
+				"Normal body parameters and a whole-body parameter defined at the same time for "~route.functionName~".");
 
 			ret[fi] = route;
 		}
@@ -415,6 +435,7 @@ struct Route {
 	PathPart[] pathParts; // path separated into text and placeholder parts
 	PathPart[] fullPathParts; // full path separated into text and placeholder parts
 	Parameter[] parameters;
+	Parameter wholeBodyParameter;
 	Parameter[] queryParameters;
 	Parameter[] bodyParameters;
 	Parameter[] headerParameters;
@@ -438,7 +459,7 @@ struct Parameter {
 
 struct StaticRoute {
 	string functionName; // D name of the function
-	string rawName; // raw name as returned 
+	string rawName; // raw name as returned
 	bool pathOverride; // @path UDA was used
 	HTTPMethod method;
 	StaticParameter[] parameters;
@@ -453,7 +474,8 @@ struct StaticParameter {
 
 enum ParameterKind {
 	query,       // req.query[]
-	body_,       // JSON body
+	body_,       // JSON body (single field)
+	wholeBody,   // JSON body
 	header,      // req.header[]
 	attributed,  // @before
 	internal,    // req.params[]
@@ -473,7 +495,7 @@ template SubInterfaceType(alias F) {
 }
 
 private bool extractPathParts(ref PathPart[] parts, string pattern)
-{
+@safe {
 	import std.string : indexOf;
 
 	string p = pattern;
@@ -695,4 +717,23 @@ unittest { // #1648
 		void a();
 	}
 	alias RI = RestInterface!I;
+}
+
+unittest {
+	interface I1 { @bodyParam("foo") void a(int foo); }
+	alias RI = RestInterface!I1;
+	interface I2 { @bodyParam("foo") void a(int foo, int bar); }
+	interface I3 { @bodyParam("foo") @bodyParam("bar") void a(int foo, int bar); }
+	static assert(__traits(compiles, RestInterface!I1.init));
+	static assert(!__traits(compiles, RestInterface!I2.init));
+	static assert(!__traits(compiles, RestInterface!I3.init));
+}
+
+unittest {
+	import vibe.http.server : HTTPServerResponse, HTTPServerRequest;
+	int foocomp(HTTPServerRequest, HTTPServerResponse) { return 42; }
+	interface I { void test(int foo); }
+	class C : I { @before!foocomp("foo") void test(int foo) { assert(foo == 42); }}
+	alias RI = RestInterface!C;
+	static assert(RI.staticRoutes[0].parameters[0].kind == ParameterKind.attributed);
 }

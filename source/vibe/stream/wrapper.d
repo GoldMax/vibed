@@ -1,7 +1,7 @@
 /**
 	Stream proxy and wrapper facilities.
 
-	Copyright: © 2013 RejectedSoftware e.K.
+	Copyright: © 2013-2016 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
@@ -12,35 +12,94 @@ public import vibe.core.stream;
 import std.algorithm : min;
 import std.exception;
 import core.time;
+import vibe.internal.interfaceproxy;
+import vibe.internal.freelistref : FreeListRef;
+
+
+ProxyStream createProxyStream(Stream)(Stream stream)
+	if (isStream!Stream)
+{
+	return new ProxyStream(interfaceProxy!(.Stream)(stream), true);
+}
+
+ProxyStream createProxyStream(InputStream, OutputStream)(InputStream input, OutputStream output)
+	if (isInputStream!InputStream && isOutputStream!OutputStream)
+{
+	return new ProxyStream(interfaceProxy!(.InputStream)(input), interfaceProxy!(.OutputStream)(output), true);
+}
+
+ConnectionProxyStream createConnectionProxyStream(Stream, ConnectionStream)(Stream stream, ConnectionStream connection_stream)
+	if (isStream!Stream && isConnectionStream!ConnectionStream)
+{
+	mixin validateStream!Stream;
+	mixin validateConnectionStream!ConnectionStream;
+	return new ConnectionProxyStream(interfaceProxy!(.Stream)(stream), interfaceProxy!(.ConnectionStream)(connection_stream), true);
+}
+
+/// private
+FreeListRef!ConnectionProxyStream createConnectionProxyStreamFL(Stream, ConnectionStream)(Stream stream, ConnectionStream connection_stream)
+	if (isStream!Stream && isConnectionStream!ConnectionStream)
+{
+	mixin validateStream!Stream;
+	mixin validateConnectionStream!ConnectionStream;
+	return FreeListRef!ConnectionProxyStream(interfaceProxy!(.Stream)(stream), interfaceProxy!(.ConnectionStream)(connection_stream), true);
+}
+
+ConnectionProxyStream createConnectionProxyStream(InputStream, OutputStream, ConnectionStream)(InputStream input, OutputStream output, ConnectionStream connection_stream)
+	if (isInputStream!InputStream && isOutputStream!OutputStream && isConnectionStream!ConnectionStream)
+{
+	return new ConnectionProxyStream(interfaceProxy!(.InputStream)(input), interfaceProxy!(.OutputStream)(output), interfaceProxy!(.ConnectionStream)(connection_stream), true);
+}
 
 
 /**
 	Provides a way to access varying streams using a constant stream reference.
 */
 class ProxyStream : Stream {
+@safe:
 	private {
-		InputStream m_input;
-		OutputStream m_output;
-		Stream m_underlying;
+		InterfaceProxy!(.InputStream) m_input;
+		InterfaceProxy!(.OutputStream) m_output;
+		InterfaceProxy!(.Stream) m_underlying;
 	}
 
+	deprecated("Use createProxyStream instead.")
 	this(Stream stream = null)
+	{
+		m_underlying = interfaceProxy!Stream(stream);
+		m_input = interfaceProxy!InputStream(stream);
+		m_output = interfaceProxy!OutputStream(stream);
+	}
+
+	deprecated("Use createProxyStream instead.")
+	this(InputStream input, OutputStream output)
+	{
+		m_input = interfaceProxy!InputStream(input);
+		m_output = interfaceProxy!OutputStream(output);
+	}
+
+	/// private
+	this(InterfaceProxy!Stream stream, bool dummy)
 	{
 		m_underlying = stream;
 		m_input = stream;
 		m_output = stream;
 	}
 
-	this(InputStream input, OutputStream output)
+	/// private
+	this(InterfaceProxy!InputStream input, InterfaceProxy!OutputStream output, bool dummy)
 	{
 		m_input = input;
 		m_output = output;
 	}
 
 	/// The stream that is wrapped by this one
-	@property inout(Stream) underlying() inout { return m_underlying; }
+	@property inout(InterfaceProxy!Stream) underlying() inout { return m_underlying; }
 	/// ditto
-	@property void underlying(Stream value) { m_underlying = value; m_input = value; m_output = value; }
+	@property void underlying(InterfaceProxy!Stream value) { m_underlying = value; m_input = value; m_output = value; }
+	/// ditto
+	static if (!is(Stream == InterfaceProxy!Stream))
+		@property void underlying(Stream value) { this.underlying = interfaceProxy!Stream(value); }
 
 	@property bool empty() { return m_input ? m_input.empty : true; }
 
@@ -50,15 +109,17 @@ class ProxyStream : Stream {
 
 	const(ubyte)[] peek() { return m_input.peek(); }
 
-	void read(ubyte[] dst) { m_input.read(dst); }
+	size_t read(scope ubyte[] dst, IOMode mode) { return m_input.read(dst, mode); }
 
-	void write(in ubyte[] bytes) { m_output.write(bytes); }
+	alias read = Stream.read;
+
+	size_t write(in ubyte[] bytes, IOMode mode) { return m_output.write(bytes, mode); }
+
+	alias write = Stream.write;
 
 	void flush() { m_output.flush(); }
 
 	void finalize() { m_output.finalize(); }
-
-	void write(InputStream stream, ulong nbytes = 0) { m_output.write(stream, nbytes); }
 }
 
 
@@ -71,23 +132,39 @@ class ProxyStream : Stream {
 	SSL streams in a ConnectionStream.
 */
 class ConnectionProxyStream : ConnectionStream {
+@safe:
+
 	private {
-		ConnectionStream m_connection;
-		Stream m_underlying;
-		InputStream m_input;
-		OutputStream m_output;
+		InterfaceProxy!ConnectionStream m_connection;
+		InterfaceProxy!Stream m_underlying;
+		InterfaceProxy!InputStream m_input;
+		InterfaceProxy!OutputStream m_output;
 	}
 
+	deprecated("Use createConnectionProxyStream instead.")
 	this(Stream stream, ConnectionStream connection_stream)
-	in { assert(stream !is null); }
-	body {
+	{
+		this(interfaceProxy!Stream(stream), interfaceProxy!ConnectionStream(connection_stream), true);
+	}
+
+	deprecated("Use createConnectionProxyStream instead.")
+	this(InputStream input, OutputStream output, ConnectionStream connection_stream)
+	{
+		this(interfaceProxy!InputStream(input), interfaceProxy!OutputStream(output), interfaceProxy!ConnectionStream(connection_stream), true);
+	}
+
+	/// private
+	this(InterfaceProxy!Stream stream, InterfaceProxy!ConnectionStream connection_stream, bool dummy)
+	{
+		assert(!!stream);
 		m_underlying = stream;
 		m_input = stream;
 		m_output = stream;
 		m_connection = connection_stream;
 	}
 
-	this(InputStream input, OutputStream output, ConnectionStream connection_stream)
+	/// private
+	this(InterfaceProxy!InputStream input, InterfaceProxy!OutputStream output, InterfaceProxy!ConnectionStream connection_stream, bool dummy)
 	{
 		m_input = input;
 		m_output = output;
@@ -122,9 +199,12 @@ class ConnectionProxyStream : ConnectionStream {
 	}
 
 	/// The stream that is wrapped by this one
-	@property inout(Stream) underlying() inout { return m_underlying; }
+	@property inout(InterfaceProxy!Stream) underlying() inout { return m_underlying; }
 	/// ditto
-	@property void underlying(Stream value) { m_underlying = value; m_input = value; m_output = value; }
+	@property void underlying(InterfaceProxy!Stream value) { m_underlying = value; m_input = value; m_output = value; }
+	/// ditto
+	static if (!is(Stream == InterfaceProxy!Stream))
+		@property void underlying(Stream value) { this.underlying = InterfaceProxy!Stream(value); }
 
 	@property bool empty() { return m_input ? m_input.empty : true; }
 
@@ -134,15 +214,17 @@ class ConnectionProxyStream : ConnectionStream {
 
 	const(ubyte)[] peek() { return m_input.peek(); }
 
-	void read(ubyte[] dst) { m_input.read(dst); }
+	size_t read(scope ubyte[] dst, IOMode mode) { return m_input.read(dst, mode); }
 
-	void write(in ubyte[] bytes) { m_output.write(bytes); }
+	alias read = ConnectionStream.read;
+
+	size_t write(in ubyte[] bytes, IOMode mode) { return m_output.write(bytes, mode); }
+
+	alias write = ConnectionStream.write;
 
 	void flush() { m_output.flush(); }
 
 	void finalize() { m_output.finalize(); }
-
-	void write(InputStream stream, ulong nbytes = 0) { m_output.write(stream, nbytes); }
 }
 
 
@@ -161,6 +243,8 @@ class ConnectionProxyStream : ConnectionStream {
 	request-response scenarios.
 */
 struct StreamInputRange {
+@safe:
+
 	private {
 		struct Buffer {
 			ubyte[256] data = void;
@@ -203,11 +287,17 @@ struct StreamInputRange {
 /**
 	Implements a buffered output range interface on top of an OutputStream.
 */
-struct StreamOutputRange {
+StreamOutputRange!OutputStream StreamOutputRange()(OutputStream stream) { return StreamOutputRange!OutputStream(stream); }
+/// ditto
+struct StreamOutputRange(OutputStream, size_t buffer_size = 256)
+	if (isOutputStream!OutputStream)
+{
+@safe:
+
 	private {
 		OutputStream m_stream;
 		size_t m_fill = 0;
-		ubyte[256] m_data = void;
+		ubyte[buffer_size] m_data = void;
 	}
 
 	@disable this(this);
@@ -229,6 +319,11 @@ struct StreamOutputRange {
 		m_fill = 0;
 	}
 
+	void drop()
+	{
+		m_fill = 0;
+	}
+
 	void put(ubyte bt)
 	{
 		m_data[m_fill++] = bt;
@@ -237,6 +332,13 @@ struct StreamOutputRange {
 
 	void put(const(ubyte)[] bts)
 	{
+		// avoid writing more chunks than necessary
+		if (bts.length + m_fill >= m_data.length * 2) {
+			flush();
+			m_stream.write(bts);
+			return;
+		}
+
 		while (bts.length) {
 			auto len = min(m_data.length - m_fill, bts.length);
 			m_data[m_fill .. m_fill + len] = bts[0 .. len];
@@ -259,11 +361,17 @@ struct StreamOutputRange {
 
 	void put(const(dchar)[] elems) { foreach( ch; elems ) put(ch); }
 }
+/// ditto
+auto streamOutputRange(size_t buffer_size = 256, OutputStream)(OutputStream stream)
+	if (isOutputStream!OutputStream)
+{
+	return StreamOutputRange!(OutputStream, buffer_size)(stream);
+}
 
 unittest {
 	static long writeLength(ARGS...)(ARGS args) {
 		import vibe.stream.memory;
-		auto dst = new MemoryOutputStream;
+		auto dst = createMemoryOutputStream;
 		{
 			auto rng = StreamOutputRange(dst);
 			foreach (a; args) rng.put(a);

@@ -15,7 +15,9 @@ import vibe.inet.message;
 import vibe.stream.operations;
 import vibe.textfilter.urlencode : urlEncode, urlDecode;
 import vibe.utils.array;
-import vibe.utils.memory;
+import vibe.internal.allocator;
+import vibe.internal.freelistref;
+import vibe.internal.interfaceproxy : InterfaceProxy, interfaceProxy;
 import vibe.utils.string;
 
 import std.algorithm;
@@ -81,11 +83,13 @@ enum HTTPMethod {
 	Returns the string representation of the given HttpMethod.
 */
 string httpMethodString(HTTPMethod m)
-{
+@safe nothrow {
 	switch(m){
 		case HTTPMethod.BASELINECONTROL: return "BASELINE-CONTROL";
 		case HTTPMethod.VERSIONCONTROL: return "VERSION-CONTROL";
-		default: return to!string(m);
+		default:
+			try return to!string(m);
+			catch (Exception e) assert(false, e.msg);
 	}
 }
 
@@ -93,7 +97,7 @@ string httpMethodString(HTTPMethod m)
 	Returns the HttpMethod value matching the given HTTP method string.
 */
 HTTPMethod httpMethodFromString(string str)
-{
+@safe {
 	switch(str){
 		default: throw new Exception("Invalid HTTP method: "~str);
 		// HTTP standard, RFC 2616
@@ -170,8 +174,10 @@ T enforceBadRequest(T)(T condition, lazy string message = null, string file = __
 	Represents an HTTP request made to a server.
 */
 class HTTPRequest {
+	@safe:
+
 	protected {
-		Stream m_conn;
+		InterfaceProxy!Stream m_conn;
 	}
 
 	public {
@@ -181,19 +187,22 @@ class HTTPRequest {
 		/// The HTTP _method of the request
 		HTTPMethod method = HTTPMethod.GET;
 
-		/** The request URL
+		/** The request URI
 
-			Note that the request URL usually does not include the global
+			Note that the request URI usually does not include the global
 			'http://server' part, but only the local path and a query string.
 			A possible exception is a proxy server, which will get full URLs.
 		*/
-		string requestURL = "/";
+		string requestURI = "/";
+
+		/// Compatibility alias - scheduled for deprecation
+		alias requestURL = requestURI;
 
 		/// All request _headers
 		InetHeaderMap headers;
 	}
 
-	protected this(Stream conn)
+	protected this(InterfaceProxy!Stream conn)
 	{
 		m_conn = conn;
 	}
@@ -266,6 +275,8 @@ class HTTPRequest {
 	Represents the HTTP response from the server back to the client.
 */
 class HTTPResponse {
+	@safe:
+
 	public {
 		/// The protocol version of the response - should not be changed
 		HTTPVersion httpVersion = HTTPVersion.HTTP_1_1;
@@ -307,6 +318,8 @@ class HTTPResponse {
 	Throwing this exception from within a request handler will produce a matching error page.
 */
 class HTTPStatusException : Exception {
+	@safe:
+
 	private {
 		int m_status;
 	}
@@ -333,7 +346,7 @@ final class MultiPart {
 }
 
 string getHTTPVersionString(HTTPVersion ver)
-{
+@safe nothrow {
 	final switch(ver){
 		case HTTPVersion.HTTP_1_0: return "HTTP/1.0";
 		case HTTPVersion.HTTP_1_1: return "HTTP/1.1";
@@ -342,7 +355,7 @@ string getHTTPVersionString(HTTPVersion ver)
 
 
 HTTPVersion parseHTTPVersion(ref string str)
-{
+@safe {
 	enforceBadRequest(str.startsWith("HTTP/"));
 	str = str[5 .. $];
 	int majorVersion = parse!int(str);
@@ -358,15 +371,25 @@ HTTPVersion parseHTTPVersion(ref string str)
 /**
 	Takes an input stream that contains data in HTTP chunked format and outputs the raw data.
 */
-final class ChunkedInputStream : InputStream {
+final class ChunkedInputStream : InputStream
+{
+	@safe:
+
 	private {
-		InputStream m_in;
+		InterfaceProxy!InputStream m_in;
 		ulong m_bytesInCurrentChunk = 0;
 	}
 
+	deprecated("Use createChunkedInputStream() instead.")
 	this(InputStream stream)
 	{
-		assert(stream !is null);
+		this(interfaceProxy!InputStream(stream), true);
+	}
+
+	/// private
+	this(InterfaceProxy!InputStream stream, bool dummy)
+	{
+		assert(!!stream);
 		m_in = stream;
 		readChunk();
 	}
@@ -383,17 +406,21 @@ final class ChunkedInputStream : InputStream {
 		return dt[0 .. min(dt.length, m_bytesInCurrentChunk)];
 	}
 
-	void read(ubyte[] dst)
+	size_t read(scope ubyte[] dst, IOMode mode)
 	{
 		enforceBadRequest(!empty, "Read past end of chunked stream.");
-		while( dst.length > 0 ){
+		size_t nbytes = 0;
+
+		while (dst.length > 0) {
 			enforceBadRequest(m_bytesInCurrentChunk > 0, "Reading past end of chunked HTTP stream.");
 
 			auto sz = cast(size_t)min(m_bytesInCurrentChunk, dst.length);
 			m_in.read(dst[0 .. sz]);
 			dst = dst[sz .. $];
 			m_bytesInCurrentChunk -= sz;
+			nbytes += sz;
 
+			// FIXME: this blocks, but shouldn't for IOMode.once/immediat
 			if( m_bytesInCurrentChunk == 0 ){
 				// skip current chunk footer and read next chunk
 				ubyte[2] crlf;
@@ -401,15 +428,21 @@ final class ChunkedInputStream : InputStream {
 				enforceBadRequest(crlf[0] == '\r' && crlf[1] == '\n');
 				readChunk();
 			}
+
+			if (mode != IOMode.all) break;
 		}
+
+		return nbytes;
 	}
+
+	alias read = InputStream.read;
 
 	private void readChunk()
 	{
 		assert(m_bytesInCurrentChunk == 0);
 		// read chunk header
 		logTrace("read next chunk header");
-		auto ln = cast(string)m_in.readLine();
+		auto ln = () @trusted { return cast(string)m_in.readLine(); } ();
 		logTrace("got chunk header: %s", ln);
 		m_bytesInCurrentChunk = parse!ulong(ln, 16u);
 
@@ -423,21 +456,42 @@ final class ChunkedInputStream : InputStream {
 	}
 }
 
+/// Creates a new `ChunkedInputStream` instance.
+ChunkedInputStream chunkedInputStream(IS)(IS source_stream) if (isInputStream!IS)
+{
+	return new ChunkedInputStream(interfaceProxy!InputStream(source_stream), true);
+}
+
+/// Creates a new `ChunkedInputStream` instance.
+FreeListRef!ChunkedInputStream createChunkedInputStreamFL(IS)(IS source_stream) if (isInputStream!IS)
+{
+	return () @trusted { return FreeListRef!ChunkedInputStream(interfaceProxy!InputStream(source_stream), true); } ();
+}
+
 
 /**
 	Outputs data to an output stream in HTTP chunked format.
 */
 final class ChunkedOutputStream : OutputStream {
+	@safe:
+
 	alias ChunkExtensionCallback = string delegate(in ubyte[] data);
 	private {
-		OutputStream m_out;
+		InterfaceProxy!OutputStream m_out;
 		AllocAppender!(ubyte[]) m_buffer;
 		size_t m_maxBufferSize = 4*1024;
 		bool m_finalized = false;
 		ChunkExtensionCallback m_chunkExtensionCallback = null;
 	}
 
-	this(OutputStream stream, Allocator alloc = defaultAllocator())
+	deprecated("Use createChunkedOutputStream() instead.")
+	this(OutputStream stream, IAllocator alloc = theAllocator())
+	{
+		this(interfaceProxy!OutputStream(stream), alloc, true);
+	}
+
+	/// private
+	this(InterfaceProxy!OutputStream stream, IAllocator alloc, bool dummy)
 	{
 		m_out = stream;
 		m_buffer = AllocAppender!(ubyte[])(alloc);
@@ -453,7 +507,7 @@ final class ChunkedOutputStream : OutputStream {
 	@property void maxBufferSize(size_t bytes) { m_maxBufferSize = bytes; if (m_buffer.data.length >= m_maxBufferSize) flush(); }
 
 	/** A delegate used to specify the extensions for each chunk written to the underlying stream.
-	 	
+
 	 	The delegate has to be of type `string delegate(in const(ubyte)[] data)` and gets handed the
 	 	data of each chunk before it is written to the underlying stream. If it's return value is non-empty,
 	 	it will be added to the chunk's header line.
@@ -469,7 +523,7 @@ final class ChunkedOutputStream : OutputStream {
 	/// ditto
 	@property void chunkExtensionCallback(ChunkExtensionCallback cb) { m_chunkExtensionCallback = cb; }
 
-	private void append(scope void delegate(scope ubyte[] dst) del, size_t nbytes)
+	private void append(scope void delegate(scope ubyte[] dst) @safe del, size_t nbytes)
 	{
 		assert(del !is null);
 		auto sz = nbytes;
@@ -479,51 +533,37 @@ final class ChunkedOutputStream : OutputStream {
 		if (sz > 0)
 		{
 			m_buffer.reserve(sz);
-			m_buffer.append((scope ubyte[] dst) {
+			() @trusted {
+				m_buffer.append((scope ubyte[] dst) {
 					debug assert(dst.length >= sz);
 					del(dst[0..sz]);
 					return sz;
 				});
+			} ();
 		}
 	}
 
-	void write(in ubyte[] bytes_)
+	size_t write(in ubyte[] bytes_, IOMode mode)
 	{
 		assert(!m_finalized);
 		const(ubyte)[] bytes = bytes_;
+		size_t nbytes = 0;
 		while (bytes.length > 0) {
 			append((scope ubyte[] dst) {
 					auto n = dst.length;
 					dst[] = bytes[0..n];
 					bytes = bytes[n..$];
+					nbytes += n;
 				}, bytes.length);
+			if (mode == IOMode.immediate) break;
+			if (mode == IOMode.once && nbytes > 0) break;
 			if (bytes.length > 0)
 				flush();
 		}
+		return nbytes;
 	}
 
-	void write(InputStream data, ulong nbytes = 0)
-	{
-		assert(!m_finalized);
-		if( m_buffer.data.length > 0 ) flush();
-		if( nbytes == 0 ) {
-			while( !data.empty ) {
-				auto sz = data.leastSize;
-				assert(sz > 0);
-				write(data,sz);
-			}
-		} else {
-			while(nbytes > 0)
-			{
-				append((scope ubyte[] dst) {
-						nbytes -= dst.length;
-						data.read(dst);
-					}, min(nbytes, size_t.max));
-				if (nbytes > 0)
-					flush();
-			}
-		}
-	}
+	alias write = OutputStream.write;
 
 	void flush()
 	{
@@ -533,14 +573,14 @@ final class ChunkedOutputStream : OutputStream {
 			writeChunk(data);
 		}
 		m_out.flush();
-		m_buffer.reset(AppenderResetMode.reuseData);
+		() @trusted { m_buffer.reset(AppenderResetMode.reuseData); } ();
 	}
 
 	void finalize()
 	{
 		if (m_finalized) return;
 		flush();
-		m_buffer.reset(AppenderResetMode.freeData);
+		() @trusted { m_buffer.reset(AppenderResetMode.freeData); } ();
 		m_finalized = true;
 		writeChunk([]);
 		m_out.flush();
@@ -549,8 +589,8 @@ final class ChunkedOutputStream : OutputStream {
 	private void writeChunk(in ubyte[] data)
 	{
 		import vibe.stream.wrapper;
-		auto rng = StreamOutputRange(m_out);
-		formattedWrite(&rng, "%x", data.length);
+		auto rng = streamOutputRange(m_out);
+		formattedWrite(() @trusted { return &rng; } (), "%x", data.length);
 		if (m_chunkExtensionCallback !is null)
 		{
 			rng.put(';');
@@ -566,7 +606,22 @@ final class ChunkedOutputStream : OutputStream {
 	}
 }
 
+/// Creates a new `ChunkedInputStream` instance.
+ChunkedOutputStream createChunkedOutputStream(OS)(OS destination_stream, IAllocator allocator = theAllocator()) if (isOutputStream!OS)
+{
+	return new ChunkedOutputStream(interfaceProxy!OutputStream(destination_stream), allocator, true);
+}
+
+/// Creates a new `ChunkedOutputStream` instance.
+FreeListRef!ChunkedOutputStream createChunkedOutputStreamFL(OS)(OS destination_stream, IAllocator allocator = theAllocator()) if (isOutputStream!OS)
+{
+	return FreeListRef!ChunkedOutputStream(interfaceProxy!OutputStream(destination_stream), allocator, true);
+}
+
+
 final class Cookie {
+	@safe:
+
 	private {
 		string m_value;
 		string m_domain;
@@ -673,6 +728,8 @@ unittest {
 /**
 */
 struct CookieValueMap {
+	@safe:
+
 	struct Cookie {
 		/// Name of the cookie
 		string name;
@@ -705,7 +762,7 @@ struct CookieValueMap {
 		Cookie[] m_entries;
 	}
 
-	auto length(){ 
+	auto length(){
 		return m_entries.length;
 	}
 
@@ -744,7 +801,7 @@ struct CookieValueMap {
 		throw new RangeError("Non-existent cookie: "~name);
 	}
 
-	int opApply(scope int delegate(ref Cookie) del)
+	int opApply(scope int delegate(ref Cookie) @safe del)
 	{
 		foreach(ref c; m_entries)
 			if( auto ret = del(c) )
@@ -752,7 +809,7 @@ struct CookieValueMap {
 		return 0;
 	}
 
-	int opApply(scope int delegate(ref Cookie) del)
+	int opApply(scope int delegate(ref Cookie) @safe del)
 	const {
 		foreach(Cookie c; m_entries)
 			if( auto ret = del(c) )
@@ -760,7 +817,7 @@ struct CookieValueMap {
 		return 0;
 	}
 
-	int opApply(scope int delegate(string name, string value) del)
+	int opApply(scope int delegate(string name, string value) @safe del)
 	{
 		foreach(ref c; m_entries)
 			if( auto ret = del(c.name, c.value) )
@@ -768,7 +825,7 @@ struct CookieValueMap {
 		return 0;
 	}
 
-	int opApply(scope int delegate(string name, string value) del)
+	int opApply(scope int delegate(string name, string value) @safe del)
 	const {
 		foreach(Cookie c; m_entries)
 			if( auto ret = del(c.name, c.value) )

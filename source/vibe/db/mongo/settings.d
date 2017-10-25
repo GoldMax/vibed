@@ -32,9 +32,9 @@ import std.string : icmp, indexOf, toLower;
  * incomplete and should not be used.
  */
 bool parseMongoDBUrl(out MongoClientSettings cfg, string url)
-{
+@safe {
 	import std.exception : enforce;
-	
+
 	cfg = new MongoClientSettings();
 
 	string tmpUrl = url[0..$]; // Slice of the url (not a copy)
@@ -163,6 +163,7 @@ bool parseMongoDBUrl(out MongoClientSettings cfg, string url)
 				case "sockettimeoutms": setLong(cfg.socketTimeoutMS); warnNotImplemented(); break;
 				case "ssl": setBool(cfg.ssl); break;
 				case "sslverifycertificate": setBool(cfg.sslverifycertificate); break;
+				case "authmechanism": cfg.authMechanism = parseAuthMechanism(value); break;
 				case "wtimeoutms": setLong(cfg.wTimeoutMS); break;
 				case "w":
 					try {
@@ -296,6 +297,24 @@ unittest
 	assert(cfg.hosts[0].port == 27017);
 }
 
+enum MongoAuthMechanism
+{
+	none,
+	scramSHA1,
+	mongoDBCR,
+	mongoDBX509
+}
+
+private MongoAuthMechanism parseAuthMechanism(string str)
+@safe {
+	switch (str) {
+		case "SCRAM-SHA-1": return MongoAuthMechanism.scramSHA1;
+		case "MONGODB-CR": return MongoAuthMechanism.mongoDBCR;
+		case "MONGODB-X509": return MongoAuthMechanism.mongoDBX509;
+		default: throw new Exception("Auth mechanism \"" ~ str ~ "\" not supported");
+	}
+}
+
 class MongoClientSettings
 {
 	enum ushort defaultPort = 27017;
@@ -317,9 +336,10 @@ class MongoClientSettings
 	bool sslverifycertificate = true;
 	string sslPEMKeyFile;
 	string sslCAFile;
+	MongoAuthMechanism authMechanism;
 
 	static string makeDigest(string username, string password)
-	{
+	@safe {
 		return md5Of(username ~ ":mongo:" ~ password).toHexString().idup.toLower();
 	}
 }

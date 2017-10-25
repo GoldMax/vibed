@@ -20,10 +20,12 @@ import vibe.inet.url;
 import vibe.stream.counting;
 import vibe.stream.tls;
 import vibe.stream.operations;
-import vibe.stream.wrapper : ConnectionProxyStream;
+import vibe.stream.wrapper : createConnectionProxyStream;
 import vibe.stream.zlib;
 import vibe.utils.array;
-import vibe.utils.memory;
+import vibe.internal.allocator;
+import vibe.internal.freelistref;
+import vibe.internal.interfaceproxy : InterfaceProxy, interfaceProxy;
 
 import core.exception : AssertError;
 import std.algorithm : splitter;
@@ -35,6 +37,7 @@ import std.format;
 import std.string;
 import std.typecons;
 import std.datetime;
+import std.socket : AddressFamily;
 
 version(Posix)
 {
@@ -43,9 +46,12 @@ version(Posix)
 		version = UnixSocket;
 	}
 }
+
+
 /**************************************************************************************************/
 /* Public functions                                                                               */
 /**************************************************************************************************/
+@safe:
 
 /**
 	Performs a synchronous HTTP request on the specified URL.
@@ -86,9 +92,9 @@ HTTPClientResponse requestHTTP(URL url, scope void delegate(scope HTTPClientRequ
 	else
 	{
 		version(UnixSocket)
-			use_tls = url.schema == "https";
-		else
 			use_tls = url.schema == "https" || url.schema == "https+unix";
+		else
+			use_tls = url.schema == "https";
 	}
 
 	auto cli = connectHTTP(url.getFilteredHost, url.port, use_tls, settings);
@@ -118,7 +124,7 @@ HTTPClientResponse requestHTTP(URL url, scope void delegate(scope HTTPClientRequ
 	// make sure the connection stays locked if the body still needs to be read
 	if( res.m_client ) res.lockedConnection = cli;
 
-	logTrace("Returning HTTPClientResponse for conn %s", cast(void*)res.lockedConnection.__conn);
+	logTrace("Returning HTTPClientResponse for conn %s", () @trusted { return cast(void*)res.lockedConnection.__conn; } ());
 	return res;
 }
 /// ditto
@@ -207,7 +213,7 @@ unittest {
 auto connectHTTP(string host, ushort port = 0, bool use_tls = false, const(HTTPClientSettings) settings = null)
 {
 	static struct ConnInfo { string host; ushort port; bool useTLS; string proxyIP; ushort proxyPort; NetworkAddress bind_addr; }
-	static FixedRingBuffer!(Tuple!(ConnInfo, ConnectionPool!HTTPClient), 16) s_connections;
+	static vibe.utils.array.FixedRingBuffer!(Tuple!(ConnInfo, ConnectionPool!HTTPClient), 16) s_connections;
 
 	auto sttngs = settings ? settings : defaultSettings;
 
@@ -215,9 +221,11 @@ auto connectHTTP(string host, ushort port = 0, bool use_tls = false, const(HTTPC
 	auto ckey = ConnInfo(host, port, use_tls, sttngs.proxyURL.host, sttngs.proxyURL.port, sttngs.networkInterface);
 
 	ConnectionPool!HTTPClient pool;
-	foreach (c; s_connections)
+	s_connections.opApply((ref c) @safe {
 		if (c[0] == ckey)
 			pool = c[1];
+		return 0;
+	});
 
 	if (!pool) {
 		logDebug("Create HTTP client pool %s:%s %s proxy %s:%d", host, port, use_tls, sttngs.proxyURL.host, sttngs.proxyURL.port);
@@ -283,6 +291,8 @@ unittest {
 	blocking requests from different tasks.
 */
 final class HTTPClient {
+	@safe:
+
 	enum maxHeaderLineLength = 4096;
 
 	private {
@@ -291,7 +301,8 @@ final class HTTPClient {
 		ushort m_port;
 		bool m_useTLS;
 		TCPConnection m_conn;
-		Stream m_stream;
+		InterfaceProxy!Stream m_stream;
+		TLSStream m_tlsStream;
 		TLSContext m_tls;
 		static __gshared m_userAgent = "vibe.d/"~vibeVersionString~" (HTTPClient, +http://vibed.org/)";
 		static __gshared void function(TLSContext) ms_tlsSetup;
@@ -308,7 +319,7 @@ final class HTTPClient {
 	/**
 		Sets the default user agent string for new HTTP requests.
 	*/
-	static void setUserAgentString(string str) { m_userAgent = str; }
+	static void setUserAgentString(string str) @trusted { m_userAgent = str; }
 
 	/**
 		Sets a callback that will be called for every TLS context that is created.
@@ -316,7 +327,7 @@ final class HTTPClient {
 		Setting such a callback is useful for adjusting the validation parameters
 		of the TLS context.
 	*/
-	static void setTLSSetupCallback(void function(TLSContext) func) { ms_tlsSetup = func; }
+	static void setTLSSetupCallback(void function(TLSContext) @safe func) @trusted { ms_tlsSetup = func; }
 
 	/**
 		Connects to a specific server.
@@ -325,10 +336,10 @@ final class HTTPClient {
 	*/
 	void connect(string server, ushort port = 80, bool use_tls = false, const(HTTPClientSettings) settings = defaultSettings)
 	{
-		assert(m_conn is null);
+		assert(!m_conn);
 		assert(port != 0);
 		disconnect();
-		m_conn = null;
+		m_conn = TCPConnection.init;
 		m_settings = settings;
 		m_keepAliveTimeout = settings.defaultKeepAliveTimeout;
 		m_keepAliveLimit = Clock.currTime(UTC()) + m_keepAliveTimeout;
@@ -339,7 +350,7 @@ final class HTTPClient {
 			m_tls = createTLSContext(TLSContextKind.client);
 			// this will be changed to trustedCert once a proper root CA store is available by default
 			m_tls.peerValidationMode = TLSPeerValidationMode.none;
-			if (ms_tlsSetup) ms_tlsSetup(m_tls);
+			() @trusted { if (ms_tlsSetup) ms_tlsSetup(m_tls); } ();
 		}
 	}
 
@@ -356,22 +367,23 @@ final class HTTPClient {
 				catch (Exception e) logDebug("Failed to finalize connection stream when closing HTTP client connection: %s", e.msg);
 				m_conn.close();
 			}
-			if (m_stream !is m_conn) {
-				destroy(m_stream);
-				m_stream = null;
+			if (m_useTLS) {
+				() @trusted { return destroy(m_stream); } ();
+				m_stream = InterfaceProxy!Stream.init;
 			}
-			destroy(m_conn);
-			m_conn = null;
+			() @trusted { return destroy(m_conn); } ();
+			m_conn = TCPConnection.init;
 		}
 	}
 
-	private void doProxyRequest(T, U)(T* res, U requester, ref bool close_conn, ref bool has_body)
-	{
-		version (VibeManualMemoryManagement) {
-			scope request_allocator = new PoolAllocator(1024, defaultAllocator());
-			scope(exit) request_allocator.reset();
-		} else auto request_allocator = defaultAllocator();
+	private void doProxyRequest(T, U)(ref T res, U requester, ref bool close_conn, ref bool has_body)
+	@trusted { // scope new
 		import std.conv : to;
+		import vibe.internal.utilallocator: RegionListAllocator;
+		version (VibeManualMemoryManagement)
+			scope request_allocator = new RegionListAllocator!(shared(Mallocator), false)(1024, Mallocator.instance);
+		else
+			scope request_allocator = new RegionListAllocator!(shared(GCAllocator), true)(1024, GCAllocator.instance);
 
 		res.dropBody();
 		scope(failure)
@@ -407,10 +419,10 @@ final class HTTPClient {
 		has_body = doRequestWithRetry(requester, true, close_conn, connected_time);
 		m_responding = true;
 
-		static if (is (T == HTTPClientResponse*))
-			*res = new HTTPClientResponse(this, has_body, close_conn, request_allocator, connected_time);
+		static if (is(T == HTTPClientResponse))
+			res = new HTTPClientResponse(this, has_body, close_conn, request_allocator, connected_time);
 		else
-			*res = scoped!HTTPClientResponse(this, has_body, close_conn, request_allocator, connected_time);
+			res = scoped!HTTPClientResponse(this, has_body, close_conn, request_allocator, connected_time);
 
 		if (res.headers.get("Proxy-Authenticate", null) !is null){
 			res.dropBody();
@@ -438,11 +450,12 @@ final class HTTPClient {
 		once it has returned.
 	*/
 	void request(scope void delegate(scope HTTPClientRequest req) requester, scope void delegate(scope HTTPClientResponse) responder)
-	{
-		version (VibeManualMemoryManagement) {
-			scope request_allocator = new PoolAllocator(1024, defaultAllocator());
-			scope(exit) request_allocator.reset();
-		} else auto request_allocator = defaultAllocator();
+	@trusted { // scope new
+		import vibe.internal.utilallocator: RegionListAllocator;
+		version (VibeManualMemoryManagement)
+			scope request_allocator = new RegionListAllocator!(shared(Mallocator), false)(1024, Mallocator.instance);
+		else
+			scope request_allocator = new RegionListAllocator!(shared(GCAllocator), true)(1024, GCAllocator.instance);
 
 		bool close_conn;
 		SysTime connected_time;
@@ -453,7 +466,7 @@ final class HTTPClient {
 
 		// proxy implementation
 		if (res.headers.get("Proxy-Authenticate", null) !is null) {
-			doProxyRequest(&res, requester, close_conn, has_body);
+			doProxyRequest(res, requester, close_conn, has_body);
 		}
 
 		Exception user_exception;
@@ -486,11 +499,11 @@ final class HTTPClient {
 		SysTime connected_time;
 		bool has_body = doRequestWithRetry(requester, false, close_conn, connected_time);
 		m_responding = true;
-		auto res = new HTTPClientResponse(this, has_body, close_conn, defaultAllocator(), connected_time);
+		auto res = new HTTPClientResponse(this, has_body, close_conn, () @trusted { return vibeThreadAllocator(); } (), connected_time);
 
 		// proxy implementation
 		if (res.headers.get("Proxy-Authenticate", null) !is null) {
-			doProxyRequest(&res, requester, close_conn, has_body);
+			doProxyRequest(res, requester, close_conn, has_body);
 		}
 
 		return res;
@@ -512,7 +525,7 @@ final class HTTPClient {
 		 	connected_time = Clock.currTime(UTC());
 
 			close_conn = false;
-			has_body = doRequest(requester, &close_conn, false, connected_time);
+			has_body = doRequest(requester, close_conn, false, connected_time);
 
 			logTrace("HTTP client waiting for response");
 			if (!m_stream.empty) break;
@@ -522,7 +535,7 @@ final class HTTPClient {
 		return has_body;
 	}
 
-	private bool doRequest(scope void delegate(HTTPClientRequest req) requester, bool* close_conn, bool confirmed_proxy_auth = false /* basic only */, SysTime connected_time = Clock.currTime(UTC()))
+	private bool doRequest(scope void delegate(HTTPClientRequest req) requester, ref bool close_conn, bool confirmed_proxy_auth = false /* basic only */, SysTime connected_time = Clock.currTime(UTC()))
 	{
 		assert(!m_requesting, "Interleaved HTTP client requests detected!");
 		assert(!m_responding, "Interleaved HTTP client request/response detected!");
@@ -543,8 +556,8 @@ final class HTTPClient {
 				static AddressType getAddressType(string host){
 					import std.regex : regex, Captures, Regex, matchFirst;
 
-					__gshared auto IPv4Regex = regex(`^\s*((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))\s*$`, ``);
-					__gshared auto IPv6Regex = regex(`^\s*((([0-9A-Fa-f]{1,4}:){7}([0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]{1,4}:){6}(:[0-9A-Fa-f]{1,4}|((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4}){1,2})|:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){1,3})|((:[0-9A-Fa-f]{1,4})?:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){1,4})|((:[0-9A-Fa-f]{1,4}){0,2}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){1,5})|((:[0-9A-Fa-f]{1,4}){0,3}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){1,6})|((:[0-9A-Fa-f]{1,4}){0,4}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(:(((:[0-9A-Fa-f]{1,4}){1,7})|((:[0-9A-Fa-f]{1,4}){0,5}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:)))(%.+)?\s*$`, ``);
+					static IPv4Regex = regex(`^\s*((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?))\s*$`, ``);
+					static IPv6Regex = regex(`^\s*((([0-9A-Fa-f]{1,4}:){7}([0-9A-Fa-f]{1,4}|:))|(([0-9A-Fa-f]{1,4}:){6}(:[0-9A-Fa-f]{1,4}|((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4}){1,2})|:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3})|:))|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){1,3})|((:[0-9A-Fa-f]{1,4})?:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){1,4})|((:[0-9A-Fa-f]{1,4}){0,2}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){1,5})|((:[0-9A-Fa-f]{1,4}){0,3}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){1,6})|((:[0-9A-Fa-f]{1,4}){0,4}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:))|(:(((:[0-9A-Fa-f]{1,4}){1,7})|((:[0-9A-Fa-f]{1,4}){0,5}:((25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)(\.(25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)){3}))|:)))(%.+)?\s*$`, ``);
 
 					if (!matchFirst(host, IPv4Regex).empty)
 					{
@@ -564,7 +577,7 @@ final class HTTPClient {
 				alias findAddressType = memoize!getAddressType;
 
 				bool use_dns;
-				if (findAddressType(m_settings.proxyURL.host) == AddressType.Host)
+				if (() @trusted { return findAddressType(m_settings.proxyURL.host); } () == AddressType.Host)
 				{
 					use_dns = true;
 				}
@@ -588,7 +601,7 @@ final class HTTPClient {
 						sockaddr_un* s = addr.sockAddrUnix();
 						enforce(s.sun_path.length > m_server.length, "Unix sockets cannot have that long a name.");
 						s.sun_family = AF_UNIX;
-						strcpy(cast(char*)s.sun_path.ptr,m_server.toStringz());
+						() @trusted { strcpy(cast(char*)s.sun_path.ptr,m_server.toStringz()); } ();
 					} else
 					{
 						addr = resolveHost(m_server, m_settings.dnsAddressFamily);
@@ -605,37 +618,43 @@ final class HTTPClient {
 
 			m_stream = m_conn;
 			if (m_useTLS) {
-				try m_stream = createTLSStream(m_conn, m_tls, TLSStreamState.connecting, m_server, m_conn.remoteAddress);
+				try m_tlsStream = createTLSStream(m_conn, m_tls, TLSStreamState.connecting, m_server, m_conn.remoteAddress);
 				catch (Exception e) {
 					m_conn.close();
 					throw e;
 				}
+				m_stream = m_tlsStream;
 			}
 		}
 
-		auto req = scoped!HTTPClientRequest(m_stream, m_conn.localAddress);
-		req.headers["User-Agent"] = m_userAgent;
-		if (m_settings.proxyURL.host !is null){
-			req.headers["Proxy-Connection"] = "keep-alive";
-			*close_conn = false; // req.headers.get("Proxy-Connection", "keep-alive") != "keep-alive";
-			if (confirmed_proxy_auth)
-			{
-				import std.base64;
-				ubyte[] user_pass = cast(ubyte[])(m_settings.proxyURL.username ~ ":" ~ m_settings.proxyURL.password);
+		return () @trusted { // scoped
+			auto req = scoped!HTTPClientRequest(m_stream, m_conn.localAddress);
+			if (m_useTLS)
+				req.m_peerCertificate = m_tlsStream.peerCertificate;
 
-				req.headers["Proxy-Authorization"] = "Basic " ~ cast(string) Base64.encode(user_pass);
+			req.headers["User-Agent"] = m_userAgent;
+			if (m_settings.proxyURL.host !is null){
+				req.headers["Proxy-Connection"] = "keep-alive";
+				close_conn = false; // req.headers.get("Proxy-Connection", "keep-alive") != "keep-alive";
+				if (confirmed_proxy_auth)
+				{
+					import std.base64;
+					ubyte[] user_pass = cast(ubyte[])(m_settings.proxyURL.username ~ ":" ~ m_settings.proxyURL.password);
+
+					req.headers["Proxy-Authorization"] = "Basic " ~ cast(string) Base64.encode(user_pass);
+				}
 			}
-		}
-		else {
-			req.headers["Connection"] = "keep-alive";
-			*close_conn = false; // req.headers.get("Connection", "keep-alive") != "keep-alive";
-		}
-		req.headers["Accept-Encoding"] = "gzip, deflate";
-		req.headers["Host"] = m_server;
-		requester(req);
-		req.finalize();
+			else {
+				req.headers["Connection"] = "keep-alive";
+				close_conn = false; // req.headers.get("Connection", "keep-alive") != "keep-alive";
+			}
+			req.headers["Accept-Encoding"] = "gzip, deflate";
+			req.headers["Host"] = m_server;
+			requester(req);
+			req.finalize();
 
-		return req.method != HTTPMethod.HEAD;
+			return req.method != HTTPMethod.HEAD;
+		} ();
 	}
 }
 
@@ -645,21 +664,25 @@ final class HTTPClient {
 */
 final class HTTPClientRequest : HTTPRequest {
 	private {
-		OutputStream m_bodyWriter;
+		InterfaceProxy!OutputStream m_bodyWriter;
+		FreeListRef!ChunkedOutputStream m_chunkedStream;
 		bool m_headerWritten = false;
 		FixedAppender!(string, 22) m_contentLengthBuffer;
 		NetworkAddress m_localAddress;
+		TLSCertificateInformation m_peerCertificate;
 	}
 
 
 	/// private
-	this(Stream conn, NetworkAddress local_addr)
+	this(InterfaceProxy!Stream conn, NetworkAddress local_addr)
 	{
 		super(conn);
 		m_localAddress = local_addr;
 	}
 
 	@property NetworkAddress localAddress() const { return m_localAddress; }
+
+	@property ref inout(TLSCertificateInformation) peerCertificate() inout { return m_peerCertificate; }
 
 	/**
 		Accesses the Content-Length header of the request.
@@ -675,7 +698,7 @@ final class HTTPClientRequest : HTTPRequest {
 	}
 
 	/**
-		Writes the whole response body at once using raw bytes.
+		Writes the whole request body at once using raw bytes.
 	*/
 	void writeBody(RandomAccessStream data)
 	{
@@ -685,14 +708,14 @@ final class HTTPClientRequest : HTTPRequest {
 	void writeBody(InputStream data)
 	{
 		headers["Transfer-Encoding"] = "chunked";
-		bodyWriter.write(data);
+		data.pipe(bodyWriter);
 		finalize();
 	}
 	/// ditto
 	void writeBody(InputStream data, ulong length)
 	{
 		headers["Content-Length"] = clengthString(length);
-		bodyWriter.write(data, length);
+		data.pipe(bodyWriter, length);
 		finalize();
 	}
 	/// ditto
@@ -705,11 +728,11 @@ final class HTTPClientRequest : HTTPRequest {
 	}
 
 	/**
-		Writes the response body as JSON data.
+		Writes the request body as JSON data.
 	*/
 	void writeJsonBody(T)(T data, bool allow_chunked = false)
 	{
-		import vibe.stream.wrapper;
+		import vibe.stream.wrapper : streamOutputRange;
 
 		headers["Content-Type"] = "application/json";
 
@@ -717,15 +740,39 @@ final class HTTPClientRequest : HTTPRequest {
 		if (!allow_chunked) {
 			import vibe.internal.rangeutil;
 			long length = 0;
-			auto counter = RangeCounter(&length);
-			serializeToJson(counter, data);
+			auto counter = () @trusted { return RangeCounter(&length); } ();
+			() @trusted { serializeToJson(counter, data); } ();
 			headers["Content-Length"] = clengthString(length);
 		}
 
-		auto rng = StreamOutputRange(bodyWriter);
-		serializeToJson(&rng, data);
+		auto rng = streamOutputRange!1024(bodyWriter);
+		() @trusted { serializeToJson(&rng, data); } ();
 		rng.flush();
 		finalize();
+	}
+
+	/** Writes the request body as form data.
+	*/
+	void writeFormBody(T)(T key_value_map)
+	{
+		import vibe.inet.webform : formEncode;
+		import vibe.stream.wrapper : streamOutputRange;
+
+		import vibe.internal.rangeutil;
+		long length = 0;
+		auto counter = () @trusted { return RangeCounter(&length); } ();
+		counter.formEncode(key_value_map);
+		headers["Content-Length"] = clengthString(length);
+		headers["Content-Type"] = "application/x-www-form-urlencoded";
+		auto dst = streamOutputRange!1024(bodyWriter);
+		() @trusted { return &dst; } ().formEncode(key_value_map);
+	}
+
+	///
+	unittest {
+		void test(HTTPClientRequest req) {
+			req.writeFormBody(["foo": "bar"]);
+		}
 	}
 
 	void writePart(MultiPart part)
@@ -739,7 +786,7 @@ final class HTTPClientRequest : HTTPRequest {
 		The first retrieval will cause the request header to be written, make sure
 		that all headers are set up in advance.s
 	*/
-	@property OutputStream bodyWriter()
+	@property InterfaceProxy!OutputStream bodyWriter()
 	{
 		if (m_bodyWriter) return m_bodyWriter;
 
@@ -754,8 +801,10 @@ final class HTTPClientRequest : HTTPRequest {
 		writeHeader();
 		m_bodyWriter = m_conn;
 
-		if (headers.get("Transfer-Encoding", null) == "chunked")
-			m_bodyWriter = new ChunkedOutputStream(m_bodyWriter);
+		if (headers.get("Transfer-Encoding", null) == "chunked") {
+			m_chunkedStream = createChunkedOutputStreamFL(m_bodyWriter);
+			m_bodyWriter = m_chunkedStream;
+		}
 
 		return m_bodyWriter;
 	}
@@ -767,15 +816,15 @@ final class HTTPClientRequest : HTTPRequest {
 		assert(!m_headerWritten, "HTTPClient tried to write headers twice.");
 		m_headerWritten = true;
 
-		auto output = StreamOutputRange(m_conn);
+		auto output = streamOutputRange!1024(m_conn);
 
-		formattedWrite(&output, "%s %s %s\r\n", httpMethodString(method), requestURL, getHTTPVersionString(httpVersion));
+		formattedWrite(() @trusted { return &output; } (), "%s %s %s\r\n", httpMethodString(method), requestURL, getHTTPVersionString(httpVersion));
 		logTrace("--------------------");
 		logTrace("HTTP client request:");
 		logTrace("--------------------");
 		logTrace("%s", this);
-		foreach( k, v; headers ){
-			formattedWrite(&output, "%s: %s\r\n", k, v);
+		foreach (k, v; headers) {
+			() @trusted { formattedWrite(&output, "%s: %s\r\n", k, v); } ();
 			logTrace("%s: %s", k, v);
 		}
 		output.put("\r\n");
@@ -792,19 +841,20 @@ final class HTTPClientRequest : HTTPRequest {
 		if (!m_headerWritten) writeHeader();
 		else {
 			bodyWriter.flush();
-			if (m_bodyWriter !is m_conn) {
+			if (m_chunkedStream) {
 				m_bodyWriter.finalize();
 				m_conn.flush();
 			}
-			m_bodyWriter = null;
+			m_bodyWriter = typeof(m_bodyWriter).init;
+			m_conn = typeof(m_conn).init;
 		}
 	}
 
 	private string clengthString(ulong len)
 	{
 		m_contentLengthBuffer.clear();
-		formattedWrite(&m_contentLengthBuffer, "%s", len);
-		return m_contentLengthBuffer.data;
+		() @trusted { formattedWrite(&m_contentLengthBuffer, "%s", len); } ();
+		return () @trusted { return m_contentLengthBuffer.data; } ();
 	}
 }
 
@@ -813,15 +863,16 @@ final class HTTPClientRequest : HTTPRequest {
 	Represents a HTTP client response (as received from the server).
 */
 final class HTTPClientResponse : HTTPResponse {
+	@safe:
+
 	private {
 		HTTPClient m_client;
 		LockedConnection!HTTPClient lockedConnection;
 		FreeListRef!LimitedInputStream m_limitedInputStream;
 		FreeListRef!ChunkedInputStream m_chunkedInputStream;
-		FreeListRef!GzipInputStream m_gzipInputStream;
-		FreeListRef!DeflateInputStream m_deflateInputStream;
+		FreeListRef!ZlibInputStream m_zlibInputStream;
 		FreeListRef!EndCallbackInputStream m_endCallback;
-		InputStream m_bodyReader;
+		InterfaceProxy!InputStream m_bodyReader;
 		bool m_closeConn;
 		int m_maxRequests;
 	}
@@ -833,7 +884,7 @@ final class HTTPClientResponse : HTTPResponse {
 	}
 
 	/// private
-	this(HTTPClient client, bool has_body, bool close_conn, Allocator alloc = defaultAllocator(), SysTime connected_time = Clock.currTime(UTC()))
+	this(HTTPClient client, bool has_body, bool close_conn, IAllocator alloc, SysTime connected_time = Clock.currTime(UTC()))
 	{
 		m_client = client;
 		m_closeConn = close_conn;
@@ -842,7 +893,7 @@ final class HTTPClientResponse : HTTPResponse {
 
 		// read and parse status line ("HTTP/#.# #[ $]\r\n")
 		logTrace("HTTP client reading status line");
-		string stln = cast(string)client.m_stream.readLine(HTTPClient.maxHeaderLineLength, "\r\n", alloc);
+		string stln = () @trusted { return cast(string)client.m_stream.readLine(HTTPClient.maxHeaderLineLength, "\r\n", alloc); } ();
 		logTrace("stln: %s", stln);
 		this.httpVersion = parseHTTPVersion(stln);
 
@@ -901,7 +952,7 @@ final class HTTPClientResponse : HTTPResponse {
 	/**
 		An input stream suitable for reading the response body.
 	*/
-	@property InputStream bodyReader()
+	@property InterfaceProxy!InputStream bodyReader()
 	{
 		if( m_bodyReader ) return m_bodyReader;
 
@@ -910,13 +961,13 @@ final class HTTPClientResponse : HTTPResponse {
 		// prepare body the reader
 		if (auto pte = "Transfer-Encoding" in this.headers) {
 			enforce(*pte == "chunked");
-			m_chunkedInputStream = FreeListRef!ChunkedInputStream(m_client.m_stream);
+			m_chunkedInputStream = createChunkedInputStreamFL(m_client.m_stream);
 			m_bodyReader = this.m_chunkedInputStream;
 		} else if (auto pcl = "Content-Length" in this.headers) {
-			m_limitedInputStream = FreeListRef!LimitedInputStream(m_client.m_stream, to!ulong(*pcl));
+			m_limitedInputStream = createLimitedInputStreamFL(m_client.m_stream, to!ulong(*pcl));
 			m_bodyReader = m_limitedInputStream;
 		} else if (isKeepAliveResponse) {
-			m_limitedInputStream = FreeListRef!LimitedInputStream(m_client.m_stream, 0);
+			m_limitedInputStream = createLimitedInputStreamFL(m_client.m_stream, 0);
 			m_bodyReader = m_limitedInputStream;
 		} else {
 			m_bodyReader = m_client.m_stream;
@@ -924,17 +975,17 @@ final class HTTPClientResponse : HTTPResponse {
 
 		if( auto pce = "Content-Encoding" in this.headers ){
 			if( *pce == "deflate" ){
-				m_deflateInputStream = FreeListRef!DeflateInputStream(m_bodyReader);
-				m_bodyReader = m_deflateInputStream;
+				m_zlibInputStream = createDeflateInputStreamFL(m_bodyReader);
+				m_bodyReader = m_zlibInputStream;
 			} else if( *pce == "gzip" || *pce == "x-gzip"){
-				m_gzipInputStream = FreeListRef!GzipInputStream(m_bodyReader);
-				m_bodyReader = m_gzipInputStream;
+				m_zlibInputStream = createGzipInputStreamFL(m_bodyReader);
+				m_bodyReader = m_zlibInputStream;
 			}
 			else enforce(*pce == "identity" || *pce == "", "Unsuported content encoding: "~*pce);
 		}
 
 		// be sure to free resouces as soon as the response has been read
-		m_endCallback = FreeListRef!EndCallbackInputStream(m_bodyReader, &this.finalize);
+		m_endCallback = createEndCallbackInputStreamFL(m_bodyReader, &this.finalize);
 		m_bodyReader = m_endCallback;
 
 		return m_bodyReader;
@@ -950,10 +1001,20 @@ final class HTTPClientResponse : HTTPResponse {
 		taken. Failure to read the right amount of data will lead to
 		protocol corruption in later requests.
 	*/
-	void readRawBody(scope void delegate(scope InputStream stream) del)
+	void readRawBody(scope void delegate(scope InterfaceProxy!InputStream stream) @safe del)
 	{
 		assert(!m_bodyReader, "May not mix use of readRawBody and bodyReader.");
-		del(m_client.m_stream);
+		del(interfaceProxy!InputStream(m_client.m_stream));
+		finalize();
+	}
+	/// ditto
+	static if (!is(InputStream == InterfaceProxy!InputStream))
+	void readRawBody(scope void delegate(scope InputStream stream) @safe del)
+	{
+		import vibe.internal.interfaceproxy : asInterface;
+
+		assert(!m_bodyReader, "May not mix use of readRawBody and bodyReader.");
+		del(m_client.m_stream.asInterface!(.InputStream));
 		finalize();
 	}
 
@@ -962,7 +1023,7 @@ final class HTTPClientResponse : HTTPResponse {
 	*/
 	Json readJson(){
 		auto bdy = bodyReader.readAllUTF8();
-		return parseJson(bdy);
+		return () @trusted { return parseJson(bdy); } ();
 	}
 
 	/**
@@ -974,7 +1035,7 @@ final class HTTPClientResponse : HTTPResponse {
 			if( bodyReader.empty ){
 				finalize();
 			} else {
-				nullSink().write(bodyReader);
+				bodyReader.pipe(nullSink);
 				assert(!lockedConnection.__conn);
 			}
 		}
@@ -1018,21 +1079,21 @@ final class HTTPClientResponse : HTTPResponse {
 		enforce(resNewProto, "Server did not send an Upgrade header");
 		enforce(!new_protocol.length || !icmp(*resNewProto, new_protocol),
 			"Expected Upgrade: " ~ new_protocol ~", received Upgrade: " ~ *resNewProto);
-		auto stream = new ConnectionProxyStream(m_client.m_stream, m_client.m_conn);
+		auto stream = createConnectionProxyStream!(typeof(m_client.m_stream), typeof(m_client.m_conn))(m_client.m_stream, m_client.m_conn);
 		m_client.m_responding = false;
 		m_client = null;
 		m_closeConn = true; // cannot reuse connection for further requests!
 		return stream;
 	}
 	/// ditto
-	void switchProtocol(string new_protocol, scope void delegate(ConnectionStream str) del)
+	void switchProtocol(string new_protocol, scope void delegate(ConnectionStream str) @safe del)
 	{
 		enforce(statusCode == HTTPStatus.switchingProtocols, "Server did not send a 101 - Switching Protocols response");
 		string *resNewProto = "Upgrade" in headers;
 		enforce(resNewProto, "Server did not send an Upgrade header");
 		enforce(!new_protocol.length || !icmp(*resNewProto, new_protocol),
 			"Expected Upgrade: " ~ new_protocol ~", received Upgrade: " ~ *resNewProto);
-		scope stream = new ConnectionProxyStream(m_client.m_stream, m_client.m_conn);
+		scope stream = createConnectionProxyStream(m_client.m_stream, m_client.m_conn);
 		m_client.m_responding = false;
 		m_client = null;
 		m_closeConn = true;
@@ -1061,8 +1122,7 @@ final class HTTPClientResponse : HTTPResponse {
 		auto cli = m_client;
 		m_client = null;
 		cli.m_responding = false;
-		destroy(m_deflateInputStream);
-		destroy(m_gzipInputStream);
+		destroy(m_zlibInputStream);
 		destroy(m_chunkedInputStream);
 		destroy(m_limitedInputStream);
 		if (disconnect) cli.disconnect();
@@ -1071,7 +1131,7 @@ final class HTTPClientResponse : HTTPResponse {
 }
 
 /** Returns clean host string. In case of unix socket it performs urlDecode on host. */
-private auto getFilteredHost(URL url)
+package auto getFilteredHost(URL url)
 {
 	version(UnixSocket)
 	{
@@ -1085,4 +1145,8 @@ private auto getFilteredHost(URL url)
 }
 
 // This object is a placeholder and should to never be modified.
-package __gshared HTTPClientSettings defaultSettings = new HTTPClientSettings;
+package @property const(HTTPClientSettings) defaultSettings()
+@trusted {
+	__gshared HTTPClientSettings ret = new HTTPClientSettings;
+	return ret;
+}

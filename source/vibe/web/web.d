@@ -21,6 +21,7 @@ public import vibe.web.i18n;
 public import vibe.web.validation;
 
 import vibe.core.core;
+import vibe.inet.url;
 import vibe.http.common;
 import vibe.http.router;
 import vibe.http.server;
@@ -33,7 +34,6 @@ import std.encoding : sanitize;
 	TODO:
 		- conversion errors of path place holder parameters should result in 404
 		- support format patterns for redirect()
-		- add a way to specify response headers without explicit access to "res"
 */
 
 
@@ -181,12 +181,12 @@ URLRouter registerWebInterface(C : Object, MethodStyle method_style = MethodStyl
 					registerWebInterface!RT(router, __traits(getMember, instance, M)(), subsettings);
 				} else {
 					auto fullurl = concatURL(url_prefix, url);
-					router.match(minfo.method, fullurl, (req, res) {
+					router.match(minfo.method, fullurl, (HTTPServerRequest req, HTTPServerResponse res) @trusted {
 						handleRequest!(M, overload)(req, res, instance, settings);
 					});
 					if (settings.ignoreTrailingSlash && !fullurl.endsWith("*") && fullurl != "/") {
 						auto m = fullurl.endsWith("/") ? fullurl[0 .. $-1] : fullurl ~ "/";
-						router.match(minfo.method, m, (req, res) {
+						router.match(minfo.method, m, delegate void (HTTPServerRequest req, HTTPServerResponse res) @safe {
 							static if (minfo.method == HTTPMethod.GET) {
 								URL redurl = req.fullURL;
 								auto redpath = redurl.path;
@@ -194,7 +194,7 @@ URLRouter registerWebInterface(C : Object, MethodStyle method_style = MethodStyl
 								redurl.path = redpath;
 								res.redirect(redurl);
 							} else {
-								handleRequest!(M, overload)(req, res, instance, settings);
+								() @trusted { handleRequest!(M, overload)(req, res, instance, settings); } ();
 							}
 						});
 					}
@@ -223,6 +223,7 @@ unittest {
 		@path("/")
 		void getIndex(string _error = null)
 		{
+			header("Access-Control-Allow-Origin", "Access-Control-Allow-Origin: *");
 			//render!("index.dt", _error);
 		}
 
@@ -242,6 +243,7 @@ unittest {
 		void postLogout()
 		{
 			terminateSession();
+			status(201);
 			redirect("/");
 		}
 
@@ -355,11 +357,10 @@ template render(string diet_file, ALIASES...) {
 	registered using registerWebInterface.
 */
 void redirect(string url)
-{
+@safe {
 	import std.algorithm : canFind, endsWith, startsWith;
 
-	assert(s_requestContext.req !is null, "redirect() used outside of a web interface request!");
-	alias ctx = s_requestContext;
+	auto ctx = getRequestContext();
 	URL fullurl;
 	if (url.startsWith("/")) {
 		fullurl = ctx.req.fullURL;
@@ -377,6 +378,118 @@ void redirect(string url)
 	ctx.res.redirect(fullurl);
 }
 
+///
+@safe unittest {
+	import vibe.data.json : Json;
+
+	class WebService {
+		// POST /item
+		void postItem() {
+			redirect("/item/1");
+		}
+	}
+
+	void run()
+	{
+		auto router = new URLRouter;
+		router.registerWebInterface(new WebService);
+
+		auto settings = new HTTPServerSettings;
+		settings.port = 8080;
+		listenHTTP(settings, router);
+	}
+}
+
+/**
+	Sets a response header.
+
+	Params:
+		name = name of the header to set
+		value = value of the header to set
+
+	Note that this may only be called from a function/method
+	registered using registerWebInterface.
+*/
+void header(string name, string value)
+@safe {
+	getRequestContext().res.headers[name] = value;
+}
+
+///
+@safe unittest {
+	import vibe.data.json : Json;
+
+	class WebService {
+		// POST /item
+		Json postItem() {
+			header("X-RateLimit-Remaining", "59");
+			return Json(["id": Json(100)]);
+		}
+	}
+
+	void run()
+	{
+		auto router = new URLRouter;
+		router.registerWebInterface(new WebService);
+
+		auto settings = new HTTPServerSettings;
+		settings.port = 8080;
+		listenHTTP(settings, router);
+	}
+}
+
+/**
+	Sets the response status code.
+
+	Params:
+		statusCode = the HTTPStatus code to send to the client
+
+	Note that this may only be called from a function/method
+	registered using registerWebInterface.
+*/
+void status(int statusCode) @safe
+in
+{
+	assert(100 <= statusCode && statusCode < 600);
+}
+body
+{
+	getRequestContext().res.statusCode = statusCode;
+}
+
+///
+@safe unittest {
+	import vibe.data.json : Json;
+
+	class WebService {
+		// POST /item
+		Json postItem() {
+			status(HTTPStatus.created);
+			return Json(["id": Json(100)]);
+		}
+	}
+
+	void run()
+	{
+		auto router = new URLRouter;
+		router.registerWebInterface(new WebService);
+
+		auto settings = new HTTPServerSettings;
+		settings.port = 8080;
+		listenHTTP(settings, router);
+	}
+}
+
+/**
+	Returns the agreed upon language.
+
+	Note that this may only be called from a function/method
+	registered using registerWebInterface.
+*/
+@property string language() @safe
+{
+	return getRequestContext().language;
+}
 
 /**
 	Terminates the currently active session (if any).
@@ -385,14 +498,36 @@ void redirect(string url)
 	registered using registerWebInterface.
 */
 void terminateSession()
-{
-	alias ctx = s_requestContext;
+@safe {
+	auto ctx = getRequestContext();
 	if (ctx.req.session) {
 		ctx.res.terminateSession();
 		ctx.req.session = Session.init;
 	}
 }
 
+///
+@safe unittest {
+	class WebService {
+		// automatically mapped to: POST /logout
+		void postLogout()
+		{
+			terminateSession();
+			201.status;
+			redirect("/");
+		}
+	}
+
+	void run()
+	{
+		auto router = new URLRouter;
+		router.registerWebInterface(new WebService);
+
+		auto settings = new HTTPServerSettings;
+		settings.port = 8080;
+		listenHTTP(settings, router);
+	}
+}
 
 /**
 	Translates text based on the language of the current web request.
@@ -410,19 +545,18 @@ void terminateSession()
 	See_also: $(D vibe.web.i18n.translationContext)
 */
 string trWeb(string text, string context = null)
-{
-	assert(s_requestContext.req !is null, "trWeb() used outside of a web interface request!");
-	return s_requestContext.tr(text, context);
+@safe {
+	return getRequestContext().tr(text, context);
 }
 
 /// ditto
-string trWeb(string text, string plural_text, int count, string context = null) {
-	assert(s_requestContext.req !is null, "trWeb() used outside of a web interface request!");
-	return s_requestContext.tr_plural(text, plural_text, count, context);
+string trWeb(string text, string plural_text, int count, string context = null)
+@safe {
+	return getRequestContext().tr_plural(text, plural_text, count, context);
 }
 
 ///
-unittest {
+@safe unittest {
 	struct TRC {
 		import std.typetuple;
 		alias languages = TypeTuple!("en_US", "de_DE", "fr_FR");
@@ -556,7 +690,7 @@ class WebInterfaceSettings {
 	string urlPrefix = "/";
 	bool ignoreTrailingSlash = true;
 
-	@property WebInterfaceSettings dup() const {
+	@property WebInterfaceSettings dup() const @safe {
 		auto ret = new WebInterfaceSettings;
 		ret.urlPrefix = this.urlPrefix;
 		ret.ignoreTrailingSlash = this.ignoreTrailingSlash;
@@ -579,6 +713,8 @@ class WebInterfaceSettings {
 	underlying data.
 */
 struct SessionVar(T, string name) {
+@safe:
+
 	private {
 		T m_initValue;
 	}
@@ -604,8 +740,7 @@ struct SessionVar(T, string name) {
 	*/
 	@property const(T) value()
 	{
-		assert(s_requestContext.req !is null, "SessionVar used outside of a web interface request!");
-		alias ctx = s_requestContext;
+		auto ctx = getRequestContext();
 		if (!ctx.req.session) ctx.req.session = ctx.res.startSession();
 
 		if (ctx.req.session.isKeySet(name))
@@ -617,8 +752,7 @@ struct SessionVar(T, string name) {
 	/// ditto
 	@property void value(T new_value)
 	{
-		assert(s_requestContext.req !is null, "SessionVar used outside of a web interface request!");
-		alias ctx = s_requestContext;
+		auto ctx = getRequestContext();
 		if (!ctx.req.session) ctx.req.session = ctx.res.startSession();
 		ctx.req.session.set(name, new_value);
 	}
@@ -669,8 +803,14 @@ private struct RequestContext {
 	HTTPServerRequest req;
 	HTTPServerResponse res;
 	string language;
-	string function(string, string) tr;
-	string function(string, string, int, string) tr_plural;
+	string function(string, string) @safe tr;
+	string function(string, string, int, string) @safe tr_plural;
+}
+
+private RequestContext getRequestContext()
+@trusted nothrow {
+	assert(s_requestContext.req !is null, "Request context used outside of a web interface request!");
+	return s_requestContext;
 }
 
 private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequest req, HTTPServerResponse res, C instance, WebInterfaceSettings settings, ERROR error)
@@ -679,6 +819,7 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 	import std.algorithm : countUntil, startsWith;
 	import std.traits;
 	import std.typetuple : Filter, staticIndexOf;
+	import vibe.core.stream;
 	import vibe.data.json;
 	import vibe.internal.meta.funcattr;
 	import vibe.internal.meta.uda : findFirstUDA;
@@ -695,8 +836,9 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 	else enum nested_style = NestedNameStyle.underscore;
 
 	s_requestContext = createRequestContext!overload(req, res);
+	enum hasAuth = isAuthenticated!(C, overload);
 
-	static if (isAuthenticated!(C, overload)) {
+	static if (hasAuth) {
 		auto auth_info = handleAuthentication!overload(instance, req, res);
 		if (res.headerWritten) return;
 	}
@@ -708,7 +850,7 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 		ParamError err;
 		err.field = param_names[i];
 		try {
-			static if (is(PT == AuthInfoType)) {
+			static if (hasAuth && is(PT == AuthInfoType)) {
 				params[i] = auth_info;
 			} else static if (IsAttributedParameter!(overload, param_names[i])) {
 				params[i].setVoid(computeAttributedParameterCtx!(overload, param_names[i])(instance, req, res));
@@ -750,9 +892,10 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 		} catch (HTTPStatusException ex) {
 			throw ex;
 		} catch (Exception ex) {
+			import vibe.core.log : logDebug;
 			got_error = true;
 			err.text = ex.msg;
-			err.debugText = ex.toString().sanitize;
+			debug logDebug("Error handling field '%s': %s", ex.toString().sanitize);
 		}
 
 		if (got_error) {
@@ -761,7 +904,7 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 				handleRequest!(erruda.value.displayMethodName, erruda.value.displayMethod)(req, res, instance, settings, errnfo);
 				return;
 			} else {
-				auto hex = new HTTPStatusException(HTTPStatus.badRequest, "Error handling field "~err.field~": "~err.text);
+				auto hex = new HTTPStatusException(HTTPStatus.badRequest, "Error handling field '"~err.field~"': "~err.text);
 				hex.debugMessage = err.debugText;
 				throw hex;
 			}
@@ -802,7 +945,7 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 		}
 	}
 
-	static if (isAuthenticated!(C, overload))
+	static if (hasAuth)
 		handleAuthorization!(C, overload, params)(auth_info);
 
 	// execute the method and write the result

@@ -12,6 +12,20 @@ import std.digest.sha;
 import vibe.core.stream;
 
 
+/** Creates a cryptographically secure random number generator.
+
+	Note that the returned RNG will operate in a non-blocking mode, which means
+	that if no sufficient entropy has been generated, new random numbers will be
+	generated from previous state.
+*/
+RandomNumberStream secureRNG()
+@safe {
+	static SystemRNG m_rng;
+	if (!m_rng) m_rng = new SystemRNG;
+	return m_rng;
+}
+
+
 /**
 	Base interface for all cryptographically secure RNGs.
 */
@@ -20,14 +34,16 @@ interface RandomNumberStream : InputStream {
 		Fills the buffer new random numbers.
 
 		Params:
-			buffer: The buffer that will be filled with random numbers.
+			dst = The buffer that will be filled with random numbers.
 				It will contain buffer.length random ubytes.
 				Supportes both heap-based and stack-based arrays.
 
 		Throws:
 			CryptoException on error.
 	*/
-	void read(ubyte[] dst);
+	override size_t read(scope ubyte[] dst, IOMode mode) @safe;
+
+	alias read = InputStream.read;
 }
 
 
@@ -46,6 +62,7 @@ interface RandomNumberStream : InputStream {
 	See_Also: $(LINK http://en.wikipedia.org/wiki/CryptGenRandom)
 */
 final class SystemRNG : RandomNumberStream {
+@safe:
 	import std.exception;
 
 	version(Windows)
@@ -106,7 +123,7 @@ final class SystemRNG : RandomNumberStream {
 	@property bool dataAvailableForRead() { return true; }
 	const(ubyte)[] peek() { return null; }
 
-	void read(ubyte[] buffer)
+	size_t read(scope ubyte[] buffer, IOMode mode) @trusted
 	in
 	{
 		assert(buffer.length, "buffer length must be larger than 0");
@@ -126,7 +143,10 @@ final class SystemRNG : RandomNumberStream {
 			enforce!CryptoException(fread(buffer.ptr, buffer.length, 1, m_file) == 1,
 				text("Failed to read next random number: ", errno));
 		}
+		return buffer.length;
 	}
+
+	alias read = RandomNumberStream.read;
 }
 
 //test heap-based arrays
@@ -251,7 +271,7 @@ final class HashMixerRNG(Hash, uint factor) : RandomNumberStream
 	@property bool dataAvailableForRead() { return true; }
 	const(ubyte)[] peek() { return null; }
 
-	void read(ubyte[] buffer)
+	size_t read(scope ubyte[] buffer, IOMode mode)
 	in
 	{
 		assert(buffer.length, "buffer length must be larger than 0");
@@ -259,8 +279,10 @@ final class HashMixerRNG(Hash, uint factor) : RandomNumberStream
 	}
 	body
 	{
+		auto len = buffer.length;
+
 		//use stack to allocate internal buffer
-		ubyte[factor * digestLength!Hash] internalBuffer;
+		ubyte[factor * digestLength!Hash] internalBuffer = void;
 
 		//init internal buffer
 		this.rng.read(internalBuffer);
@@ -286,7 +308,11 @@ final class HashMixerRNG(Hash, uint factor) : RandomNumberStream
 
 		//fill the buffer's end
 		buffer[0..$] = randomNumber[0..buffer.length];
+
+		return len;
 	}
+
+	alias read = RandomNumberStream.read;
 }
 
 /// A SHA-1 based mixing RNG. Alias for HashMixerRNG!(SHA1, 5).
@@ -446,11 +472,7 @@ class CryptoException : Exception
 
 version(Windows)
 {
-	static if (__VERSION__ >= 2070) {
-		import core.sys.windows.windows;
-	} else {
-		import std.c.windows.windows;
-	}
+	import core.sys.windows.windows;
 
 	private extern(Windows) nothrow
 	{

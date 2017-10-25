@@ -48,6 +48,8 @@ alias MongoErrorDescription = immutable(_MongoErrorDescription);
  */
 class MongoException : Exception
 {
+@safe:
+
 	this(string message, string file = __FILE__, int line = __LINE__, Throwable next = null)
 	{
 		super(message, file, line, next);
@@ -61,6 +63,8 @@ class MongoException : Exception
  */
 class MongoDriverException : MongoException
 {
+@safe:
+
 	this(string message, string file = __FILE__, int line = __LINE__, Throwable next = null)
 	{
 		super(message, file, line, next);
@@ -75,6 +79,8 @@ class MongoDriverException : MongoException
  */
 class MongoDBException : MongoException
 {
+@safe:
+
 	MongoErrorDescription description;
 	alias description this;
 
@@ -93,6 +99,8 @@ class MongoDBException : MongoException
  */
 class MongoAuthException : MongoException
 {
+@safe:
+
 	this(string message, string file = __FILE__, int line = __LINE__, Throwable next = null)
 	{
 		super(message, file, line, next);
@@ -106,15 +114,19 @@ class MongoAuthException : MongoException
   Note that a MongoConnection may only be used from one fiber/thread at a time.
  */
 final class MongoConnection {
-	import vibe.stream.wrapper : StreamOutputRange;
+@safe:
+
+	import vibe.stream.wrapper : StreamOutputRange, streamOutputRange;
+	import vibe.internal.interfaceproxy;
+	import vibe.core.stream : InputStream, Stream;
 
 	private {
 		MongoClientSettings m_settings;
 		TCPConnection m_conn;
-		Stream m_stream;
+		InterfaceProxy!Stream m_stream;
 		ulong m_bytesRead;
 		int m_msgid = 1;
-		StreamOutputRange m_outRange;
+		StreamOutputRange!(InterfaceProxy!Stream) m_outRange;
 	}
 
 	enum ushort defaultPort = MongoClientSettings.defaultPort;
@@ -163,7 +175,7 @@ final class MongoConnection {
 			else {
 				m_stream = m_conn;
 			}
-			m_outRange = StreamOutputRange(m_stream);
+			m_outRange = streamOutputRange(m_stream);
 		}
 		catch (Exception e) {
 			throw new MongoDriverException(format("Failed to connect to MongoDB server at %s:%s.", m_settings.hosts[0].name, m_settings.hosts[0].port), __FILE__, __LINE__, e);
@@ -172,7 +184,21 @@ final class MongoConnection {
 		m_bytesRead = 0;
 		if(m_settings.digest != string.init)
 		{
-			authenticate();
+			if (m_settings.authMechanism == MongoAuthMechanism.none)
+				authenticate();
+			else {
+				/**
+				SCRAM-SHA-1 was released in March 2015 and on a properly
+				configured Mongo instance Authentication.none is disabled.
+				However, as a fallback to avoid breakage with old setups,
+				no authentication is tried in case of an error.
+				*/
+				try
+					scramAuthenticate();
+				catch (MongoAuthException e)
+					authenticate();
+			}
+
 		}
 		else if (m_settings.sslPEMKeyFile != null && m_settings.username != null)
 		{
@@ -182,15 +208,19 @@ final class MongoConnection {
 
 	void disconnect()
 	{
-		if (m_stream) {
-			m_stream.finalize();
-			m_stream = null;
+		if (m_conn) {
+			if (m_stream && m_conn.connected) {
+				m_outRange.flush();
+
+				m_stream.finalize();
+				m_stream = InterfaceProxy!Stream.init;
+			}
+
+			m_conn.close();
+			m_conn = TCPConnection.init;
 		}
 
-		if (m_conn) {
-			m_conn.close();
-			m_conn = null;
-		}
+		m_outRange.drop();
 	}
 
 	@property bool connected() const { return m_conn && m_conn.connected; }
@@ -309,7 +339,7 @@ final class MongoConnection {
 				throw new MongoDriverException("Calling listDatabases failed.");
 		}
 
-		MongoDBInfo toInfo(const(Bson) db_doc) {
+		static MongoDBInfo toInfo(const(Bson) db_doc) {
 			return MongoDBInfo(
 				db_doc["name"].get!string,
 				db_doc["sizeOnDisk"].get!double,
@@ -317,17 +347,17 @@ final class MongoConnection {
 			);
 		}
 
-		typeof((const(Bson)[]).init.map!toInfo) result;
+		Bson result;
 		void on_doc(size_t idx, ref Bson doc) {
 			if (doc["ok"].get!double != 1.0)
 				throw new MongoAuthException("listDatabases failed.");
 
-			result = doc["databases"].get!(const(Bson)[]).map!toInfo;
+			result = doc["databases"];
 		}
 
 		query!Bson(cn, QueryFlags.None, 0, -1, cmd, Bson(null), &on_msg, &on_doc);
 
-		return result;
+		return result.byValue.map!toInfo;
 	}
 
 	private int recvReply(T)(int reqid, scope ReplyDelegate on_msg, scope DocDelegate!T on_doc)
@@ -361,13 +391,16 @@ final class MongoConnection {
 		}
 
 		on_msg(cursor, flags, start, numret);
+		static if (hasIndirections!T || is(T == Bson))
+			auto buf = new ubyte[msglen - cast(size_t)(m_bytesRead - bytes_read)];
 		foreach (i; 0 .. cast(size_t)numret) {
 			// TODO: directly deserialize from the wire
 			static if (!hasIndirections!T && !is(T == Bson)) {
 				ubyte[256] buf = void;
-				auto bson = recvBson(buf);
+				ubyte[] bufsl = buf;
+				auto bson = () @trusted { return recvBson(bufsl); } ();
 			} else {
-				auto bson = recvBson(null);
+				auto bson = () @trusted { return recvBson(buf); } ();
 			}
 
 			static if (is(T == Bson)) on_doc(i, bson);
@@ -400,8 +433,8 @@ final class MongoConnection {
 		else static if (is(T == long)) sendBytes(toBsonData(value));
 		else static if (is(T == Bson)) sendBytes(value.data);
 		else static if (is(T == string)) {
-			sendBytes(cast(ubyte[])value);
-			sendBytes(cast(ubyte[])"\0");
+			sendBytes(cast(const(ubyte)[])value);
+			sendBytes(cast(const(ubyte)[])"\0");
 		} else static if (isArray!T) {
 			foreach (v; value)
 				sendValue(v);
@@ -412,13 +445,18 @@ final class MongoConnection {
 
 	private int recvInt() { ubyte[int.sizeof] ret; recv(ret); return fromBsonData!int(ret); }
 	private long recvLong() { ubyte[long.sizeof] ret; recv(ret); return fromBsonData!long(ret); }
-	private Bson recvBson(ubyte[] buf) {
+	private Bson recvBson(ref ubyte[] buf)
+	@system {
 		int len = recvInt();
-		if (len > buf.length) buf = new ubyte[len];
-		else buf = buf[0 .. len];
-		buf[0 .. 4] = toBsonData(len)[];
-		recv(buf[4 .. $]);
-		return Bson(Bson.Type.Object, cast(immutable)buf);
+		ubyte[] dst;
+		if (len > buf.length) dst = new ubyte[len];
+		else {
+			dst = buf[0 .. len];
+			buf = buf[len .. $];
+		}
+		dst[0 .. 4] = toBsonData(len)[];
+		recv(dst[4 .. $]);
+		return Bson(Bson.Type.Object, cast(immutable)dst);
 	}
 	private void recv(ubyte[] dst) { enforce(m_stream); m_stream.read(dst); m_bytesRead += dst.length; }
 
@@ -490,6 +528,63 @@ final class MongoConnection {
 			}
 		);
 	}
+
+	private void scramAuthenticate()
+	{
+		import vibe.db.mongo.sasl;
+		string cn = (m_settings.database == string.init ? "admin" : m_settings.database) ~ ".$cmd";
+
+		ScramState state;
+		string payload = state.createInitialRequest(m_settings.username);
+
+		auto cmd = Bson.emptyObject;
+		cmd["saslStart"] = Bson(1);
+		cmd["mechanism"] = Bson("SCRAM-SHA-1");
+		cmd["payload"] = Bson(BsonBinData(BsonBinData.Type.generic, payload.representation));
+		string response;
+		Bson conversationId;
+		query!Bson(cn, QueryFlags.None, 0, -1, cmd, Bson(null),
+			(cursor, flags, first_doc, num_docs) {
+				if ((flags & ReplyFlags.QueryFailure) || num_docs != 1)
+					throw new MongoDriverException("SASL start failed.");
+			},
+			(idx, ref doc) {
+				if (doc["ok"].get!double != 1.0)
+					throw new MongoAuthException("Authentication failed.");
+				response = cast(string)doc["payload"].get!BsonBinData().rawData;
+				conversationId = doc["conversationId"];
+			});
+		payload = state.update(m_settings.digest, response);
+		cmd = Bson.emptyObject;
+		cmd["saslContinue"] = Bson(1);
+		cmd["conversationId"] = conversationId;
+		cmd["payload"] = Bson(BsonBinData(BsonBinData.Type.generic, payload.representation));
+		query!Bson(cn, QueryFlags.None, 0, -1, cmd, Bson(null),
+			(cursor, flags, first_doc, num_docs) {
+				if ((flags & ReplyFlags.QueryFailure) || num_docs != 1)
+					throw new MongoDriverException("SASL continue failed.");
+			},
+			(idx, ref doc) {
+				if (doc["ok"].get!double != 1.0)
+					throw new MongoAuthException("Authentication failed.");
+				response = cast(string)doc["payload"].get!BsonBinData().rawData;
+			});
+
+		payload = state.finalize(response);
+		cmd = Bson.emptyObject;
+		cmd["saslContinue"] = Bson(1);
+		cmd["conversationId"] = conversationId;
+		cmd["payload"] = Bson(BsonBinData(BsonBinData.Type.generic, payload.representation));
+		query!Bson(cn, QueryFlags.None, 0, -1, cmd, Bson(null),
+			(cursor, flags, first_doc, num_docs) {
+				if ((flags & ReplyFlags.QueryFailure) || num_docs != 1)
+					throw new MongoDriverException("SASL finish failed.");
+			},
+			(idx, ref doc) {
+				if (doc["ok"].get!double != 1.0)
+					throw new MongoAuthException("Authentication failed.");
+			});
+	}
 }
 
 private enum OpCode : int {
@@ -504,8 +599,8 @@ private enum OpCode : int {
 	KillCursors  = 2007
 }
 
-alias ReplyDelegate = void delegate(long cursor, ReplyFlags flags, int first_doc, int num_docs);
-template DocDelegate(T) { alias DocDelegate = void delegate(size_t idx, ref T doc); }
+alias ReplyDelegate = void delegate(long cursor, ReplyFlags flags, int first_doc, int num_docs) @safe;
+template DocDelegate(T) { alias DocDelegate = void delegate(size_t idx, ref T doc) @safe; }
 
 struct MongoDBInfo
 {

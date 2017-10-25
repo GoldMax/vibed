@@ -1,7 +1,14 @@
 /**
-	Uses libasync
+	Driver implementation for the libasync library
 
-	Copyright: © 2014 RejectedSoftware e.K., GlobecSys Inc
+	Libasync is an asynchronous library completely written in D.
+
+	See_Also:
+		`vibe.core.driver` = interface definition
+		https://github.com/etcimon/libasync = Github repository
+
+
+	Copyright: © 2014-2015 RejectedSoftware e.K., GlobecSys Inc
 	Authors: Sönke Ludwig, Etienne Cimon
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 */
@@ -16,7 +23,10 @@ import vibe.core.drivers.timerqueue;
 import vibe.core.log;
 import vibe.utils.array : FixedRingBuffer;
 
-import libasync;
+import libasync : AsyncDirectoryWatcher, AsyncDNS, AsyncFile, AsyncSignal, AsyncTimer,
+	AsyncTCPConnection, AsyncTCPListener, AsyncUDPSocket, DWFileEvent, DWChangeInfo,
+	EventLoop, NetworkAddressLA = NetworkAddress, UDPEvent, TCPEvent, TCPOption, fd_t,
+	getThreadEventLoop;
 import libasync.internals.memory;
 import libasync.types : Status;
 
@@ -30,12 +40,12 @@ import std.exception;
 import std.string;
 import std.stdio : File;
 import std.typecons;
-import std.c.stdio;
 
 import core.atomic;
 import core.memory;
 import core.thread;
 import core.sync.mutex;
+import core.stdc.stdio;
 import core.sys.posix.netinet.in_;
 
 version (Posix) import core.sys.posix.sys.socket;
@@ -44,14 +54,13 @@ version (Windows) import core.sys.windows.winsock2;
 private __gshared EventLoop gs_evLoop;
 private EventLoop s_evLoop;
 private DriverCore s_driverCore;
-private shared int s_refCount; // will destroy async threads when 0
 
 version(Windows) extern(C) {
 	FILE* _wfopen(const(wchar)* filename, in wchar* mode);
 	int _wchmod(in wchar*, int);
 }
 
-EventLoop getEventLoop() nothrow
+EventLoop getMainEventLoop() @trusted nothrow
 {
 	if (s_evLoop is null)
 		return gs_evLoop;
@@ -59,7 +68,7 @@ EventLoop getEventLoop() nothrow
 	return s_evLoop;
 }
 
-DriverCore getDriverCore() nothrow
+DriverCore getDriverCore() @safe nothrow
 {
 	assert(s_driverCore !is null);
 	return s_driverCore;
@@ -75,6 +84,7 @@ private struct TimerInfo {
 
 /// one per thread
 final class LibasyncDriver : EventDriver {
+@trusted:
 	private {
 		bool m_break = false;
 		debug Thread m_ownerThread;
@@ -87,9 +97,8 @@ final class LibasyncDriver : EventDriver {
 	this(DriverCore core) nothrow
 	{
 		assert(!isControlThread, "Libasync driver created in control thread");
-		try {			
+		try {
 			import core.atomic : atomicOp;
-			s_refCount.atomicOp!"+="(1);
 			if (!gs_mutex) {
 				import core.sync.mutex;
 				gs_mutex = new core.sync.mutex.Mutex;
@@ -113,8 +122,8 @@ final class LibasyncDriver : EventDriver {
 		s_evLoop = getThreadEventLoop();
 		if (!gs_evLoop)
 			gs_evLoop = s_evLoop;
-			
-		m_exitSignal = new shared AsyncSignal(getEventLoop());
+
+		m_exitSignal = new shared AsyncSignal(getMainEventLoop());
 		m_exitSignal.run({
 				m_break = true;
 			});
@@ -127,19 +136,16 @@ final class LibasyncDriver : EventDriver {
 		return Thread.getThis().isDaemon && Thread.getThis().name == "CmdProcessor";
 	}
 
-	void dispose() {
+	override void dispose()
+	{
 		logTrace("Deleting event driver");
 		m_break = true;
-		getEventLoop().exit();
-		if (s_refCount.atomicOp!"-="(1) == 0) {
-			import libasync.threads : destroyAsyncThreads;
-			destroyAsyncThreads();
-		}
+		getMainEventLoop().exit();
 	}
 
-	int runEventLoop()
+	override int runEventLoop()
 	{
-		while(!m_break && getEventLoop().loop(int.max.msecs)){
+		while(!m_break && getMainEventLoop().loop(int.max.msecs)){
 			processTimers();
 			getDriverCore().notifyIdle();
 		}
@@ -148,18 +154,18 @@ final class LibasyncDriver : EventDriver {
 		return 0;
 	}
 
-	int runEventLoopOnce()
+	override int runEventLoopOnce()
 	{
-		getEventLoop().loop(int.max.msecs);
+		getMainEventLoop().loop(int.max.msecs);
 		processTimers();
 		getDriverCore().notifyIdle();
 		logTrace("runEventLoopOnce exit");
 		return 0;
 	}
 
-	bool processEvents()
+	override bool processEvents()
 	{
-		getEventLoop().loop(0.seconds);
+		getMainEventLoop().loop(0.seconds);
 		processTimers();
 		if (m_break) {
 			m_break = false;
@@ -168,25 +174,25 @@ final class LibasyncDriver : EventDriver {
 		return true;
 	}
 
-	void exitEventLoop()
+	override void exitEventLoop()
 	{
 		logDebug("Exiting (%s)", m_break);
 		m_exitSignal.trigger();
 
 	}
 
-	LibasyncFileStream openFile(Path path, FileMode mode)
+	override LibasyncFileStream openFile(Path path, FileMode mode)
 	{
 		return new LibasyncFileStream(path, mode);
 	}
 
-	DirectoryWatcher watchDirectory(Path path, bool recursive)
+	override DirectoryWatcher watchDirectory(Path path, bool recursive)
 	{
 		return new LibasyncDirectoryWatcher(path, recursive);
 	}
 
 	/** Resolves the given host name or IP address string. */
-	NetworkAddress resolveHost(string host, ushort family = 2, bool use_dns = true)
+	override NetworkAddress resolveHost(string host, ushort family = 2, bool use_dns = true)
 	{
 		import libasync.types : isIPv6;
 		isIPv6 is_ipv6;
@@ -195,7 +201,7 @@ final class LibasyncDriver : EventDriver {
 			is_ipv6 = isIPv6.yes;
 		else
 			is_ipv6 = isIPv6.no;
-		
+
 		import std.regex : regex, Captures, Regex, matchFirst, ctRegex;
 		import std.traits : ReturnType;
 
@@ -218,7 +224,7 @@ final class LibasyncDriver : EventDriver {
 		{
 			use_dns = true;
 		}
-		
+
 		NetworkAddress ret;
 
 		if (use_dns) {
@@ -227,21 +233,21 @@ final class LibasyncDriver : EventDriver {
 				Task waiter;
 				NetworkAddress* address;
 				bool* finished;
-				void handler(NetworkAddress addr) {
-					*address = addr;
+				void handler(NetworkAddressLA addr) {
+					*address = NetworkAddress(addr);
 					*finished = true;
 					if (waiter != Task() && waiter != Task.getThis())
 						getDriverCore().resumeTask(waiter);
 				}
 			}
-			
+
 			DNSCallback* cb = FreeListObjectAlloc!DNSCallback.alloc();
 			cb.waiter = Task.getThis();
 			cb.address = &ret;
 			cb.finished = &done;
-			
+
 			// todo: remove the shared attribute to avoid GC?
-			shared AsyncDNS dns = new shared AsyncDNS(getEventLoop());
+			shared AsyncDNS dns = new shared AsyncDNS(getMainEventLoop());
 			scope(exit) dns.destroy();
 			bool success = dns.handler(&cb.handler).resolveHost(host, is_ipv6);
 			if (!success || dns.status.code != Status.OK)
@@ -254,14 +260,14 @@ final class LibasyncDriver : EventDriver {
 			assert(ret.family != 0);
 			logTrace("Async resolved address %s", ret.toString());
 			FreeListObjectAlloc!DNSCallback.free(cb);
-			
+
 			if (ret.family == 0)
 				ret.family = family;
-			
+
 			return ret;
 		}
 		else {
-			ret = getEventLoop().resolveIP(host, 0, is_ipv6);
+			ret = NetworkAddress(getMainEventLoop().resolveIP(host, 0, is_ipv6));
 			if (ret.family == 0)
 				ret.family = family;
 			return ret;
@@ -269,9 +275,9 @@ final class LibasyncDriver : EventDriver {
 
 	}
 
-	LibasyncTCPConnection connectTCP(NetworkAddress addr, NetworkAddress bind_addr)
+	override LibasyncTCPConnection connectTCP(NetworkAddress addr, NetworkAddress bind_addr)
 	{
-		AsyncTCPConnection conn = new AsyncTCPConnection(getEventLoop());
+		AsyncTCPConnection conn = new AsyncTCPConnection(getMainEventLoop());
 
 		LibasyncTCPConnection tcp_connection = new LibasyncTCPConnection(conn, (TCPConnection conn) {
 			Task waiter = (cast(LibasyncTCPConnection) conn).m_settings.writer.task;
@@ -281,25 +287,25 @@ final class LibasyncDriver : EventDriver {
 		});
 
 		if (Task.getThis() != Task())
-			tcp_connection.acquireWriter();
+			tcp_connection.m_settings.writer.acquire();
 
 		tcp_connection.m_tcpImpl.conn = conn;
 		//conn.local = bind_addr;
 		conn.ip(bind_addr.toAddressString(), bind_addr.port);
-		conn.peer = addr;
+		conn.peer = cast(NetworkAddressLA)addr;
 
 		enforce(conn.run(&tcp_connection.handler), "An error occured while starting a new connection: " ~ conn.error);
 
 		while (!tcp_connection.connected && !tcp_connection.m_error) getDriverCore().yieldForEvent();
 		enforce(!tcp_connection.m_error, tcp_connection.m_error);
-		tcp_connection.m_tcpImpl.localAddr = conn.local;
+		tcp_connection.m_tcpImpl.localAddr = NetworkAddress(conn.local);
 
 		if (Task.getThis() != Task())
-			tcp_connection.releaseWriter();
+			tcp_connection.m_settings.writer.release();
 		return tcp_connection;
 	}
 
-	LibasyncTCPListener listenTCP(ushort port, void delegate(TCPConnection conn) conn_callback, string address, TCPListenOptions options)
+	override LibasyncTCPListener listenTCP(ushort port, void delegate(TCPConnection conn) @safe conn_callback, string address, TCPListenOptions options)
 	{
 		NetworkAddress localaddr = getEventDriver().resolveHost(address);
 		localaddr.port = port;
@@ -307,23 +313,23 @@ final class LibasyncDriver : EventDriver {
 		return new LibasyncTCPListener(localaddr, conn_callback, options);
 	}
 
-	LibasyncUDPConnection listenUDP(ushort port, string bind_address = "0.0.0.0")
+	override LibasyncUDPConnection listenUDP(ushort port, string bind_address = "0.0.0.0")
 	{
 		NetworkAddress localaddr = getEventDriver().resolveHost(bind_address);
 		localaddr.port = port;
-		AsyncUDPSocket sock = new AsyncUDPSocket(getEventLoop());
-		sock.local = localaddr;
+		AsyncUDPSocket sock = new AsyncUDPSocket(getMainEventLoop());
+		sock.local = cast(NetworkAddressLA)localaddr;
 		auto udp_connection = new LibasyncUDPConnection(sock);
 		sock.run(&udp_connection.handler);
 		return udp_connection;
 	}
 
-	LibasyncManualEvent createManualEvent()
+	override LibasyncManualEvent createManualEvent()
 	{
 		return new LibasyncManualEvent(this);
 	}
 
-	FileDescriptorEvent createFileDescriptorEvent(int file_descriptor, FileDescriptorEvent.Trigger triggers, FileDescriptorEvent.Mode mode)
+	override FileDescriptorEvent createFileDescriptorEvent(int file_descriptor, FileDescriptorEvent.Trigger triggers, FileDescriptorEvent.Mode mode)
 	{
 		assert(false);
 	}
@@ -331,20 +337,20 @@ final class LibasyncDriver : EventDriver {
 
 	// The following timer implementation was adapted from the equivalent in libevent2.d
 
-	size_t createTimer(void delegate() callback) { return m_timers.create(TimerInfo(callback)); }
+	override size_t createTimer(void delegate() @safe callback) { return m_timers.create(TimerInfo(callback)); }
 
-	void acquireTimer(size_t timer_id) { m_timers.getUserData(timer_id).refCount++; }
-	void releaseTimer(size_t timer_id)
-	{
+	override void acquireTimer(size_t timer_id) { m_timers.getUserData(timer_id).refCount++; }
+	override void releaseTimer(size_t timer_id)
+	nothrow {
 		debug assert(m_ownerThread is Thread.getThis());
 		logTrace("Releasing timer %s", timer_id);
 		if (!--m_timers.getUserData(timer_id).refCount)
 			m_timers.destroy(timer_id);
 	}
 
-	bool isTimerPending(size_t timer_id) nothrow { return m_timers.isPending(timer_id); }
+	override bool isTimerPending(size_t timer_id) nothrow { return m_timers.isPending(timer_id); }
 
-	void rearmTimer(size_t timer_id, Duration dur, bool periodic)
+	override void rearmTimer(size_t timer_id, Duration dur, bool periodic)
 	{
 		debug assert(m_ownerThread is Thread.getThis());
 		if (!isTimerPending(timer_id)) acquireTimer(timer_id);
@@ -352,7 +358,7 @@ final class LibasyncDriver : EventDriver {
 		rescheduleTimerEvent(Clock.currTime(UTC()));
 	}
 
-	void stopTimer(size_t timer_id)
+	override void stopTimer(size_t timer_id)
 	{
 		logTrace("Stopping timer %s", timer_id);
 		if (m_timers.isPending(timer_id)) {
@@ -361,7 +367,7 @@ final class LibasyncDriver : EventDriver {
 		}
 	}
 
-	void waitTimer(size_t timer_id)
+	override void waitTimer(size_t timer_id)
 	{
 		logTrace("Waiting for timer in %s", Task.getThis());
 		debug assert(m_ownerThread is Thread.getThis());
@@ -389,7 +395,7 @@ final class LibasyncDriver : EventDriver {
 		auto now = Clock.currTime(UTC());
 		// event loop timer will need to be rescheduled because we'll process everything until now
 		m_nextSched = SysTime.max;
-		
+
 		m_timers.consumeTimeouts(now, (timer, periodic, ref data) {
 			Task owner = data.owner;
 			auto callback = data.callback;
@@ -397,7 +403,7 @@ final class LibasyncDriver : EventDriver {
 			logTrace("Timer %s fired (%s/%s)", timer, owner != Task.init, callback !is null);
 
 			if (!periodic) releaseTimer(timer);
-			
+
 			if (owner && owner.running && owner != Task.getThis()) {
 				if (Task.getThis == Task.init) getDriverCore().resumeTask(owner);
 				else getDriverCore().yieldAndResumeTask(owner);
@@ -411,11 +417,11 @@ final class LibasyncDriver : EventDriver {
 	private void rescheduleTimerEvent(SysTime now)
 	{
 		logTrace("Rescheduling timer event %s", Task.getThis());
-		
+
 		// don't bother scheduling, the timers will be processed before leaving for the event loop
 		if (m_nextSched <= Clock.currTime(UTC()))
 			return;
-		
+
 		bool first;
 		auto next = m_timers.getFirstTimeout();
 		Duration dur;
@@ -428,7 +434,7 @@ final class LibasyncDriver : EventDriver {
 			return; // will never trigger, don't bother
 		if (!m_timerEvent) {
 			//logTrace("creating new async timer");
-			m_timerEvent = new AsyncTimer(getEventLoop());
+			m_timerEvent = new AsyncTimer(getMainEventLoop());
 			bool success = m_timerEvent.duration(dur).run(&onTimerTimeout);
 			assert(success, "Failed to run timer");
 		}
@@ -456,7 +462,8 @@ final class LibasyncDriver : EventDriver {
 /// Writes or reads asynchronously (in another thread) for sizes > 64kb to benefit from kernel page cache
 /// in lower size operations.
 final class LibasyncFileStream : FileStream {
-	import vibe.inet.path : Path;
+@trusted:
+	import vibe.core.path : Path;
 
 	private {
 		Path m_path;
@@ -466,7 +473,7 @@ final class LibasyncFileStream : FileStream {
 		Task m_task;
 		Exception m_ex;
 		shared AsyncFile m_impl;
-		
+
 		bool m_started;
 		bool m_truncated;
 		bool m_finished;
@@ -493,35 +500,36 @@ final class LibasyncFileStream : FileStream {
 				fclose(f);
 				m_truncated = true;
 			}
-		} 
+		}
 		m_path = path;
 		m_mode = mode;
-		
-		m_impl = new shared AsyncFile(getEventLoop());
+
+		m_impl = new shared AsyncFile(getMainEventLoop());
 		m_impl.onReady(&handler);
-		
+
 		m_started = true;
 	}
-	
+
 	~this()
 	{
-		try close(); catch {}
+		try close();
+		catch (Exception e) { assert(false, e.msg); }
 	}
-	
-	@property Path path() const { return m_path; }
-	@property bool isOpen() const { return m_started; }
-	@property ulong size() const { return m_size; }
-	@property bool readable() const { return m_mode != FileMode.append; }
-	@property bool writable() const { return m_mode != FileMode.read; }
 
-	void seek(ulong offset)
+	override @property Path path() const { return m_path; }
+	override @property bool isOpen() const { return m_started; }
+	override @property ulong size() const { return m_size; }
+	override @property bool readable() const { return m_mode != FileMode.append; }
+	override @property bool writable() const { return m_mode != FileMode.read; }
+
+	override void seek(ulong offset)
 	{
 		m_offset = offset;
 	}
 
-	ulong tell() { return m_offset; }
+	override ulong tell() { return m_offset; }
 
-	void close()
+	override void close()
 	{
 		if (m_impl) {
 			m_impl.kill();
@@ -532,19 +540,19 @@ final class LibasyncFileStream : FileStream {
 			getDriverCore().yieldAndResumeTask(m_task, new Exception("The file was closed during an operation"));
 		else if (m_task != Task() && Task.getThis() == Task())
 			getDriverCore().resumeTask(m_task, new Exception("The file was closed during an operation"));
-		
+
 	}
 
-	@property bool empty() const { assert(this.readable); return m_offset >= m_size; }
-	@property ulong leastSize() const { assert(this.readable); return m_size - m_offset; }
-	@property bool dataAvailableForRead() { return true; }
+	override @property bool empty() const { assert(this.readable); return m_offset >= m_size; }
+	override @property ulong leastSize() const { assert(this.readable); return m_size - m_offset; }
+	override @property bool dataAvailableForRead() { return true; }
 
-	const(ubyte)[] peek()
+	override const(ubyte)[] peek()
 	{
 		return null;
 	}
 
-	void read(ubyte[] dst)
+	override size_t read(scope ubyte[] dst, IOMode)
 	{
 		scope(failure)
 			close();
@@ -559,27 +567,29 @@ final class LibasyncFileStream : FileStream {
 		m_finished = false;
 		enforce(dst.length <= leastSize);
 		enforce(m_impl.read(m_path.toNativeString(), bytes, m_offset, true, truncate_if_exists), "Failed to read data from disk: " ~ m_impl.error);
-		
+
 		if (!m_finished) {
 			acquire();
 			scope(exit) release();
 			getDriverCore().yieldForEvent();
 		}
 		m_finished = false;
-		
+
 		if (m_ex) throw m_ex;
-		
+
 		m_offset += dst.length;
 		assert(m_impl.offset == m_offset, "Incoherent offset returned from file reader: " ~ m_offset.to!string ~ "B assumed but the implementation is at: " ~ m_impl.offset.to!string ~ "B");
+
+		return dst.length;
 	}
 
 	alias Stream.write write;
-	void write(in ubyte[] bytes_)
+	override size_t write(in ubyte[] bytes_, IOMode)
 	{
 		assert(this.writable, "To write to a file, it must be opened in a write-enabled mode.");
-		
+
 		shared const(ubyte)[] bytes = cast(shared const(ubyte)[]) bytes_;
-		
+
 		bool truncate_if_exists;
 		if (!m_truncated && m_mode == FileMode.createTrunc) {
 			truncate_if_exists = true;
@@ -587,21 +597,21 @@ final class LibasyncFileStream : FileStream {
 			m_size = 0;
 		}
 		m_finished = false;
-		
+
 		if (m_mode == FileMode.append)
 			enforce(m_impl.append(m_path.toNativeString(), cast(shared ubyte[]) bytes, true, truncate_if_exists), "Failed to write data to disk: " ~ m_impl.error);
 		else
 			enforce(m_impl.write(m_path.toNativeString(), bytes, m_offset, true, truncate_if_exists), "Failed to write data to disk: " ~ m_impl.error);
-		
+
 		if (!m_finished) {
 			acquire();
 			scope(exit) release();
 			getDriverCore().yieldForEvent();
 		}
 		m_finished = false;
-		
+
 		if (m_ex) throw m_ex;
-		
+
 		if (m_mode == FileMode.append) {
 			m_size += bytes.length;
 		}
@@ -612,20 +622,17 @@ final class LibasyncFileStream : FileStream {
 			assert(m_impl.offset == m_offset, "Incoherent offset returned from file writer.");
 		}
 		//assert(getSize(m_path.toNativeString()) == m_size, "Incoherency between local size and filesize: " ~ m_size.to!string ~ "B assumed for a file of size " ~ getSize(m_path.toNativeString()).to!string ~ "B");
+
+		return bytes_.length;
 	}
 
-	void write(InputStream stream, ulong nbytes = 0)
-	{
-		writeDefault(stream, nbytes);
-	}
-
-	void flush()
+	override void flush()
 	{
 		assert(this.writable, "To write to a file, it must be opened in a write-enabled mode.");
-		
+
 	}
 
-	void finalize()
+	override void finalize()
 	{
 		if (this.writable)
 			flush();
@@ -642,11 +649,11 @@ final class LibasyncFileStream : FileStream {
 		assert(Task.getThis() == Task() || m_task == Task(), "Acquiring FileStream that is already owned.");
 		m_task = Task.getThis();
 	}
-	
+
 	private void handler() {
 		// This may be called by the event loop if read/write > 64kb and another thread was delegated
 		Exception ex;
-		
+
 		if (m_impl.status.code != Status.OK)
 			ex = new Exception(m_impl.error);
 		m_finished = true;
@@ -658,6 +665,7 @@ final class LibasyncFileStream : FileStream {
 
 
 final class LibasyncDirectoryWatcher : DirectoryWatcher {
+@trusted:
 	private {
 		Path m_path;
 		bool m_recursive;
@@ -669,7 +677,7 @@ final class LibasyncDirectoryWatcher : DirectoryWatcher {
 
 	this(Path path, bool recursive)
 	{
-		m_impl = new AsyncDirectoryWatcher(getEventLoop());
+		m_impl = new AsyncDirectoryWatcher(getMainEventLoop());
 		m_impl.run(&handler);
 		m_path = path;
 		m_recursive = recursive;
@@ -682,8 +690,8 @@ final class LibasyncDirectoryWatcher : DirectoryWatcher {
 		m_impl.kill();
 	}
 
-	@property Path path() const { return m_path; }
-	@property bool recursive() const { return m_recursive; }
+	override @property Path path() const { return m_path; }
+	override @property bool recursive() const { return m_recursive; }
 
 	void release()
 	{
@@ -702,7 +710,7 @@ final class LibasyncDirectoryWatcher : DirectoryWatcher {
 		return m_task == Task.getThis();
 	}
 
-	bool readChanges(ref DirectoryChange[] dst, Duration timeout)
+	override bool readChanges(ref DirectoryChange[] dst, Duration timeout)
 	{
 		dst.length = 0;
 		assert(!amOwner());
@@ -801,6 +809,7 @@ final class LibasyncDirectoryWatcher : DirectoryWatcher {
 
 
 final class LibasyncManualEvent : ManualEvent {
+@trusted:
 	private {
 		shared(int) m_emitCount = 0;
 		shared(int) m_threadCount = 0;
@@ -836,7 +845,7 @@ final class LibasyncManualEvent : ManualEvent {
 		}
 	}
 
-	void emit()
+	override void emit()
 	{
 		scope (failure) assert(false); // synchronized is not nothrow on DMD 2.066 and below and Array is not nothrow at all
 		logTrace("Emitting signal");
@@ -844,18 +853,18 @@ final class LibasyncManualEvent : ManualEvent {
 		synchronized (m_mutex) {
 			logTrace("Looping signals. found: " ~ ms_signals.length.to!string);
 			foreach (ref signal; ms_signals[]) {
-				auto evloop = getEventLoop();
+				auto evloop = getMainEventLoop();
 				shared AsyncSignal sig = cast(shared AsyncSignal) signal;
 				if (!sig.trigger(evloop)) logError("Failed to trigger ManualEvent: %s", sig.error);
 			}
 		}
 	}
 
-	void wait() { wait(m_emitCount); }
-	int wait(int reference_emit_count) { return  doWait!true(reference_emit_count); }
-	int wait(Duration timeout, int reference_emit_count) { return doWait!true(timeout, reference_emit_count); }
-	int waitUninterruptible(int reference_emit_count) { return  doWait!false(reference_emit_count); }
-	int waitUninterruptible(Duration timeout, int reference_emit_count) { return doWait!false(timeout, reference_emit_count); }
+	override void wait() { wait(m_emitCount); }
+	override int wait(int reference_emit_count) { return  doWait!true(reference_emit_count); }
+	override int wait(Duration timeout, int reference_emit_count) { return doWait!true(timeout, reference_emit_count); }
+	override int waitUninterruptible(int reference_emit_count) { return  doWait!false(reference_emit_count); }
+	override int waitUninterruptible(Duration timeout, int reference_emit_count) { return doWait!false(timeout, reference_emit_count); }
 
 	void acquire()
 	{
@@ -873,7 +882,7 @@ final class LibasyncManualEvent : ManualEvent {
 			signal_exists = true;
 
 		if (!signal_exists) {
-			shared AsyncSignal sig = new shared AsyncSignal(getEventLoop());
+			shared AsyncSignal sig = new shared AsyncSignal(getMainEventLoop());
 			sig.run(&onSignal);
 			synchronized (m_mutex) ms_signals.insertBack(cast(void*)sig);
 		}
@@ -910,22 +919,27 @@ final class LibasyncManualEvent : ManualEvent {
 		return idx != -1;
 	}
 
-	@property int emitCount() const { return atomicLoad(m_emitCount); }
+	override @property int emitCount() const { return atomicLoad(m_emitCount); }
 
 	private int doWait(bool INTERRUPTIBLE)(int reference_emit_count)
 	{
-		static if (!INTERRUPTIBLE) scope (failure) assert(false); // still some function calls not marked nothrow
-		assert(!amOwner());
-		acquire();
-		scope(exit) release();
-		auto ec = this.emitCount;
-		while( ec == reference_emit_count ){
-			//synchronized(m_mutex) logTrace("Waiting for event with signal count: " ~ ms_signals.length.to!string);
-			static if (INTERRUPTIBLE) getDriverCore().yieldForEvent();
-			else getDriverCore().yieldForEventDeferThrow();
-			ec = this.emitCount;
+		try {
+			assert(!amOwner());
+			acquire();
+			scope(exit) release();
+			auto ec = this.emitCount;
+			while( ec == reference_emit_count ){
+				//synchronized(m_mutex) logTrace("Waiting for event with signal count: " ~ ms_signals.length.to!string);
+				static if (INTERRUPTIBLE) getDriverCore().yieldForEvent();
+				else getDriverCore().yieldForEventDeferThrow();
+				ec = this.emitCount;
+			}
+			return ec;
+		} catch (Exception e) {
+			static if (!INTERRUPTIBLE)
+				assert(false, e.msg); // still some function calls not marked nothrow
+			else throw e;
 		}
-		return ec;
 	}
 
 	private int doWait(bool INTERRUPTIBLE)(Duration timeout, int reference_emit_count)
@@ -953,7 +967,8 @@ final class LibasyncManualEvent : ManualEvent {
 		import std.algorithm : countUntil;
 		synchronized(m_mutex) {
 			auto idx = ms_signals[].countUntil!((void* a, LibasyncManualEvent b) { return ((cast(shared AsyncSignal) a).owner == Thread.getThis() && this is b);})(this);
-			ms_signals.linearRemove(ms_signals[idx .. idx+1]);
+			if (idx >= 0)
+				ms_signals.linearRemove(ms_signals[idx .. idx+1]);
 		}
 	}
 
@@ -992,15 +1007,16 @@ final class LibasyncManualEvent : ManualEvent {
 }
 
 final class LibasyncTCPListener : TCPListener {
+@trusted:
 	private {
 		NetworkAddress m_local;
-		void delegate(TCPConnection conn) m_connectionCallback;
+		void delegate(TCPConnection conn) @safe m_connectionCallback;
 		TCPListenOptions m_options;
 		AsyncTCPListener[] m_listeners;
 		fd_t socket;
 	}
 
-	this(NetworkAddress addr, void delegate(TCPConnection conn) connection_callback, TCPListenOptions options)
+	this(NetworkAddress addr, void delegate(TCPConnection conn) @safe connection_callback, TCPListenOptions options)
 	{
 		m_connectionCallback = connection_callback;
 		m_options = options;
@@ -1008,8 +1024,8 @@ final class LibasyncTCPListener : TCPListener {
 		void function(shared LibasyncTCPListener) init = (shared LibasyncTCPListener ctxt){
 			synchronized(ctxt) {
 				LibasyncTCPListener ctxt2 = cast(LibasyncTCPListener)ctxt;
-				AsyncTCPListener listener = new AsyncTCPListener(getEventLoop(), ctxt2.socket);
-				listener.local = ctxt2.m_local;
+				AsyncTCPListener listener = new AsyncTCPListener(getMainEventLoop(), ctxt2.socket);
+				listener.local = cast(NetworkAddressLA)ctxt2.m_local;
 
 				enforce(listener.run(&ctxt2.initConnection), "Failed to start listening to local socket: " ~ listener.error);
 				ctxt2.socket = listener.socket;
@@ -1021,7 +1037,7 @@ final class LibasyncTCPListener : TCPListener {
 
 	}
 
-	@property NetworkAddress bindAddress() { return m_local; }
+	override @property NetworkAddress bindAddress() { return m_local; }
 
 	@property void delegate(TCPConnection) connectionCallback() { return m_connectionCallback; }
 
@@ -1034,7 +1050,7 @@ final class LibasyncTCPListener : TCPListener {
 		return &native_conn.handler;
 	}
 
-	void stopListening()
+	override void stopListening()
 	{
 		synchronized(this) {
 			foreach (listener; m_listeners) {
@@ -1046,6 +1062,7 @@ final class LibasyncTCPListener : TCPListener {
 }
 
 final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
+@trusted:
 	private {
 		FixedRingBuffer!ubyte m_readBuffer;
 		ubyte[] m_buffer;
@@ -1093,7 +1110,7 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 		return ret;
 	}
 
-	this(AsyncTCPConnection conn, void delegate(TCPConnection) cb)
+	this(AsyncTCPConnection conn, void delegate(TCPConnection) @safe cb)
 	in { assert(conn !is null); }
 	body {
 		m_settings.onConnect = cb;
@@ -1106,36 +1123,36 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 	}
 
 	// Using this setting completely disables the internal buffers as well
-	@property void tcpNoDelay(bool enabled)
+	override @property void tcpNoDelay(bool enabled)
 	{
 		m_settings.tcpNoDelay = enabled;
 		conn.setOption(TCPOption.NODELAY, enabled);
 	}
 
-	@property bool tcpNoDelay() const { return m_settings.tcpNoDelay; }
+	override @property bool tcpNoDelay() const { return m_settings.tcpNoDelay; }
 
-	@property void readTimeout(Duration dur)
+	override @property void readTimeout(Duration dur)
 	{
 		m_settings.readTimeout = dur;
 		conn.setOption(TCPOption.TIMEOUT_RECV, dur);
 	}
 
-	@property Duration readTimeout() const { return m_settings.readTimeout; }
+	override @property Duration readTimeout() const { return m_settings.readTimeout; }
 
-	@property void keepAlive(bool enabled)
+	override @property void keepAlive(bool enabled)
 	{
 		m_settings.keepAlive = enabled;
 		conn.setOption(TCPOption.KEEPALIVE_ENABLE, enabled);
 	}
 
-	@property bool keepAlive() const { return m_settings.keepAlive; }
+	override @property bool keepAlive() const { return m_settings.keepAlive; }
 
-	@property bool connected() const { return !m_closed && m_tcpImpl.conn && m_tcpImpl.conn.isConnected; }
+	override @property bool connected() const { return !m_closed && m_tcpImpl.conn && m_tcpImpl.conn.isConnected; }
 
-	@property bool dataAvailableForRead(){
+	override @property bool dataAvailableForRead(){
 		logTrace("dataAvailableForRead");
-		acquireReader();
-		scope(exit) releaseReader();
+		m_settings.reader.acquire();
+		scope(exit) m_settings.reader.release();
 		return !readEmpty;
 	}
 
@@ -1143,18 +1160,18 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 		return (m_buffer && !m_slice) || (!m_buffer && m_readBuffer.empty);
 	}
 
-	@property string peerAddress() const { return m_tcpImpl.conn.peer.toString(); }
+	override @property string peerAddress() const { return m_tcpImpl.conn.peer.toString(); }
 
-	@property NetworkAddress localAddress() const { return m_tcpImpl.localAddr; }
-	@property NetworkAddress remoteAddress() const { return m_tcpImpl.conn.peer; }
+	override @property NetworkAddress localAddress() const { return m_tcpImpl.localAddr; }
+	override @property NetworkAddress remoteAddress() const { return NetworkAddress(m_tcpImpl.conn.peer); }
 
-	@property bool empty() { return leastSize == 0; }
+	override @property bool empty() { return leastSize == 0; }
 
-	@property ulong leastSize()
+	override @property ulong leastSize()
 	{
 		logTrace("leastSize TCP");
-		acquireReader();
-		scope(exit) releaseReader();
+		m_settings.reader.acquire();
+		scope(exit) m_settings.reader.release();
 
 		while( m_readBuffer.empty ){
 			if (!connected)
@@ -1166,31 +1183,45 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 		return (m_slice.length > 0) ? m_slice.length : m_readBuffer.length;
 	}
 
-	void close()
+	override void close()
 	{
 		logTrace("Close TCP enter");
+
+		// resume any reader, so that the read operation can be ended with a failure
+		Task reader = m_settings.reader.task;
+		while (m_settings.reader.isWaiting && reader.running) {
+			logTrace("resuming reader first");
+			getDriverCore().yieldAndResumeTask(reader);
+		}
+
+		// test if the connection is already closed
+		if (m_closed) {
+			logTrace("connection already closed.");
+			return;
+		}
+
 		//logTrace("closing");
-		acquireWriter();
-		scope(exit) releaseWriter();
+		m_settings.writer.acquire();
+		scope(exit) m_settings.writer.release();
 
 		// checkConnected();
 		m_readBuffer.dispose();
 		onClose(null, false);
 	}
 
-	bool waitForData(Duration timeout = Duration.max)
+	override bool waitForData(Duration timeout = Duration.max)
 	{
 		// 0 seconds is max. CHanging this would be breaking, might as well use -1 for immediate
 		if (timeout == 0.seconds)
 			timeout = Duration.max;
 		logTrace("WaitForData enter, timeout %s :: Ptr %s",  timeout.toString(), (cast(void*)this).to!string);
-		acquireReader();
+		m_settings.reader.acquire();
 		auto _driver = getEventDriver();
 		auto tm = _driver.createTimer(null);
-		scope(exit) { 
+		scope(exit) {
 			_driver.stopTimer(tm);
 			_driver.releaseTimer(tm);
-			releaseReader();
+			m_settings.reader.release();
 		}
 		_driver.m_timers.getUserData(tm).owner = Task.getThis();
 		if (timeout != Duration.max) _driver.rearmTimer(tm, timeout, false);
@@ -1216,11 +1247,11 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 		return !m_readBuffer.empty;
 	}
 
-	const(ubyte)[] peek()
+	override const(ubyte)[] peek()
 	{
 		logTrace("Peek TCP enter");
-		acquireReader();
-		scope(exit) releaseReader();
+		m_settings.reader.acquire();
+		scope(exit) m_settings.reader.release();
 
 		if (!readEmpty)
 			return (m_slice.length > 0) ? cast(const(ubyte)[]) m_slice : m_readBuffer.peek();
@@ -1228,13 +1259,14 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 			return null;
 	}
 
-	void read(ubyte[] dst)
+	override size_t read(scope ubyte[] dst, IOMode)
 	{
-		if (!dst.length) return;
+		if (!dst.length) return 0;
 		assert(dst !is null && !m_slice);
 		logTrace("Read TCP");
-		acquireReader();
-		scope(exit) releaseReader();
+		m_settings.reader.acquire();
+		size_t len = 0;
+		scope(exit) m_settings.reader.release();
 		while( dst.length > 0 ){
 			while( m_readBuffer.empty ){
 				checkConnected();
@@ -1249,15 +1281,18 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 
 			m_readBuffer.read(dst[0 .. amt]);
 			dst = dst[amt .. $];
+			len += amt;
 		}
+
+		return len;
 	}
 
-	void write(in ubyte[] bytes_)
+	override size_t write(in ubyte[] bytes_, IOMode)
 	{
 		assert(bytes_ !is null);
 		logTrace("%s", "write enter");
-		acquireWriter();
-		scope(exit) releaseWriter();
+		m_settings.writer.acquire();
+		scope(exit) m_settings.writer.release();
 		checkConnected();
 		const(ubyte)[] bytes = bytes_;
 		logTrace("TCP write with %s bytes called", bytes.length);
@@ -1278,73 +1313,23 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 			first = false;
 		} while (offset != len);
 
+		return len;
 	}
 
-	void flush()
+	override void flush()
 	{
 		logTrace("%s", "Flush");
-		acquireWriter();
-		scope(exit) releaseWriter();
+		m_settings.writer.acquire();
+		scope(exit) m_settings.writer.release();
 
 		checkConnected();
 
 	}
 
-	void finalize()
+	override void finalize()
 	{
 		logTrace("%s", "finalize");
 		flush();
-	}
-
-	void write(InputStream stream, ulong nbytes = 0)
-	{
-		writeDefault(stream, nbytes);
-	}
-
-	void acquireReader() {
-		if (Task.getThis() == Task()) {
-			logTrace("Reading without task");
-			return;
-		}
-		logTrace("%s", "Acquire Reader");
-		assert(!amReadOwner());
-		m_settings.reader.task = Task.getThis();
-		logTrace("Task waiting in: %X", cast(void*) this);
-		m_settings.reader.isWaiting = true;
-	}
-
-	void releaseReader() {
-		if (Task.getThis() == Task()) return;
-		logTrace("%s", "Release Reader");
-		assert(amReadOwner());
-		m_settings.reader.isWaiting = false;
-	}
-
-	bool amReadOwner() const {
-		if (m_settings.reader.isWaiting && m_settings.reader.task == Task.getThis())
-			return true;
-		return false;
-	}
-
-	void acquireWriter() {
-		if (Task.getThis() == Task()) return;
-		logTrace("%s", "Acquire Writer");
-		assert(!amWriteOwner(), "Failed to acquire writer in task: " ~ Task.getThis().fiber.to!string ~ ", it was busy with: " ~ m_settings.writer.task.to!string);
-		m_settings.writer.task = Task.getThis();
-		m_settings.writer.isWaiting = true;
-	}
-
-	void releaseWriter() {
-		if (Task.getThis() == Task()) return;
-		logTrace("%s", "Release Writer");
-		assert(amWriteOwner());
-		m_settings.writer.isWaiting = false;
-	}
-
-	bool amWriteOwner() const {
-		if (m_settings.writer.isWaiting && m_settings.writer.task == Task.getThis())
-			return true;
-		return false;
 	}
 
 	private void checkConnected()
@@ -1369,8 +1354,8 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 				return false; // cancel slices and revert to the fixed ring buffer
 			}
 
-			if (m_slice.length > 0) { 
-				//logDebug("post-assign m_slice "); 
+			if (m_slice.length > 0) {
+				//logDebug("post-assign m_slice ");
 				m_slice = m_slice.ptr[0 .. m_slice.length + ret];
 			}
 			else {
@@ -1378,7 +1363,7 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 				m_slice = m_buffer[0 .. ret];
 			}
 			return true;
-		}	
+		}
 		logTrace("TryReadBuf exit with %d bytes in m_slice, %d bytes in m_readBuffer ", m_slice.length, m_readBuffer.length);
 
 		return false;
@@ -1395,7 +1380,7 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 		assert(!m_slice);
 
 		logTrace("OnRead with %s", m_readBuffer.freeSpace);
-		
+
 		while( m_readBuffer.freeSpace > 0 ) {
 			ubyte[] dst = m_readBuffer.peekDst();
 			assert(dst.length <= int.max);
@@ -1406,11 +1391,11 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 				if( ret > 0 ){
 					logTrace("received bytes: %s", ret);
 					m_readBuffer.putN(ret);
-				} 
+				}
 				read_more = ret == dst.length;
 				// ret == 0! let's look for some errors
 				if (read_more) {
-					if (m_readBuffer.freeSpace == 0) 
+					if (m_readBuffer.freeSpace == 0)
 						m_readBuffer.capacity = m_readBuffer.capacity*2;
 					dst = m_readBuffer.peekDst();
 				}
@@ -1418,7 +1403,7 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 			if (conn.status.code == Status.ASYNC) {
 				m_mustRecv = false; // we'll have to wait
 				break; // the kernel's buffer is empty
-			}			
+			}
 			// ret == 0! let's look for some errors
 			else if (conn.status.code == Status.ASYNC) {
 				m_mustRecv = false; // we'll have to wait
@@ -1471,11 +1456,11 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 		bool hasUniqueReader = m_settings.reader.isWaiting;
 		bool hasUniqueWriter = m_settings.writer.isWaiting && reader != writer;
 
-		if (hasUniqueReader && Task.getThis() != reader) {
-			getDriverCore().resumeTask(reader, m_settings.reader.noExcept?null:ex);
-		}
 		if (hasUniqueWriter && Task.getThis() != writer && wake_ex) {
 			getDriverCore().resumeTask(writer, ex);
+		}
+		if (hasUniqueReader && Task.getThis() != reader) {
+			getDriverCore().resumeTask(reader, m_settings.reader.noExcept?null:ex);
 		}
 	}
 
@@ -1547,6 +1532,28 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 		Task task; // we can only have one task waiting for read/write operations
 		bool isWaiting; // if a task is actively waiting
 		bool noExcept;
+
+		void acquire() {
+			assert(!this.isWaiting, "Acquiring waiter that is already in use.");
+			if (Task.getThis() == Task()) return;
+			logTrace("%s", "Acquire waiter");
+			assert(!amOwner(), "Failed to acquire waiter in task: " ~ Task.getThis().fiber.to!string ~ ", it was busy with: " ~ this.task.to!string);
+			this.task = Task.getThis();
+			this.isWaiting = true;
+		}
+
+		void release() {
+			if (Task.getThis() == Task()) return;
+			logTrace("%s", "Release waiter");
+			assert(amOwner());
+			this.isWaiting = false;
+		}
+
+		bool amOwner() const {
+			if (this.isWaiting && this.task == Task.getThis())
+				return true;
+			return false;
+		}
 	}
 
 	struct Settings {
@@ -1567,11 +1574,12 @@ final class LibasyncTCPConnection : TCPConnection/*, Buffered*/ {
 int total_conn;
 
 final class LibasyncUDPConnection : UDPConnection {
+@trusted:
 	private {
 		Task m_task;
 		AsyncUDPSocket m_udpImpl;
 		bool m_canBroadcast;
-		NetworkAddress m_peer;
+		NetworkAddressLA m_peer;
 
 		bool m_waiting;
 	}
@@ -1586,21 +1594,21 @@ final class LibasyncUDPConnection : UDPConnection {
 		m_udpImpl = conn;
 	}
 
-	@property string bindAddress() const {
+	override @property string bindAddress() const {
 
 		return m_udpImpl.local.toAddressString();
 	}
 
-	@property NetworkAddress localAddress() const { return m_udpImpl.local; }
+	override @property NetworkAddress localAddress() const { return NetworkAddress(m_udpImpl.local); }
 
-	@property bool canBroadcast() const { return m_canBroadcast; }
-	@property void canBroadcast(bool val)
+	override @property bool canBroadcast() const { return m_canBroadcast; }
+	override @property void canBroadcast(bool val)
 	{
 		socket.broadcast(val);
 		m_canBroadcast = val;
 	}
 
-	void close()
+	override void close()
 	{
 		socket.kill();
 		m_udpImpl = null;
@@ -1623,7 +1631,7 @@ final class LibasyncUDPConnection : UDPConnection {
 		m_task = Task();
 	}
 
-	void connect(string host, ushort port)
+	override void connect(string host, ushort port)
 	{
 		// assert(m_peer == NetworkAddress.init, "Cannot connect to another peer");
 		NetworkAddress addr = getEventDriver().resolveHost(host, localAddress.family, true);
@@ -1631,19 +1639,20 @@ final class LibasyncUDPConnection : UDPConnection {
 		connect(addr);
 	}
 
-	void connect(NetworkAddress addr)
+	override void connect(NetworkAddress addr)
 	{
-		m_peer = addr;
+		m_peer = cast(NetworkAddressLA)addr;
 	}
 
-	void send(in ubyte[] data, in NetworkAddress* peer_address = null)
+	override void send(in ubyte[] data, in NetworkAddress* peer_address = null)
 	{
 		assert(data.length <= int.max);
 		uint ret;
 		size_t retries = 3;
 		foreach  (i; 0 .. retries) {
 			if( peer_address ){
-				ret = socket.sendTo(data, *peer_address);
+				auto pa = cast(NetworkAddressLA)*cast(NetworkAddress*)peer_address;
+				ret = socket.sendTo(data, pa);
 			} else {
 				ret = socket.sendTo(data, m_peer);
 			}
@@ -1660,12 +1669,12 @@ final class LibasyncUDPConnection : UDPConnection {
 		enforce(ret == data.length, "Unable to send full packet.");
 	}
 
-	ubyte[] recv(ubyte[] buf = null, NetworkAddress* peer_address = null)
+	override ubyte[] recv(ubyte[] buf = null, NetworkAddress* peer_address = null)
 	{
 		return recv(Duration.max, buf, peer_address);
 	}
 
-	ubyte[] recv(Duration timeout, ubyte[] buf = null, NetworkAddress* peer_address = null)
+	override ubyte[] recv(Duration timeout, ubyte[] buf = null, NetworkAddress* peer_address = null)
 	{
 		size_t tm = size_t.max;
 		auto m_driver = getEventDriver();
@@ -1683,12 +1692,12 @@ final class LibasyncUDPConnection : UDPConnection {
 
 		assert(buf.length <= int.max);
 		if( buf.length == 0 ) buf.length = 65507;
-		NetworkAddress from;
+		NetworkAddressLA from;
 		from.family = localAddress.family;
 		while(true){
 			auto ret = socket.recvFrom(buf, from);
 			if( ret > 0 ){
-				if( peer_address ) *peer_address = from;
+				if( peer_address ) *peer_address = NetworkAddress(from);
 				return buf[0 .. ret];
 			}
 			else if( socket.status.code != Status.OK ){
@@ -1703,6 +1712,16 @@ final class LibasyncUDPConnection : UDPConnection {
 			m_waiting = true;
 			getDriverCore().yieldForEvent();
 		}
+	}
+
+	void addMembership(ref NetworkAddress multiaddr)
+	{
+		assert(false, "TODO!");
+	}
+
+	@property void multicastLoopback(bool loop)
+	{
+		assert(false, "TODO!");
 	}
 
 	private void handler(UDPEvent ev)
@@ -1742,7 +1761,7 @@ __gshared size_t gs_maxID;
 __gshared core.sync.mutex.Mutex gs_mutex;
 
 private size_t generateID()
-nothrow {
+nothrow @trusted {
 	size_t idx;
 	import std.algorithm : max;
 	try {
@@ -1771,7 +1790,8 @@ nothrow {
 	return idx - 1;
 }
 
-void recycleID(size_t id) {
+void recycleID(size_t id)
+@trusted nothrow {
 	try {
 		synchronized(gs_mutex) gs_availID.insert(id+1);
 	}

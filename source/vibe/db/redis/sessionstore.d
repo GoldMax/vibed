@@ -37,26 +37,32 @@ final class RedisSessionStore : SessionStore {
 	Session create()
 	{
 		auto s = createSessionInstance();
-		m_db.hmset(s.id, s.id, s.id); // set place holder to avoid create empty hash
+		m_db.hset(s.id, "__SESS", true); // set place holder to avoid create empty hash
 		assert(m_db.exists(s.id));
-		m_db.expire(s.id, m_expirationTime);
+		if (m_expirationTime != Duration.max)
+			m_db.expire(s.id, m_expirationTime);
 		return s;
 	}
 
 	Session open(string id)
 	{
 		if (m_db.exists(id))
-			return createSessionInstance(id);
+		{
+			auto s = createSessionInstance(id);
+			if (m_expirationTime != Duration.max)
+				m_db.expire(s.id, m_expirationTime);
+			return s;
+		}
 		return Session.init;
 	}
 
 	void set(string id, string name, Variant value)
-	{
+	@trusted {
 		m_db.hset(id, name, value.get!Json.toString());
 	}
 
 	Variant get(string id, string name, lazy Variant defaultVal)
-	{
+	@trusted {
 		auto v = m_db.hget!(Nullable!string)(id, name);
 		return v.isNull ? defaultVal : Variant(parseJsonString(v.get));
 	}
@@ -64,6 +70,11 @@ final class RedisSessionStore : SessionStore {
 	bool isKeySet(string id, string key)
 	{
 		return m_db.hexists(id, key);
+	}
+
+	void remove(string id, string key)
+	{
+		m_db.hdel(id, key);
 	}
 
 	void destroy(string id)
@@ -76,7 +87,7 @@ final class RedisSessionStore : SessionStore {
 		assert(false, "Not available for RedisSessionStore");
 	}
 
-	int iterateSession(string id, scope int delegate(string key) del)
+	int iterateSession(string id, scope int delegate(string key) @safe del)
 	{
 		auto res = m_db.hkeys(id);
 		while (!res.empty) {
