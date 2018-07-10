@@ -323,7 +323,10 @@ struct FixedRingBuffer(T, size_t N = 0, bool INITIALIZE = true) {
 		/// Resets the capacity to zero and explicitly frees the memory for the buffer.
 		void dispose()
 		{
-			delete m_buffer;
+			static if (__VERSION__ >= 2079) {
+				import core.memory : __delete;
+				__delete(m_buffer);
+			} else mixin("delete m_buffer;");
 			m_buffer = null;
 			m_start = m_fill = 0;
 		}
@@ -355,8 +358,8 @@ struct FixedRingBuffer(T, size_t N = 0, bool INITIALIZE = true) {
 		m_start = 0;
 	}
 
-	void put()(T itm) { assert(m_fill < m_buffer.length); m_buffer[mod(m_start + m_fill++)] = itm; }
-	void put(TC : T)(TC[] itms)
+	void putBack()(T itm) { assert(m_fill < m_buffer.length); m_buffer[mod(m_start + m_fill++)] = itm; }
+	void putBack(TC : T)(TC[] itms)
 	{
 		if( !itms.length ) return;
 		assert(m_fill+itms.length <= m_buffer.length);
@@ -370,7 +373,18 @@ struct FixedRingBuffer(T, size_t N = 0, bool INITIALIZE = true) {
 		}
 		m_fill += itms.length;
 	}
-	void putN(size_t n) { assert(m_fill+n <= m_buffer.length); m_fill += n; }
+	void putBackN(size_t n) { assert(m_fill+n <= m_buffer.length); m_fill += n; }
+
+	alias put = putBack;
+	alias putN = putBackN;
+
+	void putFront(T itm)
+	{
+		assert(m_fill < m_buffer.length);
+		m_start = mod(m_start + m_buffer.length - 1);
+		m_fill++;
+		m_buffer[m_start] = itm;
+	}
 
 	void popFront() { assert(!empty); m_start = mod(m_start+1); m_fill--; }
 	void popFrontN(size_t n) { assert(length >= n); m_start = mod(m_start + n); m_fill -= n; }
@@ -501,7 +515,7 @@ struct FixedRingBuffer(T, size_t N = 0, bool INITIALIZE = true) {
 
 		@property bool empty() const { return m_length == 0; }
 
-		@property inout(T) front() inout { assert(!empty); return m_buffer[m_start]; }
+		@property ref inout(T) front() inout { assert(!empty); return m_buffer[m_start]; }
 
 		void popFront()
 		{
@@ -515,6 +529,8 @@ struct FixedRingBuffer(T, size_t N = 0, bool INITIALIZE = true) {
 }
 
 unittest {
+	import std.range : only;
+
 	static assert(isInputRange!(FixedRingBuffer!int) && isOutputRange!(FixedRingBuffer!int, int));
 
 	FixedRingBuffer!(int, 5) buf;
@@ -564,27 +580,28 @@ unittest {
 	assert(buf.front == 3); buf.popFront();
 	assert(buf.front == 5); buf.popFront();
 	assert(buf.empty);
+
+	buf.put(1);
+	assert(buf.front == 1);
+	buf.front = 2;
+	assert(buf.front == 2);
+	buf[].front = 3;
+	assert(buf.front == 3);
+
+	buf.putFront(4);
+	assert(buf.length == 2);
+	assert(buf[].equal(only(4, 3)));
 }
 
 
 struct ArraySet(Key)
 {
-	import std.experimental.allocator : makeArray, expandArray, dispose;
-	import std.experimental.allocator.building_blocks.affix_allocator : AffixAllocator;
+	import stdx.allocator : makeArray, expandArray, dispose;
+	import stdx.allocator.building_blocks.affix_allocator : AffixAllocator;
 
 	private {
-		static if (__VERSION__ < 2074) {
-			struct AW { // work around AffixAllocator limitations
-				IAllocator alloc;
-				alias alloc this;
-				enum alignment = max(Key.alignof, int.alignof);
-				void[] resolveInternalPointer(void* p) { void[] ret; alloc.resolveInternalPointer(p, ret); return ret; }
-			}
-			alias AllocatorType = AffixAllocator!(AW, int);
-		} else {
-			IAllocator AW(IAllocator a) { return a; }
-			alias AllocatorType = AffixAllocator!(IAllocator, int);
-		}
+		IAllocator AW(IAllocator a) { return a; }
+		alias AllocatorType = AffixAllocator!(IAllocator, int);
 		Key[4] m_staticEntries;
 		Key[] m_entries;
 		AllocatorType m_allocator;
@@ -592,8 +609,6 @@ struct ArraySet(Key)
 
 	~this()
 	@trusted {
-		static if (__VERSION__ <= 2071)
-			scope (failure) assert(false);
 		if (m_entries.ptr) {
 			if (--allocator.prefix(m_entries) <= 0) {
 				try allocator.dispose(m_entries);
@@ -604,8 +619,6 @@ struct ArraySet(Key)
 
 	this(this)
 	@trusted {
-		static if (__VERSION__ <= 2071)
-			scope (failure) assert(false);
 		if (m_entries.ptr) {
 			allocator.prefix(m_entries)++;
 		}
@@ -613,8 +626,6 @@ struct ArraySet(Key)
 
 	@property ArraySet dup()
 	{
-		static if (__VERSION__ <= 2071)
-			scope (failure) assert(false);
 		ArraySet ret;
 		ret.m_staticEntries = m_staticEntries;
 		ret.m_allocator = m_allocator;
@@ -708,8 +719,7 @@ struct ArraySet(Key)
 	ref allocator()
 	nothrow @trusted {
 		try {
-			static if (__VERSION__ < 2074) auto palloc = m_allocator.parent;
-			else auto palloc = m_allocator._parent;
+			auto palloc = m_allocator._parent;
 			if (!palloc) {
 				assert(vibeThreadAllocator !is null, "No theAllocator set!?");
 				m_allocator = AllocatorType(AW(vibeThreadAllocator));
@@ -720,8 +730,8 @@ struct ArraySet(Key)
 }
 
 @safe nothrow unittest {
-	import std.experimental.allocator : allocatorObject;
-	import std.experimental.allocator.mallocator : Mallocator;
+	import stdx.allocator : allocatorObject;
+	import stdx.allocator.mallocator : Mallocator;
 
 	ArraySet!int s;
 	s.setAllocator(() @trusted { return Mallocator.instance.allocatorObject; } ());

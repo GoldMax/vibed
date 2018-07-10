@@ -63,41 +63,45 @@ else
 version(Windows)
 {
 	import core.sys.windows.winsock2;
-
 	alias EWOULDBLOCK = WSAEWOULDBLOCK;
 }
-
-version(OSX)
+else version(OSX)
 {
-	static if (__VERSION__ < 2077)
-	{
+	static if (__VERSION__ < 2077) {
 		enum IP_ADD_MEMBERSHIP = 12;
 		enum IP_MULTICAST_LOOP = 11;
 	}
 	else
 		import core.sys.darwin.netinet.in_ : IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP;
-} else version(FreeBSD)
+}
+else version (FreeBSD)
 {
-	static if (__VERSION__ < 2077)
-	{
+	static if (__VERSION__ < 2077) {
 		enum IP_ADD_MEMBERSHIP  = 12;
 		enum IP_MULTICAST_LOOP  = 11;
 	}
 	else
 		import core.sys.freebsd.netinet.in_ : IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP;
-} else version(linux)
+}
+else version (DragonFlyBSD)
 {
-	static if (__VERSION__ < 2077)
-	{
+    import core.sys.dragonflybsd.netinet.in_ : IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP;
+}
+else version (linux)
+{
+	static if (__VERSION__ < 2077) {
 		enum IP_ADD_MEMBERSHIP =  35;
 		enum IP_MULTICAST_LOOP =  34;
 	}
 	else
 		import core.sys.linux.netinet.in_ : IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP;
-} else version(Windows)
-{
-	// IP_ADD_MEMBERSHIP and IP_MULTICAST_LOOP are included in winsock(2) import above
 }
+else version (Solaris)
+{
+	enum IP_ADD_MEMBERSHIP = 0x13;
+	enum IP_MULTICAST_LOOP = 0x12;
+}
+else static assert(false, "IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP required but not provided for this OS");
 
 final class Libevent2Driver : EventDriver {
 @safe:
@@ -396,7 +400,7 @@ final class Libevent2Driver : EventDriver {
 		int tmp_reuse = 1;
 		socketEnforce(() @trusted { return setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR, &tmp_reuse, tmp_reuse.sizeof); } () == 0,
 			"Error enabling socket address reuse on listening socket");
-		version (linux) {
+		static if (is(typeof(SO_REUSEPORT))) {
 			if (options & TCPListenOptions.reusePort) {
 				if (() @trusted { return setsockopt(listenfd, SOL_SOCKET, SO_REUSEPORT, &tmp_reuse, tmp_reuse.sizeof); } ()) {
 					if (errno != EINVAL && errno != ENOPROTOOPT) {

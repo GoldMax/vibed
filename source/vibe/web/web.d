@@ -81,7 +81,7 @@ import std.encoding : sanitize;
 
 		$(UL
 			$(LI An array of values is mapped to
-				$(D &lt;parameter_name&gt;_&lt;index&gt;), where $(D index)
+				`<parameter_name>_<index>`, where `index`
 				denotes the zero based index of the array entry. The length
 				of the array is determined by searching for the first
 				non-existent index in the set of form fields.)
@@ -93,7 +93,7 @@ import std.encoding : sanitize;
 			$(LI $(D struct) type parameters that don't define a $(D fromString)
 				or a $(D fromStringValidate) method will be mapped to one
 				form field per struct member with a scheme similar to how
-				arrays are treated: $(D &lt;parameter_name&gt;_&lt;member_name&gt;))
+				arrays are treated: `<parameter_name>_<member_name>`)
 			$(LI Boolean parameters will be set to $(D true) if a form field of
 				the corresponding name is present and to $(D false) otherwise.
 				This is compatible to how check boxes in HTML forms work.)
@@ -137,6 +137,15 @@ import std.encoding : sanitize;
 		The `@path` attribute can also be applied to the class itself, in which
 		case it will be used as an additional prefix to the one in
 		`WebInterfaceSettings.urlPrefix`.
+
+	Supported return types:
+		$(UL
+			$(LI $(D vibe.data.json.Json))
+			$(LI $(D const(char)[]))
+			$(LI $(D void))
+			$(LI $(D const(ubyte)[]))
+			$(LI $(D vibe.core.stream.InputStream))
+		)
 
 	Params:
 		router = The HTTP router to register to
@@ -318,24 +327,19 @@ template render(string diet_file, ALIASES...) {
 			}
 		}
 
-		static if (is(TranslateContext) && TranslateContext.languages.length) {
-			static if (TranslateContext.languages.length > 1) {
-				switch (s_requestContext.language) {
-					default: {
-						TranslateCTX!(TranslateContext.languages[0]) renderctx;
-						renderctx.render();
-						return;
-						}
-					foreach (lang; TranslateContext.languages[1 .. $])
-						case lang: {
-							TranslateCTX!lang renderctx;
+		static if (is(TranslateContext) && languageSeq!TranslateContext.length) {
+			switch (s_requestContext.language) {
+				default:
+				mixin({
+					string ret;
+					foreach (lang; TranslateContext.languages)
+						ret ~= "case `" ~ lang ~ "`: {
+							TranslateCTX!`" ~ lang ~ "` renderctx;
 							renderctx.render();
 							return;
-							}
-				}
-			} else {
-				TranslateCTX!(TranslateContext.languages[0]) renderctx;
-				renderctx.render();
+							}";
+					return ret;
+				}());
 			}
 		} else {
 			vibe.http.server.render!(diet_file, req, ALIASES)(s_requestContext.res);
@@ -356,7 +360,7 @@ template render(string diet_file, ALIASES...) {
 	Note that this may only be called from a function/method
 	registered using registerWebInterface.
 */
-void redirect(string url)
+void redirect(string url, int status = HTTPStatus.found)
 @safe {
 	import std.algorithm : canFind, endsWith, startsWith;
 
@@ -375,7 +379,13 @@ void redirect(string url)
 		assert(fullurl.localURI.endsWith("/"), "Parent URL not ending in a slash?!");
 		fullurl.localURI = fullurl.localURI ~ url;
 	}
-	ctx.res.redirect(fullurl);
+	ctx.res.redirect(fullurl, status);
+}
+
+/// ditto
+void redirect(URL url, int status = HTTPStatus.found)
+@safe {
+	redirect(url.toString, status);
 }
 
 ///
@@ -492,6 +502,84 @@ body
 }
 
 /**
+	Returns the current request.
+
+	Note that this may only be called from a function/method
+	registered using registerWebInterface.
+*/
+@property HTTPServerRequest request() @safe
+{
+	return getRequestContext().req;
+}
+
+///
+@safe unittest {
+	void requireAuthenticated()
+	{
+		auto authorization = "Authorization" in request.headers;
+
+		enforceHTTP(authorization !is null, HTTPStatus.forbidden);
+		enforceHTTP(*authorization == "secret", HTTPStatus.forbidden);
+	}
+
+	class WebService {
+		void getPage()
+		{
+			requireAuthenticated();
+		}
+	}
+
+	void run()
+	{
+		auto router = new URLRouter;
+		router.registerWebInterface(new WebService);
+
+		auto settings = new HTTPServerSettings;
+		settings.port = 8080;
+		listenHTTP(settings, router);
+	}
+}
+
+/**
+	Returns the current response.
+
+	Note that this may only be called from a function/method
+	registered using registerWebInterface.
+*/
+@property HTTPServerResponse response() @safe
+{
+	return getRequestContext().res;
+}
+
+///
+@safe unittest {
+	void logIn()
+	{
+		auto session = response.startSession();
+		session.set("token", "secret");
+	}
+
+	class WebService {
+		void postLogin(string username, string password)
+		{
+			if (username == "foo" && password == "bar") {
+				logIn();
+			}
+		}
+	}
+
+	void run()
+	{
+		auto router = new URLRouter;
+		router.registerWebInterface(new WebService);
+
+		auto settings = new HTTPServerSettings;
+		settings.port = 8080;
+		listenHTTP(settings, router);
+	}
+}
+
+/**
 	Terminates the currently active session (if any).
 
 	Note that this may only be called from a function/method
@@ -574,33 +662,6 @@ string trWeb(string text, string plural_text, int count, string context = null)
 
 
 /**
-	Methods marked with this attribute will not be treated as web endpoints.
-
-	This attribute enables the definition of public methods that do not take
-	part in the interface genration process.
-*/
-@property NoRouteAttribute noRoute()
-{
-	import vibe.web.common : onlyAsUda;
-	if (!__ctfe)
-		assert(false, onlyAsUda!__FUNCTION__);
-	return NoRouteAttribute.init;
-}
-
-///
-unittest {
-	interface IAPI {
-		// Accessible as "GET /info"
-		string getInfo();
-
-		// Not accessible over HTTP
-		@noRoute
-		int getFoo();
-	}
-}
-
-
-/**
 	Attribute to customize how errors/exceptions are displayed.
 
 	The first template parameter takes a function that maps an exception and an
@@ -660,7 +721,7 @@ unittest {
 */
 NestedNameStyleAttribute nestedNameStyle(NestedNameStyle style)
 {
-	import vibe.web.common : onlyAsUda;
+	import vibe.internal.meta.uda : onlyAsUda;
 	if (!__ctfe) assert(false, onlyAsUda!__FUNCTION__);
 	return NestedNameStyleAttribute(style);
 }
@@ -761,8 +822,6 @@ struct SessionVar(T, string name) {
 
 	alias value this;
 }
-
-private struct NoRouteAttribute {}
 
 private struct ErrorDisplayAttribute(alias DISPLAY_METHOD) {
 	import std.traits : ParameterTypeTuple, ParameterIdentifierTuple;
@@ -895,7 +954,7 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 			import vibe.core.log : logDebug;
 			got_error = true;
 			err.text = ex.msg;
-			debug logDebug("Error handling field '%s': %s", ex.toString().sanitize);
+			debug logDebug("Error handling field '%s': %s", param_names[i], ex.toString().sanitize);
 		}
 
 		if (got_error) {
@@ -976,8 +1035,10 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 				} else {
 					res.writeBody(ret);
 				}
+			} else static if (is(RET : const(char)[])) {
+				res.writeBody(ret);
 			} else {
-				static assert(is(RET == void), M~": Only InputStream, Json and void are supported as return types for route methods.");
+				static assert(is(RET == void), M~": Only `InputStream`, `const(ubyte[])`, `Json`, `const(char)[]` and `void` are supported as return types for route methods.");
 			}
 		}
 	} catch (Exception ex) {
@@ -989,7 +1050,6 @@ private void handleRequest(string M, alias overload, C, ERROR...)(HTTPServerRequ
 		} else throw ex;
 	}
 }
-
 
 private RequestContext createRequestContext(alias handler)(HTTPServerRequest req, HTTPServerResponse res)
 {
@@ -1007,23 +1067,19 @@ private RequestContext createRequestContext(alias handler)(HTTPServerRequest req
 	static if (FUNCTRANS.found) alias TranslateContext = FUNCTRANS.value.Context;
 	else static if (PARENTTRANS.found) alias TranslateContext = PARENTTRANS.value.Context;
 
-	static if (is(TranslateContext) && TranslateContext.languages.length) {
-		static if (TranslateContext.languages.length > 1) {
-			switch (ret.language) {
-				default:
-					ret.tr = &tr!(TranslateContext, TranslateContext.languages[0]);
-					ret.tr_plural = &tr!(TranslateContext, TranslateContext.languages[0]);
-					break;
-				foreach (lang; TranslateContext.languages[1 .. $]) {
-					case lang:
-						ret.tr = &tr!(TranslateContext, lang);
-						ret.tr_plural = &tr!(TranslateContext, lang);
-						break;
+	static if (is(TranslateContext) && languageSeq!TranslateContext.length) {
+		switch (ret.language) {
+			default:
+			mixin({
+				string ret;
+				foreach (lang; TranslateContext.languages) {
+					ret ~= "case `" ~ lang ~ "`:
+						ret.tr = &tr!(TranslateContext, `" ~ lang ~ "`);
+						ret.tr_plural = &tr!(TranslateContext, `" ~ lang ~ "`);
+						break;";
 				}
-			}
-		} else {
-			ret.tr = &tr!(TranslateContext, TranslateContext.languages[0]);
-			ret.tr_plural = &tr!(TranslateContext, TranslateContext.languages[0]);
+				return ret;
+			}());
 		}
 	} else {
 		ret.tr = (t,c) => t;

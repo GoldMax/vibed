@@ -1,14 +1,14 @@
 module vibe.internal.utilallocator;
 
-public import std.experimental.allocator : allocatorObject, CAllocatorImpl, dispose,
+public import stdx.allocator : allocatorObject, CAllocatorImpl, dispose,
 	   expandArray, IAllocator, make, makeArray, shrinkArray, theAllocator;
-public import std.experimental.allocator.mallocator;
-public import std.experimental.allocator.building_blocks.affix_allocator;
+public import stdx.allocator.mallocator;
+public import stdx.allocator.building_blocks.affix_allocator;
 
 // NOTE: this needs to be used instead of theAllocator due to Phobos issue 17564
 @property IAllocator vibeThreadAllocator()
 @safe nothrow @nogc {
-	import std.experimental.allocator.gc_allocator;
+	import stdx.allocator.gc_allocator;
 	static IAllocator s_threadAllocator;
 	if (!s_threadAllocator)
 		s_threadAllocator = () @trusted { return allocatorObject(GCAllocator.instance); } ();
@@ -20,10 +20,7 @@ final class RegionListAllocator(Allocator, bool leak = false) : IAllocator {
 	import std.algorithm.comparison : min, max;
 	import std.conv : emplace;
 
-	static if (__VERSION__ < 2072)
-		import std.experimental.allocator.common : Ternary;
-	else
-		import std.typecons : Ternary;
+	import std.typecons : Ternary;
 
 	static struct Pool { Pool* next; void[] data; void[] remaining; }
 	private {
@@ -115,7 +112,11 @@ final class RegionListAllocator(Allocator, bool leak = false) : IAllocator {
 	} else {
 		override Ternary resolveInternalPointer(void* p, ref void[] result) { return Ternary.unknown; }
 	}
-	override Ternary owns(void[] b) { return Ternary.unknown; }
+	static if (is(Parameters!(IAllocator.owns)[0] == const(void[]))) {
+	    override Ternary owns(const void[] b) { return Ternary.unknown; }
+	} else {
+	    override Ternary owns(void[] b) { return Ternary.unknown; }
+	}
 
 
 	override bool reallocate(ref void[] arr, size_t newsize)

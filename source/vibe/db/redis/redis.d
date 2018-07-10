@@ -37,15 +37,78 @@ RedisClient connectRedis(string host, ushort port = RedisClient.defaultPort)
 }
 
 /**
-	Returns a Redis database connecction instance corresponding to the given URL.
+	Returns a Redis database connection instance corresponding to the given URL.
 
 	The URL must be of the format "redis://server[:port]/dbnum".
+
+	Authentication:
+		Authenticated connections are supported by using a URL connection string
+		such as "redis://password@host".
+
+	Examples:
+		---
+		// connecting with default settings:
+		auto redisDB = connectRedisDB("redis://127.0.0.1");
+		---
+
+		---
+		// connecting using the URL form with custom settings
+		auto redisDB = connectRedisDB("redis://password:myremotehost/3?maxmemory=10000000");
+		---
+
+	Params:
+		url = Redis URI scheme for a Redis database instance
+		host_or_url = Can either be a host name, in which case the default port will be used, or a URL with the redis:// scheme.
+
+	Returns:
+		A new RedisDatabase instance that can be used to access the database.
+
+	See_also: $(LINK2 https://www.iana.org/assignments/uri-schemes/prov/redis, Redis URI scheme)
 */
 RedisDatabase connectRedisDB(URL url)
 {
 	auto cli = connectRedis(url.host, url.port != 0 ? url.port : RedisClient.defaultPort);
-	// TODO: support password
-	return cli.getDatabase(url.localURI[1 .. $].to!long);
+
+	if (!url.queryString.empty)
+	{
+		import vibe.inet.webform : FormFields, parseURLEncodedForm;
+		auto query = FormFields.init;
+		parseURLEncodedForm(url.queryString, query);
+		foreach (param, val; query.byKeyValue)
+		{
+			switch (param)
+			{
+				/**
+				The password to use for the Redis AUTH command comes from either the
+				password portion of the "userinfo" URI field or the value from the
+				key-value pair from the "query" URI field with the key "password".
+				If both the password portion of the "userinfo" URI field and a
+				"query" URI field key-value pair with the key "password" are present,
+				the semantics for what password to use for authentication are not
+				well-defined.  Such situations therefore ought to be avoided.
+				*/
+				case "password":
+					if (!url.password.empty)
+						cli.auth(val);
+					break;
+				default:
+					throw new Exception(`Redis config parameter "` ~ param ~ `" isn't supported`);
+			}
+		}
+	}
+
+	/*
+	Redis' current optional authentication mechanism does not employ a
+	username, but this might change in the future
+	*/
+	if (!url.password.empty)
+		cli.auth(url.password);
+
+	long databaseIndex;
+	if (url.localURI.length >= 2)
+		databaseIndex = url.pathString[1 .. $].to!long;
+
+	return cli.getDatabase(databaseIndex);
 }
 
 /**
@@ -438,6 +501,8 @@ struct RedisDatabase {
 		else return request!(RedisReply!T)("ZRANGE", key, start, end);
 	}
 
+	long zlexCount(string key, string min = "-", string max = "+") { return request!long("ZLEXCOUNT", key, min, max); }
+
 	/// When all the elements in a sorted set are inserted with the same score, in order to force lexicographical ordering,
 	/// this command returns all the elements in the sorted set at key with a value between min and max.
 	RedisReply!T zrangeByLex(T = string)(string key, string min = "-", string max = "+", long offset = 0, long count = -1)
@@ -651,6 +716,7 @@ final class RedisSubscriberImpl {
 		Task m_listener;
 		Task m_listenerHelper;
 		Task m_waiter;
+		Task m_stopWaiter;
 		InterruptibleRecursiveTaskMutex m_mutex;
 		InterruptibleTaskMutex m_connMutex;
 	}
@@ -684,9 +750,37 @@ final class RedisSubscriberImpl {
 		m_connMutex = new InterruptibleTaskMutex;
 	}
 
+	// FIXME: instead of waiting here, the class must be reference counted
+	// and destructions needs to be defered until everything is stopped
 	~this() {
 		logTrace("~this");
-		bstop();
+		waitForStop();
+	}
+
+	// Task will block until the listener is finished
+	private void waitForStop()
+	{
+		logTrace("waitForStop");
+		if (!m_listening) return;
+
+		void impl() @safe {
+			m_mutex.performLocked!({
+				m_stopWaiter = Task.getThis();
+			});
+			if (!m_listening) return; // verify again in case the mutex was locked by bstop
+			scope(exit) {
+				m_mutex.performLocked!({
+					m_stopWaiter = Task();
+				});
+			}
+			bool stopped;
+			do {
+				() @trusted { receive((Action act) { if (act == Action.STOP) stopped = true;  }); } ();
+			} while (!stopped);
+
+			enforce(stopped, "Failed to wait for Redis listener to stop");
+		}
+		inTask(&impl);
 	}
 
 	/// Stop listening and yield until the operation is complete.
@@ -1112,6 +1206,8 @@ final class RedisSubscriberImpl {
 
 			if (m_waiter != Task())
 				() @trusted { m_waiter.send(Action.STOP); } ();
+			if (m_stopWaiter != Task())
+				() @trusted { m_stopWaiter.send(Action.STOP); } ();
 
 			m_listenerHelper = Task();
 			m_listener = Task();

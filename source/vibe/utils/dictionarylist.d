@@ -195,7 +195,7 @@ struct DictionaryList(VALUE, bool case_sensitive = true, size_t NUM_STATIC_FIELD
 	/// ditto
 	inout(T) get(T)(string key) // Work around DMD bug
 	inout if (typedGet!T) {
-		return get!T(key, T.init);
+		return get!T(key, inout(T).init);
 	}
 
 	/** Returns all values matching the given key.
@@ -350,7 +350,10 @@ struct DictionaryList(VALUE, bool case_sensitive = true, size_t NUM_STATIC_FIELD
 	}
 }
 
-static assert(DictionaryList!(string, true, 2).safeValueCopy);
+@safe unittest
+{
+	assert(DictionaryList!(string, true, 2).safeValueCopy);
+}
 
 @safe unittest {
 	DictionaryList!(int, true) a;
@@ -396,4 +399,16 @@ unittest {
 	l["bar"] = 43;
 	assert(text(l) == `["foo": 42, "bar": 43]`, text(l));
 	assert(l.toString() == `["foo": 42, "bar": 43]`, l.toString());
+}
+
+// Issue 2004
+unittest {
+	import std.variant : Variant;
+	DictionaryList!Variant l;
+	class C {
+		int x = 123;
+	}
+	l["foo"] = new C;
+	auto c = l.get!C("foo");
+	assert(c.x == 123);
 }

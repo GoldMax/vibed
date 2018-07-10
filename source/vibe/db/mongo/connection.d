@@ -50,7 +50,7 @@ class MongoException : Exception
 {
 @safe:
 
-	this(string message, string file = __FILE__, int line = __LINE__, Throwable next = null)
+	this(string message, string file = __FILE__, size_t line = __LINE__, Throwable next = null)
 	{
 		super(message, file, line, next);
 	}
@@ -65,7 +65,7 @@ class MongoDriverException : MongoException
 {
 @safe:
 
-	this(string message, string file = __FILE__, int line = __LINE__, Throwable next = null)
+	this(string message, string file = __FILE__, size_t line = __LINE__, Throwable next = null)
 	{
 		super(message, file, line, next);
 	}
@@ -85,7 +85,7 @@ class MongoDBException : MongoException
 	alias description this;
 
 	this(MongoErrorDescription description, string file = __FILE__,
-			int line = __LINE__, Throwable next = null)
+			size_t line = __LINE__, Throwable next = null)
 	{
 		super(description.message, file, line, next);
 		this.description = description;
@@ -101,7 +101,7 @@ class MongoAuthException : MongoException
 {
 @safe:
 
-	this(string message, string file = __FILE__, int line = __LINE__, Throwable next = null)
+	this(string message, string file = __FILE__, size_t line = __LINE__, Throwable next = null)
 	{
 		super(message, file, line, next);
 	}
@@ -184,8 +184,8 @@ final class MongoConnection {
 		m_bytesRead = 0;
 		if(m_settings.digest != string.init)
 		{
-			if (m_settings.authMechanism == MongoAuthMechanism.none)
-				authenticate();
+			if (m_settings.authMechanism == MongoAuthMechanism.mongoDBCR)
+				authenticate(); // use old mechanism if explicitly stated
 			else {
 				/**
 				SCRAM-SHA-1 was released in March 2015 and on a properly
@@ -194,9 +194,9 @@ final class MongoConnection {
 				no authentication is tried in case of an error.
 				*/
 				try
-					scramAuthenticate();
+					scramAuthenticate(); // scram-sha-1 is default in version v3.0+
 				catch (MongoAuthException e)
-					authenticate();
+					authenticate(); // fall back if scram-sha-1 fails
 			}
 
 		}

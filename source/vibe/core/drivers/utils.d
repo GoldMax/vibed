@@ -7,7 +7,8 @@
 */
 module vibe.core.drivers.utils;
 
-import std.exception;
+import vibe.internal.exception : enforce;
+import std.exception : ErrnoException;
 
 version (Windows) {
 	import core.sys.windows.windows;
@@ -43,14 +44,13 @@ version (Windows) {
 	alias SystemSocketException = WSAErrorException;
 } else alias SystemSocketException = ErrnoException;
 
-version (linux) {
-	import core.sys.posix.sys.socket;
-	static if (!is(typeof(SO_REUSEPORT))) {
-		enum { SO_REUSEPORT = 15 }
-	}
+import core.sys.posix.sys.socket;
+static if (!is(typeof(SO_REUSEPORT))) {
+	version (linux) enum SO_REUSEPORT = 15;
+	else enum SO_REUSEPORT = 0x200;
 }
 
 T socketEnforce(T)(T value, lazy string msg = null, string file = __FILE__, size_t line = __LINE__)
 @trusted {
-	return enforceEx!SystemSocketException(value, msg, file, line);
+	return enforce!SystemSocketException(value, msg, file, line);
 }

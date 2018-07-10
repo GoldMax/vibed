@@ -33,6 +33,7 @@ import deimos.openssl.bio;
 import deimos.openssl.err;
 import deimos.openssl.rand;
 import deimos.openssl.ssl;
+import deimos.openssl.stack;
 import deimos.openssl.x509v3;
 
 version (VibePragmaLib) {
@@ -49,16 +50,10 @@ enum haveALPN = OPENSSL_VERSION_NUMBER >= 0x10200000 || alpn_forced;
 // openssl 1.1.0 hack: provides a 1.0.x API in terms of the 1.1.x API
 version (VibeUseOpenSSL11) {
 	extern(C) const(SSL_METHOD)* TLS_client_method();
-
-	const(SSL_METHOD)* SSLv23_client_method() {
-		return TLS_client_method();
-	}
+	alias SSLv23_client_method = TLS_client_method;
 
 	extern(C) const(SSL_METHOD)* TLS_server_method();
-
-	const(SSL_METHOD)* SSLv23_server_method() {
-		return TLS_server_method();
-	}
+	alias SSLv23_server_method = TLS_server_method;
 
 	// this does nothing in > openssl 1.1.0
 	void SSL_load_error_strings() {}
@@ -79,7 +74,6 @@ version (VibeUseOpenSSL11) {
 	}
 
 	void CRYPTO_set_locking_callback(T)(T t) {
-
 	}
 
 	// #define SSL_get_ex_new_index(l, p, newf, dupf, freef) \
@@ -99,22 +93,15 @@ version (VibeUseOpenSSL11) {
 
 	extern(C) BIGNUM* BN_get_rfc3526_prime_2048(BIGNUM *bn);
 
-	BIGNUM* get_rfc3526_prime_2048(BIGNUM *bn) {
-		return BN_get_rfc3526_prime_2048(bn);
-	}
+	alias get_rfc3526_prime_2048 = BN_get_rfc3526_prime_2048;
 
 	// #  define sk_num OPENSSL_sk_num
 	extern(C) int OPENSSL_sk_num(const void *);
-	extern(C) int sk_num(const(_STACK)* a) {
-		return OPENSSL_sk_num(a);
-	}
+	extern(C) int sk_num(const(_STACK)* p) { return OPENSSL_sk_num(p); }
 
 	// #  define sk_value OPENSSL_sk_value
 	extern(C) void *OPENSSL_sk_value(const void *, int);
-
-	extern(C) void* sk_value(const(_STACK)* s, int l) {
-		return OPENSSL_sk_value(s, l);
-	}
+	extern(C) void* sk_value(const(_STACK)* p, int i) { return OPENSSL_sk_value(p, i); }
 }
 
 /**
@@ -254,7 +241,9 @@ final class OpenSSLStream : TLSStream {
 
 	@property ulong leastSize()
 	{
-		checkSSLRet(() @trusted { return SSL_peek(m_tls, m_peekBuffer.ptr, 1); } (), "Reading from TLS stream");
+		auto ret = () @trusted { return SSL_peek(m_tls, m_peekBuffer.ptr, 1); } ();
+		if (ret != 0) // zero means the connection got closed
+			checkSSLRet(ret, "Peeking TLS stream");
 		return () @trusted { return SSL_pending(m_tls); } ();
 	}
 
@@ -327,6 +316,7 @@ final class OpenSSLStream : TLSStream {
 		} ();
 
 		m_tls = null;
+		m_stream = InterfaceProxy!Stream.init;
 	}
 
 	private int checkSSLRet(int ret, string what)
@@ -860,8 +850,8 @@ final class OpenSSLContext : TLSContext {
 					case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT:
 					case X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY:
 					case X509_V_ERR_CERT_UNTRUSTED:
-						assert(ctx.current_cert !is null);
-						X509_NAME_oneline(X509_get_issuer_name(ctx.current_cert), buf.ptr, buf.length);
+						assert(err_cert !is null);
+						X509_NAME_oneline(X509_get_issuer_name(err_cert), buf.ptr, buf.length);
 						buf[$-1] = 0;
 						logDebug("SSL cert not trusted or unknown issuer: %s", buf.ptr.to!string);
 						if (!(vdata.validationMode & TLSPeerValidationMode.checkTrust)) {
@@ -989,7 +979,7 @@ private bool verifyCertName(X509* cert, int field, in char[] value, bool allow_w
 	}
 
 	X509_NAME* name = X509_get_subject_name(cert);
-	int i;
+	int i = -1;
 	while ((i = X509_NAME_get_index_by_NID(name, cnid, i)) >= 0) {
 		X509_NAME_ENTRY* ne = X509_NAME_get_entry(name, i);
 		ASN1_STRING* str = X509_NAME_ENTRY_get_data(ne);

@@ -50,19 +50,8 @@ struct HashMap(TKey, TValue, Traits = DefaultHashMapTraits!TKey)
 	alias Key = TKey;
 	alias Value = TValue;
 
-	static if (__VERSION__ < 2074) {
-		struct AW { // work around AffixAllocator limitations
-			import std.algorithm.comparison : max;
-			IAllocator alloc;
-			alias alloc this;
-			enum alignment = max(Key.alignof, int.alignof);
-			void[] resolveInternalPointer(void* p) { void[] ret; alloc.resolveInternalPointer(p, ret); return ret; }
-		}
-		alias AllocatorType = AffixAllocator!(AW, int);
-	} else {
-		IAllocator AW(IAllocator a) { return a; }
-		alias AllocatorType = AffixAllocator!(IAllocator, int);
-	}
+	IAllocator AW(IAllocator a) { return a; }
+	alias AllocatorType = AffixAllocator!(IAllocator, int);
 
 	struct TableEntry {
 		UnConst!Key key = Traits.clearValue;
@@ -252,8 +241,7 @@ struct HashMap(TKey, TValue, Traits = DefaultHashMapTraits!TKey)
 	private void grow(size_t amount)
 	@trusted {
 		try {
-				static if (__VERSION__ < 2074) auto palloc = m_allocator.parent;
-				else auto palloc = m_allocator._parent;
+			auto palloc = m_allocator._parent;
 			if (!palloc) {
 				try m_allocator = typeof(m_allocator)(AW(vibeThreadAllocator()));
 				catch (Exception e) assert(false, e.msg);

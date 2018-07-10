@@ -473,6 +473,9 @@ pure @safe {
 		return true;
 	}
 
+	if (lines.empty)
+		return [""]; // return value is used in variables that don't get bounds checks on the first element, so we should return at least one
+
 	string[] ret;
 
 	while(true){
@@ -529,7 +532,8 @@ private void writeBlock(R)(ref R dst, ref const Block block, LinkRef[string] lin
 				dst.put('>');
 				dst.writeMarkdownEscaped(col, links, settings);
 				dst.put("</th>");
-				i++;
+				if (i + 1 < block.columns.length)
+					i++;
 			}
 			dst.put("</tr>\n");
 			foreach (ln; block.text[1 .. $]) {
@@ -541,7 +545,8 @@ private void writeBlock(R)(ref R dst, ref const Block block, LinkRef[string] lin
 					dst.put('>');
 					dst.writeMarkdownEscaped(col, links, settings);
 					dst.put("</td>");
-					i++;
+					if (i + 1 < block.columns.length)
+						i++;
 				}
 				dst.put("</tr>\n");
 			}
@@ -1085,19 +1090,55 @@ pure @safe {
 
 private bool parseAutoLink(ref string str, ref string url)
 pure @safe {
+	import std.algorithm.searching : all;
+	import std.ascii : isAlphaNum;
+
 	string pstr = str;
-	if( pstr.length < 3 ) return false;
-	if( pstr[0] != '<' ) return false;
+	if (pstr.length < 3) return false;
+	if (pstr[0] != '<') return false;
 	pstr = pstr[1 .. $];
 	auto cidx = pstr.indexOf('>');
-	if( cidx < 0 ) return false;
+	if (cidx < 0) return false;
+
 	url = pstr[0 .. cidx];
-	if( anyOf(url, " \t") ) return false;
-	if( !anyOf(url, ":@") ) return false;
+	if (url.anyOf(" \t")) return false;
+	auto atidx = url.indexOf('@');
+	auto colonidx = url.indexOf(':');
+	if (atidx < 0 && colonidx < 0) return false;
+
 	str = pstr[cidx+1 .. $];
-	if( url.indexOf('@') > 0 ) url = "mailto:"~url;
+	if (atidx < 0) return true;
+	if (colonidx < 0 || colonidx > atidx ||
+		!url[0 .. colonidx].all!(ch => ch.isAlphaNum))
+			url = "mailto:" ~ url;
 	return true;
 }
+
+unittest {
+	void test(bool expected, string str, string url)
+	{
+		string strcpy = str;
+		string outurl;
+		if (!expected) {
+			assert(!parseAutoLink(strcpy, outurl));
+			assert(outurl.length == 0);
+			assert(strcpy == str);
+		} else {
+			assert(parseAutoLink(strcpy, outurl));
+			assert(outurl == url);
+			assert(strcpy.length == 0);
+		}
+	}
+
+	test(true, "<http://foo/>", "http://foo/");
+	test(false, "<http://foo/", null);
+	test(true, "<mailto:foo@bar>", "mailto:foo@bar");
+	test(true, "<foo@bar>", "mailto:foo@bar");
+	test(true, "<proto:foo@bar>", "proto:foo@bar");
+	test(true, "<proto:foo@bar:123>", "proto:foo@bar:123");
+	test(true, "<\"foo:bar\"@baz>", "mailto:\"foo:bar\"@baz");
+}
+
 
 private LinkRef[string] scanForReferences(ref string[] lines)
 pure @safe {
@@ -1345,4 +1386,9 @@ private struct Link {
 		"<p><a href=\"&quot;&gt;&lt;script&gt;&lt;/script&gt;&lt;span foo=&quot;\">foo</a>\n</p>\n");
 	assert(filterMarkdown("[foo](javascript&#58;bar)", MarkdownFlags.forumDefault) ==
 		"<p><a href=\"javascript&amp;#58;bar\">foo</a>\n</p>\n");
+}
+
+@safe unittest { // issue #2132 - table with more columns in body goes out of array bounds
+	assert(filterMarkdown("| a | b |\n|--------|--------|\n|   c    | d  | e |", MarkdownFlags.tables) ==
+		"<table>\n<tr><th>a</th><th>b</th></tr>\n<tr><td>c</td><td>d</td><td>e</td></tr>\n</table>\n");
 }

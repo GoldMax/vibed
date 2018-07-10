@@ -67,6 +67,7 @@ import std.base64;
 import std.bitmanip;
 import std.conv;
 import std.datetime;
+import std.uuid: UUID;
 import std.exception;
 import std.range;
 import std.traits;
@@ -216,6 +217,8 @@ struct Bson {
 	this(long value) { opAssign(value); }
 	/// ditto
 	this(in Json value) { opAssign(value); }
+	/// ditto
+	this(in UUID value) { opAssign(value); }
 
 	/**
 		Assigns a D type to a BSON value.
@@ -346,6 +349,11 @@ struct Bson {
 		m_type = writeBson(app, value);
 		m_data = app.data;
 	}
+	/// ditto
+	void opAssign(in UUID value)
+	{
+		opAssign(BsonBinData(BsonBinData.Type.uuid, value.data.idup));
+	}
 
 	/**
 		Returns the BSON type of this value.
@@ -428,6 +436,13 @@ struct Bson {
 		else static if( is(T == Json) ){
 			pragma(msg, "Bson.get!Json() and Bson.opCast!Json() will soon be removed. Please use Bson.toJson() instead.");
 			return this.toJson();
+		}
+		else static if( is(T == UUID) ){
+			checkType(Type.binData);
+			auto bbd = this.get!BsonBinData();
+			enforce(bbd.type == BsonBinData.Type.uuid, "BsonBinData value is type '"~to!string(bbd.type)~"', expected to be uuid");
+			const ubyte[16] b = bbd.rawData;
+			return UUID(b);
 		}
 		else static assert(false, "Cannot cast "~typeof(this).stringof~" to '"~T.stringof~"'.");
 	}
@@ -587,6 +602,18 @@ struct Bson {
 		assert(value["a"] == Bson(1));
 		assert(value["b"] == Bson(true));
 		assert(value["c"] == Bson("foo"));
+	}
+
+	///
+	unittest {
+		auto srcUuid = UUID("00010203-0405-0607-0809-0a0b0c0d0e0f");
+
+		Bson b = srcUuid;
+		auto u = b.get!UUID();
+
+		assert(b.type == Bson.Type.binData);
+		assert(b.get!BsonBinData().type == BsonBinData.Type.uuid);
+		assert(u == srcUuid);
 	}
 
 	/** Allows index based access of a BSON array value.
@@ -1325,6 +1352,20 @@ unittest { // issue #793
 	assert(bson[0].type == Bson.Type.string && bson[0].get!string == "t");
 }
 
+unittest
+{
+	UUID uuid = UUID("35399104-fbc9-4c08-bbaf-65a5efe6f5f2");
+
+	auto bson = Bson(uuid);
+	assert(bson.get!UUID == uuid);
+	assert(bson.deserializeBson!UUID == uuid);
+
+	bson = Bson([Bson(uuid)]);
+	assert(bson.deserializeBson!(UUID[]) == [uuid]);
+
+	bson = [uuid].serializeToBson();
+	assert(bson.deserializeBson!(UUID[]) == [uuid]);
+}
 
 /**
 	Serializes to an in-memory BSON representation.
@@ -1416,6 +1457,7 @@ struct BsonSerializer {
 		else static if (is(T : int) && isIntegral!T) { m_dst.put(toBsonData(cast(int)value)); }
 		else static if (is(T : long) && isIntegral!T) { m_dst.put(toBsonData(value)); }
 		else static if (is(T : double) && isFloatingPoint!T) { m_dst.put(toBsonData(cast(double)value)); }
+		else static if (is(T == UUID)) { m_dst.put(Bson(value).data); }
 		else static if (isBsonSerializable!T) {
 			static if (!__traits(compiles, () @safe { return value.toBson(); } ()))
 				pragma(msg, "Non-@safe toBson/fromBson methods are deprecated - annotate "~T.stringof~".toBson() with @safe.");
@@ -1551,6 +1593,7 @@ struct BsonSerializer {
 		else static if (isFloatingPoint!T && is(T : double)) tp = Bson.Type.double_;
 		else static if (isBsonSerializable!T) tp = value.toBson().type; // FIXME: this is highly inefficient
 		else static if (isJsonSerializable!T) tp = jsonTypeToBsonType(value.toJson().type); // FIXME: this is highly inefficient
+		else static if (is(T == UUID)) tp = Bson.Type.binData;
 		else static if (is(T : const(ubyte)[])) tp = Bson.Type.binData;
 		else static if (accept_ao && isArray!T) tp = Bson.Type.array;
 		else static if (accept_ao && isAssociativeArray!T) tp = Bson.Type.object;

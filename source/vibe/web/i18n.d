@@ -1,7 +1,7 @@
 /**
 	Internationalization/translation support for the web interface module.
 
-	Copyright: © 2014-2015 RejectedSoftware e.K.
+	Copyright: © 2014-2017 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
@@ -10,7 +10,7 @@ module vibe.web.i18n;
 import vibe.http.server : HTTPServerRequest;
 
 import std.algorithm : canFind, min, startsWith;
-import std.range.primitives : isForwardRange;
+import std.range.primitives : ElementType, isForwardRange, save;
 import std.range : only;
 
 /**
@@ -133,7 +133,7 @@ html
 
 	Params:
 		FILENAME = Base name of the set of PO files to mix in. A file with the
-			name "<FILENAME>.<LANGUAGE>.po" must be available as a string import
+			name `"<FILENAME>.<LANGUAGE>.po"` must be available as a string import
 			for each language defined in the translation context.
 
 	Bugs:
@@ -147,16 +147,19 @@ mixin template translationModule(string FILENAME)
 {
 	import std.string : tr;
 	enum NAME = FILENAME.tr(`/.-\`, "____");
-	private mixin template file_mixin(size_t i) {
-		static if (i < languages.length) {
-			enum components = extractDeclStrings(import(FILENAME~"."~languages[i]~".po"));
-			mixin("enum "~languages[i]~"_"~NAME~" = components;");
-			//mixin decls_mixin!(languages[i], 0);
-			mixin file_mixin!(i+1);
-		}
+	private static string file_mixins() {
+		string ret;
+		foreach (language; languages)
+			ret ~= "enum "~language~"_"~NAME~" = extractDeclStrings(import(`"~FILENAME~"."~language~".po`));\n";
+		return ret;
 	}
 
-	mixin file_mixin!0;
+	mixin(file_mixins);
+}
+
+template languageSeq(CTX) {
+	static if (is(typeof([CTX.languages]) : string[])) alias languageSeq = CTX.languages;
+	else alias languageSeq = aliasSeqOf!(CTX.languages);
 }
 
 /**
@@ -174,7 +177,7 @@ template tr(CTX, string LANG)
 
 	string tr(string key, string key_plural, int n, string context = null)
 	{
-		static assert([CTX.languages].canFind(LANG), "Unknown language: "~LANG);
+		static assert([languageSeq!CTX].canFind(LANG), "Unknown language: "~LANG);
 
 		foreach (i, mname; __traits(allMembers, CTX)) {
 			static if (mname.startsWith(LANG~"_")) {
@@ -226,7 +229,7 @@ template tr(CTX, string LANG)
 /// Determines a language code from the value of a header string.
 /// Returns: The best match from the Accept-Language header for a language. `null` if there is no supported language.
 public string determineLanguageByHeader(T)(string accept_language, T allowed_languages) @safe pure @nogc
-	if (isForwardRange!T)
+	if (isForwardRange!T && is(ElementType!T : string) || is(T == typeof(only())))
 {
 	import std.algorithm : splitter, countUntil;
 	import std.string : indexOf;
@@ -252,24 +255,26 @@ public string determineLanguageByHeader(T)(string accept_language, T allowed_lan
 			aextra = accept[asep + 1 .. $];
 		}
 
-		foreach (lang; allowed_languages) {
-			string lcode, lextra;
-			sidx = lang.countUntil!(a => a == '_' || a == '-');
-			if (sidx < 0)
-				lcode = lang;
-			else {
-				lcode = lang[0 .. sidx];
-				lextra = lang[sidx + 1 .. $];
+		static if (!is(T == typeof(only()))) { // workaround for type errors
+			foreach (lang; allowed_languages.save) {
+				string lcode, lextra;
+				sidx = lang.countUntil!(a => a == '_' || a == '-');
+				if (sidx < 0)
+					lcode = lang;
+				else {
+					lcode = lang[0 .. sidx];
+					lextra = lang[sidx + 1 .. $];
+				}
+				// request en_US == serve en_US
+				if (lcode == alang && lextra == aextra)
+					return lang;
+				// request en_* == serve en
+				if (lcode == alang && !lextra.length)
+					return lang;
+				// request en* == serve en_* && be first occurence
+				if (lcode == alang && lextra.length && !fallback.length)
+					fallback = lang;
 			}
-			// request en_US == serve en_US
-			if (lcode == alang && lextra == aextra)
-				return lang;
-			// request en_* == serve en
-			if (lcode == alang && !lextra.length)
-				return lang;
-			// request en* == serve en_* && be first occurence
-			if (lcode == alang && lextra.length && !fallback.length)
-				fallback = lang;
 		}
 	}
 
@@ -278,19 +283,21 @@ public string determineLanguageByHeader(T)(string accept_language, T allowed_lan
 
 /// ditto
 public string determineLanguageByHeader(Tuple...)(string accept_language, Tuple allowed_languages) @safe pure @nogc
+	if (Tuple.length != 1 || is(Tuple[0] : string))
 {
 	return determineLanguageByHeader(accept_language, only(allowed_languages));
 }
 
 /// ditto
 public string determineLanguageByHeader(T)(HTTPServerRequest req, T allowed_languages) @safe pure
-	if (isForwardRange!T)
+	if (isForwardRange!T && is(ElementType!T : string) || is(T == typeof(only())))
 {
 	return determineLanguageByHeader(req.headers.get("Accept-Language", null), allowed_languages);
 }
 
 /// ditto
 public string determineLanguageByHeader(Tuple...)(HTTPServerRequest req, Tuple allowed_languages) @safe pure
+	if (Tuple.length != 1 || is(Tuple[0] : string))
 {
 	return determineLanguageByHeader(req.headers.get("Accept-Language", null), only(allowed_languages));
 }
@@ -323,7 +330,7 @@ package string determineLanguage(alias METHOD)(scope HTTPServerRequest req)
 				"determineLanguage in a translation context must return a language string.");
 			return CTX.determineLanguage(req);
 		} else {
-			return determineLanguageByHeader(req, CTX.languages);
+			return determineLanguageByHeader(req, only(CTX.languages));
 		}
 	} else return null;
 }
@@ -340,6 +347,24 @@ unittest { // make sure that the custom determineLanguage is called
 	}
 	auto test = new Test;
 	assert(determineLanguage!(test.test)(null) == "test");
+}
+
+unittest { // issue #1955
+	import std.meta : AliasSeq;
+	import vibe.inet.url : URL;
+	import vibe.http.server : createTestHTTPServerRequest;
+
+	static struct CTX {
+		alias languages = AliasSeq!();
+	}
+
+	@translationContext!CTX
+	class C {
+		void test() {}
+	}
+
+	auto req = createTestHTTPServerRequest(URL("http://127.0.0.1/test"));
+	assert(determineLanguage!(C.test)(req) == null);
 }
 
 package template GetTranslationContext(alias METHOD)

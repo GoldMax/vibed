@@ -166,7 +166,7 @@
 				source the parameter `name` from a field named "field" of the
 				query string.)
 			$(LI `@bodyParam("name", "field")`: Applied on a method, it will
-				source the parameter `name` from a field named "feild" of the
+				source the parameter `name` from a field named "field" of the
 				request body in JSON format.)
 		)
 
@@ -220,7 +220,7 @@
 		To see how to implement the client side in detail, jump to
 		the `RestInterfaceClient` documentation.
 
-	Copyright: © 2012-2017 RejectedSoftware e.K.
+	Copyright: © 2012-2018 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig, Михаил Страшун, Mathias 'Geod24' Lang
 */
@@ -229,11 +229,12 @@ module vibe.web.rest;
 public import vibe.web.common;
 
 import vibe.core.log;
+import vibe.core.stream : InputStream;
 import vibe.http.router : URLRouter;
 import vibe.http.client : HTTPClientSettings;
 import vibe.http.common : HTTPMethod;
-import vibe.http.server : HTTPServerRequestDelegate;
-import vibe.http.status : isSuccessCode;
+import vibe.http.server : HTTPServerRequestDelegate, HTTPServerRequest, HTTPServerResponse;
+import vibe.http.status : HTTPStatus, isSuccessCode;
 import vibe.internal.meta.uda;
 import vibe.internal.meta.funcattr;
 import vibe.inet.url;
@@ -471,8 +472,6 @@ HTTPServerRequestDelegate serveRestJSClient(I)(RestInterfaceSettings settings)
 	import std.digest.md : md5Of;
 	import std.digest.digest : toHexString;
 	import std.array : appender;
-	import vibe.http.server : HTTPServerRequest, HTTPServerResponse;
-	import vibe.http.status : HTTPStatus;
 
 	auto app = appender!string();
 	generateRestJSClient!I(app, settings);
@@ -601,10 +600,13 @@ class RestInterfaceClient(I) : I
 		// LDC 0.15.x, so we are using a pointer here:
 		RestInterface!I* m_intf;
 		RequestFilter m_requestFilter;
+		RequestBodyFilter m_requestBodyFilter;
 		staticMap!(RestInterfaceClient, Info.SubInterfaceTypes) m_subInterfaces;
 	}
 
-	alias RequestFilter = void delegate(HTTPClientRequest req);
+	alias RequestFilter = void delegate(HTTPClientRequest req) @safe;
+
+	alias RequestBodyFilter = void delegate(HTTPClientRequest req, scope InputStream body_contents) @safe;
 
 	/**
 		Creates a new REST client implementation of $(D I).
@@ -639,13 +641,32 @@ class RestInterfaceClient(I) : I
 	{
 		return m_requestFilter;
 	}
-
 	/// ditto
 	final @property void requestFilter(RequestFilter v)
 	{
 		m_requestFilter = v;
 		foreach (i, SI; Info.SubInterfaceTypes)
 			m_subInterfaces[i].requestFilter = v;
+	}
+	/// ditto
+	final @property void requestFilter(void delegate(HTTPClientRequest req) v)
+	{
+		this.requestFilter = cast(RequestFilter)v;
+	}
+
+	/** Optional request filter with access to the request body.
+
+		This callback allows to modify the request headers depending on the
+		contents of the body.
+	*/
+	final @property void requestBodyFilter(RequestBodyFilter del)
+	{
+		m_requestBodyFilter = del;
+	}
+	/// ditto
+	final @property RequestBodyFilter requestBodyFilter()
+	{
+		return m_requestBodyFilter;
 	}
 
 	//pragma(msg, "restinterface:");
@@ -701,7 +722,8 @@ class RestInterfaceClient(I) : I
 
 			auto httpsettings = m_intf.settings.httpClientSettings;
 
-			return .request(URL(m_intf.baseURL), m_requestFilter, verb, path,
+			return .request(URL(m_intf.baseURL), m_requestFilter,
+				m_requestBodyFilter, verb, path,
 				hdrs, query, body_, reqReturnHdrs, optReturnHdrs, httpsettings);
 		}
 	}
@@ -773,6 +795,23 @@ class RestInterfaceSettings {
 	/// Overrides the default HTTP client settings used by the `RestInterfaceClient`.
 	HTTPClientSettings httpClientSettings;
 
+	/** Optional handler used to render custom replies in case of errors.
+
+		The handler needs to set the response status code to the provided
+		`RestErrorInformation.statusCode` value and can then write a custom
+		response body.
+
+		Note that the REST interface generator by default handles any exceptions thrown
+		during request handling and sents a JSON response with the error message. The
+		low level `HTTPServerSettings.errorPageHandler` is not invoked.
+
+		If `errorHandler` is not set, a JSON object with a single field "statusMessage"
+		will be sent. In debug builds, there may also be an additional
+		"statusDebugMessage" field that contains the full exception text, including a
+		possible stack trace.
+	*/
+	RestErrorHandler errorHandler;
+
 	@property RestInterfaceSettings dup()
 	const @safe {
 		auto ret = new RestInterfaceSettings;
@@ -781,6 +820,31 @@ class RestInterfaceSettings {
 		ret.stripTrailingUnderscore = this.stripTrailingUnderscore;
 		ret.allowedOrigins = this.allowedOrigins.dup;
 		return ret;
+	}
+}
+
+alias RestErrorHandler = void delegate(HTTPServerRequest, HTTPServerResponse, RestErrorInformation error) @safe;
+
+struct RestErrorInformation {
+	/// The status code that the handler should send in the reply
+	HTTPStatus statusCode;
+
+	/** If triggered by an exception, this contains the catched exception
+		object.
+	*/
+	Exception exception;
+
+	private this(Exception e, HTTPStatus default_status)
+	@safe {
+		import vibe.http.common : HTTPStatusException;
+
+		this.exception = e;
+
+		if (auto he = cast(HTTPStatusException)e) {
+			this.statusCode = cast(HTTPStatus)he.status;
+		} else {
+			this.statusCode = default_status;
+		}
 	}
 }
 
@@ -1008,8 +1072,12 @@ unittest {
 	// Resulting API usage
 	//
 	API api = new APIImpl; // A RestInterfaceClient!API would work just as well
+
+	// GET /items/foo/name
 	assert(api.items["foo"].name == "foo");
+	// GET /items/foo/sub_items/length
 	assert(api.items["foo"].subItems.length == 10);
+	// GET /items/foo/sub_items/2/squared_position
 	assert(api.items["foo"].subItems[2].getSquaredPosition() == 4);
 }
 
@@ -1108,8 +1176,12 @@ unittest {
 	// Resulting API usage
 	//
 	API api = new APIImpl; // A RestInterfaceClient!API would work just as well
+
+	// GET /items/name?item=foo
 	assert(api.items["foo"].name == "foo");
+	// GET /items/subitems/length?item=foo
 	assert(api.items["foo"].subItems.length == 10);
+	// GET /items/subitems/squared_position?item=foo&index=2
 	assert(api.items["foo"].subItems[2].getSquaredPosition() == 4);
 }
 
@@ -1156,11 +1228,11 @@ unittest {
 alias before = vibe.internal.meta.funcattr.before;
 
 ///
-unittest {
+@safe unittest {
 	import vibe.http.server : HTTPServerRequest, HTTPServerResponse;
 
 	interface MyService {
-		long getHeaderCount(size_t foo = 0);
+		long getHeaderCount(size_t foo = 0) @safe;
 	}
 
 	static size_t handler(HTTPServerRequest req, HTTPServerResponse res)
@@ -1178,7 +1250,7 @@ unittest {
 	}
 
 	void test(URLRouter router)
-	{
+	@safe {
 		router.registerRestInterface(new MyServiceImpl);
 	}
 }
@@ -1197,15 +1269,15 @@ unittest {
 alias after = vibe.internal.meta.funcattr.after;
 
 ///
-unittest {
+@safe unittest {
 	import vibe.http.server : HTTPServerRequest, HTTPServerResponse;
 
 	interface MyService {
-		long getMagic();
+		long getMagic() @safe;
 	}
 
 	static long handler(long ret, HTTPServerRequest req, HTTPServerResponse res)
-	{
+	@safe {
 		return ret * 2;
 	}
 
@@ -1219,7 +1291,7 @@ unittest {
 	}
 
 	void test(URLRouter router)
-	{
+	@safe {
 		router.registerRestInterface(new MyServiceImpl);
 	}
 }
@@ -1258,8 +1330,7 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 {
 	import std.meta : AliasSeq;
 	import std.string : format;
-	import vibe.http.server : HTTPServerRequest, HTTPServerResponse;
-	import vibe.http.common : HTTPStatusException, HTTPStatus, enforceBadRequest;
+	import vibe.http.common : HTTPStatusException, enforceBadRequest;
 	import vibe.utils.string : sanitizeUTF8;
 	import vibe.web.internal.rest.common : ParameterKind;
 	import vibe.internal.meta.funcattr : IsAttributedParameter, computeAttributedParameterCtx;
@@ -1289,55 +1360,98 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 				"The request body must contain a JSON object.");
 		}
 
+		void handleException(Exception e, HTTPStatus default_status)
+		@safe {
+			logDebug("REST handler exception: %s", () @trusted { return e.toString(); } ());
+			if (res.headerWritten) {
+				logDebug("Response already started. Client will not receive an error code!");
+				return;
+			}
+
+			if (settings.errorHandler) {
+				settings.errorHandler(req, res, RestErrorInformation(e, default_status));
+			} else if (auto se = cast(HTTPStatusException)e) {
+				res.writeJsonBody(["statusMessage": se.msg], se.status);
+			} else debug {
+				res.writeJsonBody(
+					[ "statusMessage": e.msg, "statusDebugMessage": () @trusted { return sanitizeUTF8(cast(ubyte[])e.toString()); } () ],
+					HTTPStatus.internalServerError
+				);
+			} else {
+				res.writeJsonBody(["statusMessage": e.msg], default_status);
+			}
+		}
+
 		static if (isAuthenticated!(T, Func)) {
-			auto auth_info = handleAuthentication!Func(inst, req, res);
+			typeof(handleAuthentication!Func(inst, req, res)) auth_info;
+
+			try auth_info = handleAuthentication!Func(inst, req, res);
+			catch (Exception e) {
+				handleException(e, HTTPStatus.unauthorized);
+				return;
+			}
+
 			if (res.headerWritten) return;
 		}
 
+
 		PTypes params;
 
-		foreach (i, PT; PTypes) {
-			enum sparam = sroute.parameters[i];
-			enum pname = sparam.name;
-			auto fieldname = route.parameters[i].fieldName;
-			static if (isInstanceOf!(Nullable, PT)) PT v;
-			else Nullable!PT v;
+		try {
+			foreach (i, PT; PTypes) {
+				enum sparam = sroute.parameters[i];
 
-			static if (sparam.kind == ParameterKind.auth) {
-				v = auth_info;
-			} else static if (sparam.kind == ParameterKind.query) {
-				if (auto pv = fieldname in req.query)
-					v = fromRestString!PT(*pv);
-			} else static if (sparam.kind == ParameterKind.wholeBody) {
-				try v = deserializeJson!PT(req.json);
-				catch (JSONException e) enforceBadRequest(false, e.msg);
-			} else static if (sparam.kind == ParameterKind.body_) {
-				try {
-					if (auto pv = fieldname in req.json)
-						v = deserializeJson!PT(*pv);
-				} catch (JSONException e)
-					enforceBadRequest(false, e.msg);
-			} else static if (sparam.kind == ParameterKind.header) {
-				if (auto pv = fieldname in req.headers)
-					v = fromRestString!PT(*pv);
-			} else static if (sparam.kind == ParameterKind.attributed) {
-				static if (!__traits(compiles, () @safe { computeAttributedParameterCtx!(CFunc, pname)(inst, req, res); } ()))
-					pragma(msg, "Non-@safe @before evaluators are deprecated - annotate evaluator function for parameter "~pname~" of "~T.stringof~"."~Method~" as @safe.");
-				v = () @trusted { return computeAttributedParameterCtx!(CFunc, pname)(inst, req, res); } ();
-			} else static if (sparam.kind == ParameterKind.internal) {
-				if (auto pv = fieldname in req.params)
-					v = fromRestString!PT(urlDecode(*pv));
-			} else static assert(false, "Unhandled parameter kind.");
+				static if (sparam.isIn) {
+					enum pname = sparam.name;
+					auto fieldname = route.parameters[i].fieldName;
+					static if (isInstanceOf!(Nullable, PT)) PT v;
+					else Nullable!PT v;
 
-			static if (isInstanceOf!(Nullable, PT)) params[i] = v;
-			else if (v.isNull()) {
-				static if (!is(PDefaults[i] == void)) params[i] = PDefaults[i];
-				else enforceBadRequest(false, "Missing non-optional "~sparam.kind.to!string~" parameter '"~(fieldname.length?fieldname:sparam.name)~"'.");
-			} else params[i] = v;
+					static if (sparam.kind == ParameterKind.auth) {
+						v = auth_info;
+					} else static if (sparam.kind == ParameterKind.query) {
+						if (auto pv = fieldname in req.query)
+							v = fromRestString!PT(*pv);
+					} else static if (sparam.kind == ParameterKind.wholeBody) {
+						try v = deserializeJson!PT(req.json);
+						catch (JSONException e) enforceBadRequest(false, e.msg);
+					} else static if (sparam.kind == ParameterKind.body_) {
+						try {
+							if (auto pv = fieldname in req.json)
+								v = deserializeJson!PT(*pv);
+						} catch (JSONException e)
+							enforceBadRequest(false, e.msg);
+					} else static if (sparam.kind == ParameterKind.header) {
+						if (auto pv = fieldname in req.headers)
+							v = fromRestString!PT(*pv);
+					} else static if (sparam.kind == ParameterKind.attributed) {
+						static if (!__traits(compiles, () @safe { computeAttributedParameterCtx!(CFunc, pname)(inst, req, res); } ()))
+							pragma(msg, "Non-@safe @before evaluators are deprecated - annotate evaluator function for parameter "~pname~" of "~T.stringof~"."~Method~" as @safe.");
+						v = () @trusted { return computeAttributedParameterCtx!(CFunc, pname)(inst, req, res); } ();
+					} else static if (sparam.kind == ParameterKind.internal) {
+						if (auto pv = fieldname in req.params)
+							v = fromRestString!PT(urlDecode(*pv));
+					} else static assert(false, "Unhandled parameter kind.");
+
+					static if (isInstanceOf!(Nullable, PT)) params[i] = v;
+					else if (v.isNull()) {
+						static if (!is(PDefaults[i] == void)) params[i] = PDefaults[i];
+						else enforceBadRequest(false, "Missing non-optional "~sparam.kind.to!string~" parameter '"~(fieldname.length?fieldname:sparam.name)~"'.");
+					} else params[i] = v;
+				}
+			}
+		} catch (Exception e) {
+			handleException(e, HTTPStatus.badRequest);
+			return;
 		}
 
-		static if (isAuthenticated!(T, Func))
-			handleAuthorization!(T, Func, params)(auth_info);
+		static if (isAuthenticated!(T, Func)) {
+			try handleAuthorization!(T, Func, params)(auth_info);
+			catch (Exception e) {
+				handleException(e, HTTPStatus.forbidden);
+				return;
+			}
+		}
 
 		void handleCors()
 		{
@@ -1392,29 +1506,16 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 
 				ret = () @trusted { return evaluateOutputModifiers!CFunc(ret, req, res); } ();
 				returnHeaders();
-				debug res.writePrettyJsonBody(ret);
-				else res.writeJsonBody(ret);
-			}
-		} catch (HTTPStatusException e) {
-			if (res.headerWritten)
-				logDebug("Response already started when a HTTPStatusException was thrown. Client will not receive the proper error code (%s)!", e.status);
-			else {
-				returnHeaders();
-				res.writeJsonBody([ "statusMessage": e.msg ], e.status);
+				static if (!__traits(compiles, () @safe { res.writeJsonBody(ret); }))
+					pragma(msg, "Non-@safe serialization of REST return types deprecated - ensure that "~RT.stringof~" is safely serializable.");
+				() @trusted {
+					debug res.writePrettyJsonBody(ret);
+					else res.writeJsonBody(ret);
+				}();
 			}
 		} catch (Exception e) {
-			// TODO: better error description!
-			logDebug("REST handler exception: %s", () @trusted { return e.toString(); } ());
-			if (res.headerWritten) logDebug("Response already started. Client will not receive an error code!");
-			else
-			{
-				returnHeaders();
-				debug res.writeJsonBody(
-						[ "statusMessage": e.msg, "statusDebugMessage": () @trusted { return sanitizeUTF8(cast(ubyte[])e.toString()); } () ],
-						HTTPStatus.internalServerError
-					);
-				else res.writeJsonBody(["statusMessage": e.msg], HTTPStatus.internalServerError);
-			}
+			returnHeaders();
+			handleException(e, HTTPStatus.internalServerError);
 		}
 	}
 
@@ -1439,7 +1540,6 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
  */
 private HTTPServerRequestDelegate optionsMethodHandler(RouteRange)(RouteRange routes, RestInterfaceSettings settings = null)
 {
-	import vibe.http.server : HTTPServerRequest, HTTPServerResponse;
 	import std.algorithm : map, joiner, any;
 	import std.conv : text;
 	import std.array : array;
@@ -1544,7 +1644,7 @@ private string generateRestClientMethods(I)()
 
 		ret ~= q{
 				mixin CloneFunction!(Info.RouteFunctions[%1$s], q{
-					return executeClientMethod!(I, %1$s%2$s)(*m_intf, m_requestFilter);
+					return executeClientMethod!(I, %1$s%2$s)(*m_intf, m_requestFilter, m_requestBodyFilter);
 				});
 			}.format(i, pnames);
 	}
@@ -1554,7 +1654,8 @@ private string generateRestClientMethods(I)()
 
 
 private auto executeClientMethod(I, size_t ridx, ARGS...)
-	(in ref RestInterface!I intf, void delegate(HTTPClientRequest) request_filter)
+	(in ref RestInterface!I intf, scope void delegate(HTTPClientRequest) @safe request_filter,
+		scope void delegate(HTTPClientRequest, scope InputStream) @safe request_body_filter)
 {
 	import vibe.web.internal.rest.common : ParameterKind;
 	import vibe.textfilter.urlencode : filterURLEncode, urlEncode;
@@ -1658,7 +1759,9 @@ private auto executeClientMethod(I, size_t ridx, ARGS...)
 		}
 	}
 
-	auto jret = request(URL(intf.baseURL), request_filter, sroute.method, url, headers, query.data, body_, reqhdrs, opthdrs, intf.settings.httpClientSettings);
+	auto jret = request(URL(intf.baseURL), request_filter, request_body_filter,
+		sroute.method, url, headers, query.data, body_, reqhdrs, opthdrs,
+		intf.settings.httpClientSettings);
 
 	static if (!is(RT == void))
 		return deserializeJson!RT(jret);
@@ -1694,11 +1797,12 @@ import vibe.http.client : HTTPClientRequest;
  *     The Json object returned by the request
  */
 private Json request(URL base_url,
-	void delegate(HTTPClientRequest) request_filter, HTTPMethod verb,
-	string path, in ref InetHeaderMap hdrs, string query, string body_,
-	ref InetHeaderMap reqReturnHdrs, ref InetHeaderMap optReturnHdrs,
-	in HTTPClientSettings http_settings)
-{
+	scope void delegate(HTTPClientRequest) @safe request_filter,
+	scope void delegate(HTTPClientRequest, scope InputStream) @safe request_body_filter,
+	HTTPMethod verb, string path, in ref InetHeaderMap hdrs, string query,
+	string body_, ref InetHeaderMap reqReturnHdrs,
+	ref InetHeaderMap optReturnHdrs, in HTTPClientSettings http_settings)
+@safe {
 	import vibe.http.client : HTTPClientRequest, HTTPClientResponse, requestHTTP;
 	import vibe.http.common : HTTPStatusException, HTTPStatus, httpMethodString, httpStatusText;
 
@@ -1714,10 +1818,16 @@ private Json request(URL base_url,
 		foreach (k, v; hdrs)
 			req.headers[k] = v;
 
+		if (request_body_filter) {
+			import vibe.stream.memory : createMemoryStream;
+			scope str = createMemoryStream(() @trusted { return cast(ubyte[])body_; } (), false);
+			request_body_filter(req, str);
+		}
+
 		if (request_filter) request_filter(req);
 
 		if (body_ != "")
-			req.writeBody(cast(ubyte[])body_, hdrs.get("Content-Type", "application/json"));
+			req.writeBody(cast(const(ubyte)[])body_, hdrs.get("Content-Type", "application/json"));
 	};
 
 	auto resdg = (scope HTTPClientResponse res) {
@@ -1768,7 +1878,7 @@ private {
 	import std.conv : to;
 
 	string toRestString(Json value)
-	{
+	@safe {
 		switch (value.type) {
 			default: return value.toString();
 			case Json.Type.Bool: return value.get!bool ? "true" : "false";
@@ -1781,7 +1891,9 @@ private {
 	T fromRestString(T)(string value)
 	{
 		import std.conv : ConvException;
-		import vibe.web.common : HTTPStatusException, HTTPStatus;
+		import std.uuid : UUID, UUIDParsingException;
+		import vibe.http.common : HTTPStatusException;
+		import vibe.http.status : HTTPStatus;
 		try {
 			static if (isInstanceOf!(Nullable, T)) return T(fromRestString!(typeof(T.init.get()))(value));
 			else static if (is(T == bool)) return value == "1" || value.to!T;
@@ -1790,17 +1902,21 @@ private {
 			else static if (is(string : T)) return value;
 			else static if (__traits(compiles, T.fromISOExtString("hello"))) return T.fromISOExtString(value);
 			else static if (__traits(compiles, T.fromString("hello"))) return T.fromString(value);
+			else static if (is(T == UUID)) return UUID(value);
 			else return deserializeJson!T(parseJson(value));
 		} catch (ConvException e) {
 			throw new HTTPStatusException(HTTPStatus.badRequest, e.msg);
 		} catch (JSONException e) {
+			throw new HTTPStatusException(HTTPStatus.badRequest, e.msg);
+		} catch (UUIDParsingException e) {
 			throw new HTTPStatusException(HTTPStatus.badRequest, e.msg);
 		}
 	}
 
 	// Converting from invalid JSON string to aggregate should throw bad request
 	unittest {
-		import vibe.web.common : HTTPStatusException, HTTPStatus;
+		import vibe.http.common : HTTPStatusException;
+		import vibe.http.status : HTTPStatus;
 
 		void assertHTTPStatus(E)(lazy E expression, HTTPStatus expectedStatus,
 			string file = __FILE__, size_t line = __LINE__)
@@ -2172,7 +2288,7 @@ private template GenOrphan(int id) {
 
 // Workaround for issue #1045 / DMD bug 14375
 // Also, an example of policy-based design using this module.
-unittest {
+@safe unittest {
 	import std.traits, std.typetuple;
 	import vibe.internal.meta.codegen;
 	import vibe.internal.meta.typetuple;
@@ -2180,20 +2296,20 @@ unittest {
 
 	interface Policies {
 		@headerParam("auth", "Authorization")
-		string BasicAuth(string auth, ulong expiry);
+		string BasicAuth(string auth, ulong expiry) @safe;
 	}
 
 	@path("/keys/")
 	interface IKeys(alias AuthenticationPolicy = Policies.BasicAuth) {
 		static assert(is(FunctionTypeOf!AuthenticationPolicy == function),
 			      "Policies needs to be functions");
-		@path("/") @method(HTTPMethod.POST)
+		@path("/") @method(HTTPMethod.POST) @safe
 		mixin CloneFunctionDecl!(AuthenticationPolicy, true, "create");
 	}
 
 	class KeysImpl : IKeys!() {
 	override:
-		string create(string auth, ulong expiry) {
+		string create(string auth, ulong expiry) @safe {
 			return "4242-4242";
 		}
 	}
@@ -2208,12 +2324,12 @@ unittest {
 				     MethodAttribute(HTTPMethod.POST),
 				     WPA(ParameterKind.header, "auth", "Authorization"))));
 
-	void register() {
+	void register() @safe {
 		auto router = new URLRouter();
 		router.registerRestInterface(new KeysImpl());
 	}
 
-	void query() {
+	void query() @safe {
 		auto client = new RestInterfaceClient!(IKeys!())("http://127.0.0.1:8080");
 		assert(client.create("Hello", 0) == "4242-4242");
 	}

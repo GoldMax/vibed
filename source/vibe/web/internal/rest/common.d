@@ -12,6 +12,7 @@ import vibe.web.rest;
 
 import std.algorithm : endsWith, startsWith;
 import std.meta : anySatisfy, Filter;
+import std.traits : hasUDA;
 
 
 /**
@@ -256,9 +257,7 @@ import std.meta : anySatisfy, Filter;
 
 		StaticRoute[routeCount] ret;
 
-		static if (is(TImpl == class))
-			alias AUTHTP = AuthInfo!TImpl;
-		else alias AUTHTP = void;
+		alias AUTHTP = AuthInfo!TImpl;
 
 		foreach (fi, func; RouteFunctions) {
 			StaticRoute route;
@@ -403,7 +402,7 @@ import std.meta : anySatisfy, Filter;
 				enum name = memberNames[idx];
 				// WORKAROUND #1045 / @@BUG14375@@
 				static if (name.length != 0)
-					alias Impl = TypeTuple!(MemberFunctionsTuple!(I, name), Impl!(idx+1));
+					alias Impl = TypeTuple!(Filter!(IsRouteMethod, MemberFunctionsTuple!(I, name)), Impl!(idx+1));
 				else alias Impl = Impl!(idx+1);
 			} else alias Impl = TypeTuple!();
 		}
@@ -425,6 +424,8 @@ import std.meta : anySatisfy, Filter;
 		return ret;
 	}
 }
+
+private enum IsRouteMethod(alias M) = !hasUDA!(M, NoRouteAttribute);
 
 struct Route {
 	string functionName; // D name of the function
@@ -712,7 +713,9 @@ unittest {
 unittest { // #1648
 	import vibe.web.auth;
 
-	@requiresAuth
+	struct AI {}
+
+	@requiresAuth!AI
 	interface I {
 		void a();
 	}

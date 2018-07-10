@@ -38,7 +38,7 @@ void download(HTTPClient_ = void*)(URL url, scope void delegate(scope InputStrea
 	static if (is(HTTPClient_ == HTTPClient)) client = client_;
 	if (!client) client = new HTTPClient();
 	scope (exit) {
-		if (client_ !is null)
+		if (client_ is null) // disconnect default client
 			client.disconnect();
 	}
 
@@ -110,7 +110,7 @@ void download()(string url, string filename)
 }
 
 /// ditto
-void download()(URL url, Path filename)
+void download()(URL url, NativePath filename)
 {
 	download(url.toString(), filename.toNativeString());
 }

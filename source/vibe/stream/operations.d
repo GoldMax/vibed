@@ -17,9 +17,9 @@ import vibe.stream.wrapper : ProxyStream;
 
 import std.algorithm;
 import std.array;
-import std.datetime;
 import std.exception;
 import std.range : isOutputRange;
+import core.time : Duration, seconds;
 
 
 /**************************************************************************************************/
@@ -288,6 +288,10 @@ string readAllUTF8(InputStream)(InputStream stream, bool sanitize = false, size_
 void pipeRealtime(OutputStream, ConnectionStream)(OutputStream destination, ConnectionStream source, ulong nbytes = 0, Duration max_latency = 0.seconds)
 	if (isOutputStream!OutputStream && isConnectionStream!ConnectionStream)
 {
+	static if (__VERSION__ >= 2077)
+		import std.datetime.stopwatch : StopWatch;
+	else import std.datetime : StopWatch;
+
 	import vibe.internal.freelistref;
 
 	static struct Buffer { ubyte[64*1024] bytes = void; }
@@ -326,6 +330,18 @@ void pipeRealtime(OutputStream, ConnectionStream)(OutputStream destination, Conn
 	}
 	destination.flush();
 }
+
+unittest {
+	import vibe.core.net : TCPConnection;
+	import vibe.core.stream : nullSink;
+
+	void test()
+	{
+		TCPConnection c;
+		pipeRealtime(nullSink, c);
+	}
+}
+
 
 /**
 	Consumes `bytes.length` bytes of the stream and determines if the contents
@@ -463,7 +479,12 @@ private void readUntilGeneric(R, InputStream)(InputStream stream, ref R dst, in 
 	size_t nmatched = 0;
 	Buffer* bufferobj;
 	bufferobj = new Buffer;
-	scope (exit) () @trusted { delete bufferobj; } ();
+	scope (exit) () @trusted {
+		static if (__VERSION__ >= 2079) {
+			import core.memory : __delete;
+			__delete(bufferobj);
+		} else mixin("delete bufferobj;");
+	} ();
 	auto buf = bufferobj.bytes[];
 
 	ulong bytes_read = 0;

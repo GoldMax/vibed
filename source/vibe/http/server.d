@@ -1,7 +1,7 @@
 /**
 	A HTTP 1.1/1.0 server implementation.
 
-	Copyright: © 2012-2013 RejectedSoftware e.K.
+	Copyright: © 2012-2017 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig, Jan Krüger, Ilya Shipunov
 */
@@ -94,28 +94,13 @@ if (is(Settings == string) || is(Settings == HTTPServerSettings)) {
 
 	enforce(settings.bindAddresses.length, "Must provide at least one bind address for a HTTP server.");
 
-	HTTPServerContext ctx;
-	ctx.id = ++s_contextIDCounter;
-	ctx.settings = settings;
-	ctx.requestHandler = request_handler;
-
-	if (settings.accessLogger) ctx.loggers ~= settings.accessLogger;
-	if (settings.accessLogToConsole)
-		ctx.loggers ~= new HTTPConsoleLogger(settings, settings.accessLogFormat);
-	if (settings.accessLogFile.length)
-		ctx.loggers ~= new HTTPFileLogger(settings, settings.accessLogFormat, settings.accessLogFile);
-
-	s_contexts ~= ctx;
-
 	// if a VibeDist host was specified on the command line, register there instead of listening
 	// directly.
 	if (s_distHost.length && !settings.disableDistHost) {
-		listenHTTPDist(settings, request_handler, s_distHost, s_distPort);
+		return listenHTTPDist(settings, request_handler, s_distHost, s_distPort);
 	} else {
-		listenHTTPPlain(settings, ctx);
+		return listenHTTPPlain(settings, request_handler);
 	}
-
-	return HTTPListener(ctx.id);
 }
 /// ditto
 HTTPListener listenHTTP(Settings)(Settings settings, HTTPServerRequestFunction request_handler)
@@ -194,6 +179,81 @@ unittest
 		listenHTTP(":8080", (scope req, scope res) {});
 	}
 }
+
+
+/** Treats an existing connection as an HTTP connection and processes incoming
+	requests.
+
+	After all requests have been processed, the connection will be closed and
+	the function returns to the caller.
+
+	Params:
+		connections = The stream to treat as an incoming HTTP client connection.
+		context = Information about the incoming listener and available
+			virtual hosts
+*/
+void handleHTTPConnection(TCPConnection connection, HTTPServerContext context)
+@safe {
+	InterfaceProxy!Stream http_stream;
+	http_stream = connection;
+
+	scope (exit) connection.close();
+
+	// Set NODELAY to true, to avoid delays caused by sending the response
+	// header and body in separate chunks. Note that to avoid other performance
+	// issues (caused by tiny packets), this requires using an output buffer in
+	// the event driver, which is the case at least for the default libevent
+	// based driver.
+	connection.tcpNoDelay = true;
+
+	version(HaveNoTLS) {} else {
+		TLSStreamType tls_stream;
+	}
+
+	if (!connection.waitForData(10.seconds())) {
+		logDebug("Client didn't send the initial request in a timely manner. Closing connection.");
+		return;
+	}
+
+	// If this is a HTTPS server, initiate TLS
+	if (context.tlsContext) {
+		version (HaveNoTLS) assert(false, "No TLS support compiled in.");
+		else {
+			logDebug("Accept TLS connection: %s", context.tlsContext.kind);
+			// TODO: reverse DNS lookup for peer_name of the incoming connection for TLS client certificate verification purposes
+			tls_stream = createTLSStreamFL(http_stream, context.tlsContext, TLSStreamState.accepting, null, connection.remoteAddress);
+			http_stream = tls_stream;
+		}
+	}
+
+	while (!connection.empty) {
+		HTTPServerSettings settings;
+		bool keep_alive;
+
+		() @trusted {
+			import vibe.internal.utilallocator: RegionListAllocator;
+
+			version (VibeManualMemoryManagement)
+				scope request_allocator = new RegionListAllocator!(shared(Mallocator), false)(1024, Mallocator.instance);
+			else
+				scope request_allocator = new RegionListAllocator!(shared(GCAllocator), true)(1024, GCAllocator.instance);
+
+			handleRequest(http_stream, connection, context, settings, keep_alive, request_allocator);
+		} ();
+		if (!keep_alive) { logTrace("No keep-alive - disconnecting client."); break; }
+
+		logTrace("Waiting for next request...");
+		// wait for another possible request on a keep-alive connection
+		if (!connection.waitForData(settings.keepAliveTimeout)) {
+			if (!connection.connected) logTrace("Client disconnected.");
+			else logDebug("Keep-alive connection timed out!");
+			break;
+		}
+	}
+
+	logTrace("Done handling connection.");
+}
+
 
 /**
 	Provides a HTTP request handler that responds with a static Diet template.
@@ -276,15 +336,18 @@ void setVibeDistHost(string host, ushort port)
 	import vibe.stream.wrapper : streamOutputRange;
 	import diet.html : compileHTMLDietFile;
 	auto output = streamOutputRange!1024(res.bodyWriter);
-	compileHTMLDietFile!(template_file, ALIASES, DefaultFilters)(output);
+	compileHTMLDietFile!(template_file, ALIASES, DefaultDietFilters)(output);
 }
 
 version (Have_diet_ng)
 {
 	import diet.traits;
 
+	/**
+		Provides the default `css`, `javascript`, `markdown` and `htmlescape` filters
+	 */
 	@dietTraits
-	private struct DefaultFilters {
+	struct DefaultDietFilters {
 		import diet.html : HTMLOutputStyle;
 		import std.string : splitLines;
 
@@ -355,7 +418,7 @@ version (Have_diet_ng)
 			import std.string : strip;
 			import diet.html : compileHTMLDietString;
 			auto dst = appender!string;
-			dst.compileHTMLDietString!(diet, DefaultFilters);
+			dst.compileHTMLDietString!(diet, DefaultDietFilters);
 			return strip(cast(string)(dst.data));
 		}
 
@@ -385,7 +448,7 @@ HTTPServerRequest createTestHTTPServerRequest(URL url, HTTPMethod method, InetHe
 @safe {
 	auto tls = url.schema == "https";
 	auto ret = new HTTPServerRequest(Clock.currTime(UTC()), url.port ? url.port : tls ? 443 : 80);
-	ret.path = urlDecode(url.pathString);
+	ret.requestPath = url.path;
 	ret.queryString = url.queryString;
 	ret.username = url.username;
 	ret.password = url.password;
@@ -461,6 +524,14 @@ final class HTTPServerErrorInfo {
 alias HTTPServerErrorPageHandler = void delegate(HTTPServerRequest req, HTTPServerResponse res, HTTPServerErrorInfo error) @safe;
 
 
+private enum HTTPServerOptionImpl {
+	none                      = 0,
+	errorStackTraces          = 1<<7,
+	reusePort                 = 1<<8,
+	distribute                = 1<<9 // deprecated
+}
+
+// TODO: Should be turned back into an enum once the deprecated symbols can be removed
 /**
 	Specifies optional features of the HTTP server.
 
@@ -470,20 +541,18 @@ alias HTTPServerErrorPageHandler = void delegate(HTTPServerRequest req, HTTPServ
 	will also drain the `HTTPServerRequest.bodyReader` stream whenever a request
 	body with form or JSON data is encountered.
 */
-enum HTTPServerOption {
-	none                      = 0,
-	/// Fills the `.path` and `.queryString` fields in the request
-	parseURL                  = 1<<0,
-	/// Deprecated: Fills the `.query` field in the request
-	parseQueryString          = 1<<1 | parseURL,
-	/// Deprecated: Fills the `.form` field in the request
-	parseFormBody             = 1<<2,
-	/// Deprecated: Fills the `.json` field in the request
-	parseJsonBody             = 1<<3,
-	/// Deprecated: Fills the `.files` field of the request for "multipart/mixed" requests
-	parseMultiPartBody        = 1<<4,
-	/// Deprecated: Fills the `.cookies` field in the request
-	parseCookies              = 1<<5,
+struct HTTPServerOption {
+	static enum none                      = HTTPServerOptionImpl.none;
+	deprecated("This is done lazily. It will be removed in 0.9.")
+	static enum parseURL                  = none;
+	deprecated("This is done lazily. It will be removed in 0.9.")
+	static enum parseQueryString          = none;
+	deprecated("This is done lazily. It will be removed in 0.9.")
+	static enum parseFormBody             = none;
+	deprecated("This is done lazily. It will be removed in 0.9.")
+	static enum parseJsonBody             = none;
+	deprecated("This is done lazily. It will be removed in 0.9.")
+	static enum parseMultiPartBody        = none;
 	/** Deprecated: Distributes request processing among worker threads
 
 		Note that this functionality assumes that the request handler
@@ -500,7 +569,8 @@ enum HTTPServerOption {
 		is more robust and often faster. The `reusePort` option works
 		the same way in this scenario.
 	*/
-	distribute                = 1<<6,
+	deprecated("Use runWorkerTaskDist or start threads separately. It will be removed in 0.9.")
+	static enum distribute                = HTTPServerOptionImpl.distribute;
 	/** Enables stack traces (`HTTPServerErrorInfo.debugMessage`).
 
 		Note that generating the stack traces are generally a costly
@@ -509,38 +579,34 @@ enum HTTPServerOption {
 		the application, such as function addresses, which can
 		help an attacker to abuse possible security holes.
 	*/
-	errorStackTraces          = 1<<7,
+	static enum errorStackTraces          = HTTPServerOptionImpl.errorStackTraces;
 	/// Enable port reuse in `listenTCP()`
-	reusePort                 = 1<<8,
+	static enum reusePort                 = HTTPServerOptionImpl.reusePort;
 
 	/** The default set of options.
 
 		Includes all parsing options, as well as the `errorStackTraces`
 		option if the code is compiled in debug mode.
 	*/
-	defaults =
-		parseURL |
-		parseQueryString |
-		parseFormBody |
-		parseJsonBody |
-		parseMultiPartBody |
-		parseCookies |
-		() { debug return errorStackTraces; else return none; } (),
+	static enum defaults = () { debug return HTTPServerOptionImpl.errorStackTraces; else return HTTPServerOptionImpl.none; } ().HTTPServerOption;
 
-	/// deprecated
-	None = none,
-	/// deprecated
-	ParseURL = parseURL,
-	/// deprecated
-	ParseQueryString = parseQueryString,
-	/// deprecated
-	ParseFormBody = parseFormBody,
-	/// deprecated
-	ParseJsonBody = parseJsonBody,
-	/// deprecated
-	ParseMultiPartBody = parseMultiPartBody,
-	/// deprecated
-	ParseCookies = parseCookies
+	deprecated("None has been renamed to none.")
+	static enum None = none;
+	deprecated("This is done lazily. It will be removed in 0.9.")
+	static enum ParseURL = none;
+	deprecated("This is done lazily. It will be removed in 0.9.")
+	static enum ParseQueryString = none;
+	deprecated("This is done lazily. It will be removed in 0.9.")
+	static enum ParseFormBody = none;
+	deprecated("This is done lazily. It will be removed in 0.9.")
+	static enum ParseJsonBody = none;
+	deprecated("This is done lazily. It will be removed in 0.9.")
+	static enum ParseMultiPartBody = none;
+	deprecated("This is done lazily. It will be removed in 0.9.")
+	static enum ParseCookies = none;
+
+	HTTPServerOptionImpl x;
+	alias x this;
 }
 
 
@@ -554,6 +620,10 @@ final class HTTPServerSettings {
 
 		The default value is 80. If you are running a TLS enabled server you may want to set this
 		to 443 instead.
+
+		Using a value of `0` instructs the server to use any available port on
+		the given `bindAddresses` the actual addresses and ports can then be
+		queried with `TCPListener.bindAddresses`.
 	*/
 	ushort port = 80;
 
@@ -576,7 +646,7 @@ final class HTTPServerSettings {
 		load in case of invalid or unwanted requests (DoS). By default,
 		HTTPServerOption.defaults is used.
 	*/
-	HTTPServerOption options = HTTPServerOption.defaults;
+	HTTPServerOptionImpl options = HTTPServerOption.defaults;
 
 	/** Time of a request after which the connection is closed with an error; not supported yet
 
@@ -809,27 +879,35 @@ final class HTTPServerRequest : HTTPRequest {
 		*/
 		TLSCertificateInformation clientCertificate;
 
-		/** The _path part of the URL.
+		/** Deprecated: The _path part of the URL.
 
-			Remarks: This field is only set if HTTPServerOption.parseURL is set.
+			Note that this function contains the decoded version of the
+			requested path, which can yield incorrect results if the path
+			contains URL encoded path separators. Use `requestPath` instead to
+			get an encoding-aware representation.
 		*/
-		string path;
+		string path() @safe {
+			if (_path.isNull) {
+				_path = urlDecode(requestPath.toString);
+			}
+			return _path.get;
+		}
+
+		private Nullable!string _path;
+
+		/** The path part of the requested URI.
+		*/
+		InetPath requestPath;
 
 		/** The user name part of the URL, if present.
-
-			Remarks: This field is only set if HTTPServerOption.parseURL is set.
 		*/
 		string username;
 
 		/** The _password part of the URL, if present.
-
-			Remarks: This field is only set if HTTPServerOption.parseURL is set.
 		*/
 		string password;
 
 		/** The _query string part of the URL.
-
-			Remarks: This field is only set if HTTPServerOption.parseURL is set.
 		*/
 		string queryString;
 
@@ -907,6 +985,7 @@ final class HTTPServerRequest : HTTPRequest {
 				if (icmp2(contentType, "application/json") == 0 || icmp2(contentType, "application/vnd.api+json") == 0 ) {
 					auto bodyStr = bodyReader.readAllUTF8();
 					if (!bodyStr.empty) _json = parseJson(bodyStr);
+					else _json = Json.undefined;
 				} else {
 					_json = Json.undefined;
 				}
@@ -935,6 +1014,7 @@ final class HTTPServerRequest : HTTPRequest {
 
 		private void parseFormAndFiles() @safe {
 			_form = FormFields.init;
+			assert(!!bodyReader);
 			parseFormData(_form, _files, headers.get("Content-Type", ""), bodyReader, MaxHTTPHeaderLineLength);
 		}
 
@@ -942,8 +1022,10 @@ final class HTTPServerRequest : HTTPRequest {
 		*/
 		@property ref FilePartFormFields files() @safe {
 			// _form and _files are parsed in one step
-			if (_form.isNull)
+			if (_form.isNull) {
 				parseFormAndFiles();
+				assert(!_form.isNull);
+			}
 
             return _files;
 		}
@@ -1045,8 +1127,7 @@ final class HTTPServerRequest : HTTPRequest {
 
 		url.username = this.username;
 		url.password = this.password;
-		url.pathString = path;
-		url.queryString = queryString;
+		url.localURI = this.requestURI;
 
 		return url;
 	}
@@ -1059,10 +1140,20 @@ final class HTTPServerRequest : HTTPRequest {
 
 		The returned string always ends with a slash.
 	*/
-	@property string rootDir() const @safe {
-		if (path.length == 0) return "./";
-		auto depth = count(path[1 .. $], '/');
+	@property string rootDir()
+	const @safe {
+		import std.algorithm.searching : count;
+		auto depth = requestPath.bySegment.count!(s => s.name.length > 0);
+		if (depth > 0 && !requestPath.endsWithSlash) depth--;
 		return depth == 0 ? "./" : replicate("../", depth);
+	}
+
+	unittest {
+		assert(createTestHTTPServerRequest(URL("http://localhost/")).rootDir == "./");
+		assert(createTestHTTPServerRequest(URL("http://localhost/foo")).rootDir == "./");
+		assert(createTestHTTPServerRequest(URL("http://localhost/foo/")).rootDir == "../");
+		assert(createTestHTTPServerRequest(URL("http://localhost/foo/bar")).rootDir == "../");
+		assert(createTestHTTPServerRequest(URL("http://localhost")).rootDir == "./");
 	}
 }
 
@@ -1374,6 +1465,10 @@ final class HTTPServerResponse : HTTPResponse {
 	*/
 	void redirect(string url, int status = HTTPStatus.Found)
 	@safe {
+		// Disallow any characters that may influence the header parsing
+		enforce(!url.representation.canFind!(ch => ch < 0x20),
+			"Control character in redirection URL.");
+
 		statusCode = status;
 		headers["Location"] = url;
 		writeBody("redirecting...");
@@ -1639,10 +1734,23 @@ final class HTTPServerResponse : HTTPResponse {
 */
 struct HTTPListener {
 	private {
-		size_t m_contextID;
+		size_t[] m_virtualHostIDs;
 	}
 
-	private this(size_t id) @safe { m_contextID = id; }
+	private this(size_t[] ids) @safe { m_virtualHostIDs = ids; }
+
+	@property NetworkAddress[] bindAddresses()
+	{
+		NetworkAddress[] ret;
+		foreach (l; s_listeners)
+			if (l.m_virtualHosts.canFind!(v => m_virtualHostIDs.canFind(v.id))) {
+				NetworkAddress a;
+				a = resolveHost(l.bindAddress);
+				a.port = l.bindPort;
+				ret ~= a;
+			}
+		return ret;
+	}
 
 	/** Stops handling HTTP requests and closes the TCP listening port if
 		possible.
@@ -1651,55 +1759,162 @@ struct HTTPListener {
 	@safe {
 		import std.algorithm : countUntil;
 
-		auto idx = s_contexts.countUntil!(c => c.id == m_contextID);
-		if (idx < 0) return;
-
-		// remove context entry
-		auto ctx = s_contexts[idx];
-		s_contexts = s_contexts[0 .. idx] ~ s_contexts[idx+1 .. $];
-
-		// stop listening on all unused TCP ports
-		auto port = ctx.settings.port;
-		foreach (addr; ctx.settings.bindAddresses) {
-			// any other context still occupying the same addr/port?
-			if (s_contexts.canFind!(c => c.settings.port == port && c.settings.bindAddresses.canFind(addr)))
-				continue;
-
-			auto lidx = s_listeners.countUntil!(l => l.bindAddress == addr && l.bindPort == port);
-			if (lidx >= 0) {
-				s_listeners[lidx].listener.stopListening();
-				logInfo("Stopped to listen for HTTP%s requests on %s:%s", ctx.settings.tlsContext ? "S": "", addr, port);
-				s_listeners = s_listeners[0 .. lidx] ~ s_listeners[lidx+1 .. $];
+		foreach (vhid; m_virtualHostIDs) {
+			foreach (lidx, l; s_listeners) {
+				if (l.removeVirtualHost(vhid)) {
+					if (!l.hasVirtualHosts) {
+						l.m_listener.stopListening();
+						logInfo("Stopped to listen for HTTP%s requests on %s:%s", l.tlsContext ? "S": "", l.bindAddress, l.bindPort);
+						s_listeners = s_listeners[0 .. lidx] ~ s_listeners[lidx+1 .. $];
+					}
+				}
+				break;
 			}
 		}
 	}
 }
 
 
+/** Represents a single HTTP server port.
+
+	This class defines the incoming interface, port, and TLS configuration of
+	the public server port. The public server port may differ from the local
+	one if a reverse proxy of some kind is facing the public internet and
+	forwards to this HTTP server.
+
+	Multiple virtual hosts can be configured to be served from the same port.
+	Their TLS settings must be compatible and each virtual host must have a
+	unique name.
+*/
+final class HTTPServerContext {
+	private struct VirtualHost {
+		HTTPServerRequestDelegate requestHandler;
+		HTTPServerSettings settings;
+		HTTPLogger[] loggers;
+		size_t id;
+	}
+
+	private {
+		TCPListener m_listener;
+		VirtualHost[] m_virtualHosts;
+		string m_bindAddress;
+		ushort m_bindPort;
+		TLSContext m_tlsContext;
+		static size_t s_vhostIDCounter = 1;
+	}
+
+	@safe:
+
+	this(string bind_address, ushort bind_port)
+	{
+		m_bindAddress = bind_address;
+		m_bindPort = bind_port;
+	}
+
+	/** Returns the TLS context associated with the listener.
+
+		For non-HTTPS listeners, `null` will be returned. Otherwise, if only a
+		single virtual host has been added, the TLS context of that host's
+		settings is returned. For multiple virtual hosts, an SNI context is
+		returned, which forwards to the individual contexts based on the
+		requested host name.
+	*/
+	@property TLSContext tlsContext() { return m_tlsContext; }
+
+	/// The local network interface IP address associated with this listener
+	@property string bindAddress() const { return m_bindAddress; }
+
+	/// The local port associated with this listener
+	@property ushort bindPort() const { return m_bindPort; }
+
+	/// Determines if any virtual hosts have been addded
+	@property bool hasVirtualHosts() const { return m_virtualHosts.length > 0; }
+
+	/** Adds a single virtual host.
+
+		Note that the port and bind address defined in `settings` must match the
+		ones for this listener. The `settings.host` field must be unique for
+		all virtual hosts.
+
+		Returns: Returns a unique ID for the new virtual host
+	*/
+	size_t addVirtualHost(HTTPServerSettings settings, HTTPServerRequestDelegate request_handler)
+	{
+		assert(settings.port == 0 || settings.port == m_bindPort, "Virtual host settings do not match bind port.");
+		assert(settings.bindAddresses.canFind(m_bindAddress), "Virtual host settings do not match bind address.");
+
+		VirtualHost vhost;
+		vhost.id = s_vhostIDCounter++;
+		vhost.settings = settings;
+		vhost.requestHandler = request_handler;
+
+		if (settings.accessLogger) vhost.loggers ~= settings.accessLogger;
+		if (settings.accessLogToConsole)
+			vhost.loggers ~= new HTTPConsoleLogger(settings, settings.accessLogFormat);
+		if (settings.accessLogFile.length)
+			vhost.loggers ~= new HTTPFileLogger(settings, settings.accessLogFormat, settings.accessLogFile);
+
+		if (!m_virtualHosts.length) m_tlsContext = settings.tlsContext;
+
+		enforce((m_tlsContext !is null) == (settings.tlsContext !is null),
+			"Cannot mix HTTP and HTTPS virtual hosts within the same listener.");
+
+		if (m_tlsContext) addSNIHost(settings);
+
+		m_virtualHosts ~= vhost;
+
+		if (settings.hostName.length) {
+			auto proto = settings.tlsContext ? "https" : "http";
+			auto port = settings.tlsContext && settings.port == 443 || !settings.tlsContext && settings.port == 80 ? "" : ":" ~ settings.port.to!string;
+			logInfo("Added virtual host %s://%s:%s/ (%s)", proto, settings.hostName, m_bindPort, m_bindAddress);
+		}
+
+		return vhost.id;
+	}
+
+	/// Removes a previously added virtual host using its ID.
+	bool removeVirtualHost(size_t id)
+	{
+		import std.algorithm.searching : countUntil;
+
+		auto idx = m_virtualHosts.countUntil!(c => c.id == id);
+		if (idx < 0) return false;
+
+		auto ctx = m_virtualHosts[idx];
+		m_virtualHosts = m_virtualHosts[0 .. idx] ~ m_virtualHosts[idx+1 .. $];
+		return true;
+	}
+
+	private void addSNIHost(HTTPServerSettings settings)
+	{
+		if (settings.tlsContext !is m_tlsContext && m_tlsContext.kind != TLSContextKind.serverSNI) {
+			logDebug("Create SNI TLS context for %s, port %s", bindAddress, bindPort);
+			m_tlsContext = createTLSContext(TLSContextKind.serverSNI);
+			m_tlsContext.sniCallback = &onSNI;
+		}
+
+		foreach (ctx; m_virtualHosts) {
+			/*enforce(ctx.settings.hostName != settings.hostName,
+				"A server with the host name '"~settings.hostName~"' is already "
+				"listening on "~addr~":"~to!string(settings.port)~".");*/
+		}
+	}
+
+	private TLSContext onSNI(string servername)
+	{
+		foreach (vhost; m_virtualHosts)
+			if (vhost.settings.hostName.icmp(servername) == 0) {
+				logDebug("Found context for SNI host '%s'.", servername);
+				return vhost.settings.tlsContext;
+			}
+		logDebug("No context found for SNI host '%s'.", servername);
+		return null;
+	}
+}
+
 /**************************************************************************************************/
 /* Private types                                                                                  */
 /**************************************************************************************************/
-
-private struct HTTPServerContext {
-	HTTPServerRequestDelegate requestHandler;
-	HTTPServerSettings settings;
-	HTTPLogger[] loggers;
-	size_t id;
-}
-
-private final class HTTPListenInfo {
-	TCPListener listener;
-	string bindAddress;
-	ushort bindPort;
-	TLSContext tlsContext;
-
-	this(string bind_address, ushort bind_port, TLSContext tls_context)
-	@safe {
-		this.bindAddress = bind_address;
-		this.bindPort = bind_port;
-		this.tlsContext = tls_context;
-	}
-}
 
 private enum MaxHTTPHeaderLineLength = 4096;
 
@@ -1767,10 +1982,8 @@ private {
 
 	shared string s_distHost;
 	shared ushort s_distPort = 11000;
-	size_t s_contextIDCounter = 1;
 
-	HTTPListenInfo[] s_listeners;
-	HTTPServerContext[] s_contexts;
+	HTTPServerContext[] s_listeners;
 }
 
 /**
@@ -1779,19 +1992,15 @@ private {
 	This is the same as listenHTTP() except that it does not use a VibeDist host for
 	remote listening, even if specified on the command line.
 */
-private void listenHTTPPlain(HTTPServerSettings settings, HTTPServerContext context)
+private HTTPListener listenHTTPPlain(HTTPServerSettings settings, HTTPServerRequestDelegate request_handler)
 @safe {
 	import vibe.core.core : runWorkerTaskDist;
-	import std.algorithm : canFind;
+	import std.algorithm : canFind, find;
 
-	static TCPListener doListen(HTTPListenInfo listen_info, HTTPServerContext context, bool dist, bool reusePort)
+	static TCPListener doListen(HTTPServerContext listen_info, bool dist, bool reusePort)
 	@safe {
 		try {
 			TCPListenOptions options = TCPListenOptions.defaults;
-			if (dist) {
-				options |= TCPListenOptions.distribute;
-				() @trusted { runWorkerTaskDist((shared(HTTPServerContext) ctx) { s_contexts ~= cast(HTTPServerContext)ctx; }, cast(shared)context); } ();
-			} else options &= ~TCPListenOptions.distribute;
 			if(reusePort) options |= TCPListenOptions.reusePort; else options &= ~TCPListenOptions.reusePort;
 			auto ret = listenTCP(listen_info.bindPort, (TCPConnection conn) nothrow @safe {
 					try handleHTTPConnection(conn, listen_info);
@@ -1802,6 +2011,11 @@ private void listenHTTPPlain(HTTPServerSettings settings, HTTPServerContext cont
 						catch (Exception e) logError("Failed to close connection: %s", e.msg);
 					}
 				}, listen_info.bindAddress, options);
+
+			// support port 0 meaning any available port
+			if (listen_info.bindPort == 0)
+				listen_info.m_bindPort = ret.bindAddress.port;
+
 			auto proto = listen_info.tlsContext ? "https" : "http";
 			auto urladdr = listen_info.bindAddress;
 			if (urladdr.canFind(':')) urladdr = "["~urladdr~"]";
@@ -1813,139 +2027,37 @@ private void listenHTTPPlain(HTTPServerSettings settings, HTTPServerContext cont
 		}
 	}
 
-	void addVHost(ref HTTPListenInfo lst)
-	@safe {
-		TLSContext onSNI(string servername)
-		@safe {
-			foreach (ctx; s_contexts)
-				if (ctx.settings.bindAddresses.canFind(lst.bindAddress)
-					&& ctx.settings.port == lst.bindPort
-					&& ctx.settings.hostName.icmp(servername) == 0)
-				{
-					logDebug("Found context for SNI host '%s'.", servername);
-					return ctx.settings.tlsContext;
-				}
-			logDebug("No context found for SNI host '%s'.", servername);
-			return null;
-		}
-
-		if (settings.tlsContext !is lst.tlsContext && lst.tlsContext.kind != TLSContextKind.serverSNI) {
-			logDebug("Create SNI TLS context for %s, port %s", lst.bindAddress, lst.bindPort);
-			lst.tlsContext = createTLSContext(TLSContextKind.serverSNI);
-			lst.tlsContext.sniCallback = &onSNI;
-		}
-
-		foreach (ctx; s_contexts) {
-			if (ctx.settings.port != settings.port) continue;
-			if (!ctx.settings.bindAddresses.canFind(lst.bindAddress)) continue;
-			/*enforce(ctx.settings.hostName != settings.hostName,
-				"A server with the host name '"~settings.hostName~"' is already "
-				"listening on "~addr~":"~to!string(settings.port)~".");*/
-		}
-	}
-
-	bool any_successful = false;
+	size_t[] vid;
 
 	// Check for every bind address/port, if a new listening socket needs to be created and
 	// check for conflicting servers
 	foreach (addr; settings.bindAddresses) {
-		bool found_listener = false;
-		foreach (i, ref lst; s_listeners) {
-			if (lst.bindAddress == addr && lst.bindPort == settings.port) {
-				addVHost(lst);
-				assert(!settings.tlsContext || settings.tlsContext is lst.tlsContext
-					|| lst.tlsContext.kind == TLSContextKind.serverSNI,
-					format("Got multiple overlapping TLS bind addresses (port %s), but no SNI TLS context!?", settings.port));
-				found_listener = true;
-				any_successful = true;
-				break;
-			}
-		}
-		if (!found_listener) {
-			auto linfo = new HTTPListenInfo(addr, settings.port, settings.tlsContext);
-			if (auto tcp_lst = doListen(linfo, context, (settings.options & HTTPServerOption.distribute) != 0, (settings.options & HTTPServerOption.reusePort) != 0)) // DMD BUG 2043
+		HTTPServerContext linfo;
+
+		auto l = s_listeners.find!(l => l.bindAddress == addr && l.bindPort == settings.port);
+		if (!l.empty) linfo = l.front;
+		else {
+			auto li = new HTTPServerContext(addr, settings.port);
+			if (auto tcp_lst = doListen(li, (settings.options & HTTPServerOptionImpl.distribute) != 0, (settings.options & HTTPServerOption.reusePort) != 0)) // DMD BUG 2043
 			{
-				linfo.listener = tcp_lst;
-				found_listener = true;
-				any_successful = true;
-				s_listeners ~= linfo;
+				li.m_listener = tcp_lst;
+				s_listeners ~= li;
+				linfo = li;
 			}
 		}
-		if (settings.hostName.length) {
-			auto proto = settings.tlsContext ? "https" : "http";
-			auto port = settings.tlsContext && settings.port == 443 || !settings.tlsContext && settings.port == 80 ? "" : ":" ~ settings.port.to!string;
-			logInfo("Added virtual host %s://%s%s/ (%s)", proto, settings.hostName, port, addr);
-		}
+
+		if (linfo) vid ~= linfo.addVirtualHost(settings, request_handler);
 	}
 
-	enforce(any_successful, "Failed to listen for incoming HTTP connections on any of the supplied interfaces.");
+	enforce(vid.length > 0, "Failed to listen for incoming HTTP connections on any of the supplied interfaces.");
+
+	return HTTPListener(vid);
 }
 
 private alias TLSStreamType = ReturnType!(createTLSStreamFL!(InterfaceProxy!Stream));
 
 
-private void handleHTTPConnection(TCPConnection connection, HTTPListenInfo listen_info)
-@safe {
-	InterfaceProxy!Stream http_stream;
-	http_stream = connection;
-
-	// Set NODELAY to true, to avoid delays caused by sending the response
-	// header and body in separate chunks. Note that to avoid other performance
-	// issues (caused by tiny packets), this requires using an output buffer in
-	// the event driver, which is the case at least for the default libevent
-	// based driver.
-	connection.tcpNoDelay = true;
-
-	version(HaveNoTLS) {} else {
-		TLSStreamType tls_stream;
-	}
-
-	if (!connection.waitForData(10.seconds())) {
-		logDebug("Client didn't send the initial request in a timely manner. Closing connection.");
-		return;
-	}
-
-	// If this is a HTTPS server, initiate TLS
-	if (listen_info.tlsContext) {
-		version (HaveNoTLS) assert(false, "No TLS support compiled in.");
-		else {
-			logDebug("Accept TLS connection: %s", listen_info.tlsContext.kind);
-			// TODO: reverse DNS lookup for peer_name of the incoming connection for TLS client certificate verification purposes
-			tls_stream = createTLSStreamFL(http_stream, listen_info.tlsContext, TLSStreamState.accepting, null, connection.remoteAddress);
-			http_stream = tls_stream;
-		}
-	}
-
-	while (!connection.empty) {
-		HTTPServerSettings settings;
-		bool keep_alive;
-
-		() @trusted {
-			import vibe.internal.utilallocator: RegionListAllocator;
-
-			version (VibeManualMemoryManagement)
-				scope request_allocator = new RegionListAllocator!(shared(Mallocator), false)(1024, Mallocator.instance);
-			else
-				scope request_allocator = new RegionListAllocator!(shared(GCAllocator), true)(1024, GCAllocator.instance);
-
-			handleRequest(http_stream, connection, listen_info, settings, keep_alive, request_allocator);
-		} ();
-		if (!keep_alive) { logTrace("No keep-alive - disconnecting client."); break; }
-
-		logTrace("Waiting for next request...");
-		// wait for another possible request on a keep-alive connection
-		if (!connection.waitForData(settings.keepAliveTimeout)) {
-			if (!connection.connected) logTrace("Client disconnected.");
-			else logDebug("Keep-alive connection timed out!");
-			break;
-		}
-	}
-
-	logTrace("Done handling connection.");
-	connection.close();
-}
-
-private bool handleRequest(InterfaceProxy!Stream http_stream, TCPConnection tcp_connection, HTTPListenInfo listen_info, ref HTTPServerSettings settings, ref bool keep_alive, scope IAllocator request_allocator)
+private bool handleRequest(InterfaceProxy!Stream http_stream, TCPConnection tcp_connection, HTTPServerContext listen_info, ref HTTPServerSettings settings, ref bool keep_alive, scope IAllocator request_allocator)
 @safe {
 	import std.algorithm.searching : canFind;
 
@@ -1960,27 +2072,16 @@ private bool handleRequest(InterfaceProxy!Stream http_stream, TCPConnection tcp_
 	// store the IP address
 	req.clientAddress = tcp_connection.remoteAddress;
 
-	// Default to the first virtual host for this listener
-	HTTPServerRequestDelegate request_task;
-	HTTPServerContext context;
-	foreach (ctx; s_contexts)
-		if (ctx.settings.port == listen_info.bindPort) {
-			bool found = false;
-			foreach (addr; ctx.settings.bindAddresses)
-				if (addr == listen_info.bindAddress)
-					found = true;
-			if (!found) continue;
-			context = ctx;
-			settings = ctx.settings;
-			request_task = ctx.requestHandler;
-			break;
-		}
-
-	if (!settings) {
+	if (!listen_info.hasVirtualHosts) {
 		logWarn("Didn't find a HTTP listening context for incoming connection. Dropping.");
 		keep_alive = false;
 		return false;
 	}
+
+	// Default to the first virtual host for this listener
+	HTTPServerContext.VirtualHost context = listen_info.m_virtualHosts[0];
+	HTTPServerRequestDelegate request_task = context.requestHandler;
+	settings = context.settings;
 
 	// temporarily set to the default settings, the virtual host specific settings will be set further down
 	req.m_settings = settings;
@@ -2062,16 +2163,10 @@ private bool handleRequest(InterfaceProxy!Stream http_stream, TCPConnection tcp_
 			if (s.startsWith(':')) reqport = s[1 .. $].to!ushort;
 		}
 
-		foreach (ctx; s_contexts)
+		foreach (ctx; listen_info.m_virtualHosts)
 			if (icmp2(ctx.settings.hostName, reqhost) == 0 &&
 				(!reqport || reqport == ctx.settings.port))
 			{
-				if (ctx.settings.port != listen_info.bindPort) continue;
-				bool found = false;
-				foreach (addr; ctx.settings.bindAddresses)
-					if (addr == listen_info.bindAddress)
-						found = true;
-				if (!found) continue;
 				context = ctx;
 				settings = ctx.settings;
 				request_task = ctx.requestHandler;
@@ -2121,11 +2216,7 @@ private bool handleRequest(InterfaceProxy!Stream http_stream, TCPConnection tcp_
 		req.queryString = url.queryString;
 		req.username = url.username;
 		req.password = url.password;
-
-		// URL parsing if desired
-		if (settings.options & HTTPServerOption.parseURL) {
-			req.path = urlDecode(url.pathString);
-		}
+		req.requestPath = url.path;
 
 		// lookup the session
 		if (settings.sessionStore) {
@@ -2189,7 +2280,7 @@ private bool handleRequest(InterfaceProxy!Stream http_stream, TCPConnection tcp_
 	// finalize (e.g. for chunked encoding)
 	res.finalize();
 
-	foreach (k, v ; req.files) {
+	foreach (k, v ; req._files) {
 		if (existsFile(v.tempPath)) {
 			removeFile(v.tempPath);
 			logDebug("Deleted upload tempfile %s", v.tempPath.toString());

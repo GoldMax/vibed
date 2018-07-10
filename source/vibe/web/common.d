@@ -1,7 +1,7 @@
 /**
 	Contains common functionality for the REST and WEB interface generators.
 
-	Copyright: © 2012-2014 RejectedSoftware e.K.
+	Copyright: © 2012-2017 RejectedSoftware e.K.
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig, Михаил Страшун
 */
@@ -340,19 +340,19 @@ PathAttribute path(string data)
 }
 
 ///
-unittest {
+@safe unittest {
 	@path("/foo")
 	interface IAPI
 	{
-		@path("info2") string getInfo();
+		@path("info2") string getInfo() @safe;
 	}
 
 	class API : IAPI {
-		string getInfo() { return "Hello, World!"; }
+		string getInfo() @safe { return "Hello, World!"; }
 	}
 
 	void test()
-	{
+	@safe {
 		import vibe.http.router;
 		import vibe.web.rest;
 
@@ -377,7 +377,7 @@ unittest {
 	return PathAttribute("");
 }
 ///
-unittest
+@safe unittest
 {
 	import vibe.http.router;
 	import vibe.web.rest;
@@ -385,7 +385,7 @@ unittest
 	@rootPathFromName
 	interface IAPI
 	{
-		int getFoo();
+		int getFoo() @safe;
 	}
 
 	class API : IAPI
@@ -401,6 +401,33 @@ unittest
 	auto routes= router.getAllRoutes();
 
 	assert(routes[0].pattern == "/iapi/foo" && routes[0].method == HTTPMethod.GET);
+}
+
+
+/**
+	Methods marked with this attribute will not be treated as web endpoints.
+
+	This attribute enables the definition of public methods that do not take
+	part in the interface genration process.
+*/
+@property NoRouteAttribute noRoute()
+{
+	import vibe.web.common : onlyAsUda;
+	if (!__ctfe)
+		assert(false, onlyAsUda!__FUNCTION__);
+	return NoRouteAttribute.init;
+}
+
+///
+unittest {
+	interface IAPI {
+		// Accessible as "GET /info"
+		string getInfo();
+
+		// Not accessible over HTTP
+		@noRoute
+		int getFoo();
+	}
 }
 
 
@@ -451,6 +478,9 @@ package struct PathAttribute
 	string data;
 	alias data this;
 }
+
+/// private
+package struct NoRouteAttribute {}
 
 /// Private struct describing the origin of a parameter (Query, Header, Body).
 package struct WebParamAttribute {
@@ -662,7 +692,7 @@ package ParamResult readFormParamRec(T)(scope HTTPServerRequest req, ref T dst, 
 	import std.typecons;
 	import vibe.data.serialization;
 
-	static if (isDynamicArray!T && !isSomeString!T) {
+	static if (isDynamicArray!T && !isSomeString!(OriginalType!T)) {
 		alias EL = typeof(T.init[0]);
 		static assert(!is(EL == bool),
 			"Boolean arrays are not allowed, because their length cannot " ~
@@ -772,6 +802,9 @@ package void setVoid(T, U)(ref T dst, U value)
 unittest {
 	static assert(!__traits(compiles, { bool[] barr; ParamError err;readFormParamRec(null, barr, "f", true, NestedNameStyle.d, err); }));
 	static assert(__traits(compiles, { bool[2] barr; ParamError err;readFormParamRec(null, barr, "f", true, NestedNameStyle.d, err); }));
+
+	enum Test: string {	a = "AAA", b="BBB" }
+	static assert(__traits(compiles, { Test barr; ParamError err;readFormParamRec(null, barr, "f", true, NestedNameStyle.d, err); }));
 }
 
 private string getArrayFieldName(T)(NestedNameStyle style, string prefix, T index)

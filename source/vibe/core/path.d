@@ -131,6 +131,7 @@ struct Path {
 		m_nodes = splitPath(pathstr);
 		m_absolute = (pathstr.startsWith("/") || m_nodes.length > 0 && (m_nodes[0].toString().canFind(':') || m_nodes[0] == "\\"));
 		m_endsWithSlash = pathstr.endsWith("/");
+		version(Windows) m_endsWithSlash |= pathstr.endsWith(`\`);
 	}
 
 	/// Constructs a path object from a list of PathEntry objects.
@@ -151,7 +152,18 @@ struct Path {
 	@property bool absolute() const { return m_absolute; }
 
 	/// Forward compatibility property for vibe-code
-	@property immutable(PathEntry)[] bySegment() { return nodes; }
+	@property auto bySegment()
+	const @nogc {
+		import std.range : chain;
+
+		if (m_absolute) {
+			static immutable emptyseg = [PathEntry("")];
+			return chain(emptyseg[], nodes);
+		} else {
+			static immutable PathEntry[] noseg;
+			return chain(noseg[], nodes);
+		}
+	}
 
 	/// Resolves all '.' and '..' path entries as far as possible.
 	void normalize()
@@ -234,7 +246,7 @@ struct Path {
 	@property Path parentPath() const { return this[0 .. length-1]; }
 
 	/// The ist of path entries of which this path is composed
-	@property immutable(PathEntry)[] nodes() const { return m_nodes; }
+	@property immutable(PathEntry)[] nodes() const @nogc { return m_nodes; }
 
 	/// The number of path entries of which this path is composed
 	@property size_t length() const { return m_nodes.length; }
@@ -427,6 +439,32 @@ unittest
 		assert(p1.relativeTo(p2).toString() == "");
 		assert(p2.relativeTo(p2).toString() == "./");
 		assert(p2.relativeTo(p1).toString() == "./");
+	}
+
+	// trailing back-slash on Windows
+	version(Windows)
+	{
+		auto winpath = "C:\\windows\\test\\";
+		auto winpathp = Path(winpath);
+		assert(winpathp.toNativeString() == winpath);
+	}
+}
+
+
+unittest {
+	import std.algorithm.comparison : equal;
+	import std.range : only;
+
+	assert(Path("/foo/").bySegment.equal(
+		only(Path.Segment(""), Path.Segment("foo"))
+	));
+	assert(Path("foo/").bySegment.equal(
+		only(Path.Segment("foo"))
+	));
+	version (Windows) {
+		assert(Path("C:\\foo\\").bySegment.equal(
+			only(Path.Segment(""), Path.Segment("C:"), Path.Segment("foo"))
+		));
 	}
 }
 

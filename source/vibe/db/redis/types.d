@@ -371,8 +371,10 @@ struct RedisHash(T = string) {
 
 	this(RedisDatabase db, string key) { value = RedisValue(db, key); }
 
+	bool remove() { return value.remove(); }
 	size_t remove(scope string[] fields...) { return cast(size_t)m_db.hdel(m_key, fields); }
 	bool exists(string field) { return m_db.hexists(m_key, field); }
+	bool exists() { return value.exists; }
 
 	void opIndexAssign(T value, string field) { m_db.hset(m_key, field, value.toRedis()); }
 	T opIndex(string field) { return m_db.hget!string(m_key, field).fromRedis!T(); }
@@ -389,7 +391,8 @@ struct RedisHash(T = string) {
 		return m_db.hsetNX(m_key, field, value.toRedis());
 	}
 
-	void opIndexOpAssign(string op)(T value, string field) if (op == "+") { m_db.hincr(m_key, field, value.toRedis()); }
+	void opIndexOpAssign(string op)(T value, string field) if (op == "+") { m_db.hincr(m_key, field, value); }
+	void opIndexOpAssign(string op)(T value, string field) if (op == "-") { m_db.hincr(m_key, field, -value); }
 
 	int opApply(scope int delegate(string key, T value) del)
 	{
@@ -548,7 +551,7 @@ struct RedisSet(T = string) {
 
 	long insert(ARGS...)(ARGS args) { return m_db.sadd(m_key, args); }
 	long remove(T value) { return m_db.srem(m_key, value.toRedis()); }
-	void remove()() { value.remove(); }
+	bool remove() { return value.remove(); }
 	string pop() { return m_db.spop!string(m_key); }
 	long length() { return m_db.scard(m_key); }
 
@@ -600,6 +603,7 @@ struct RedisZSet(T = string) {
 
 	long insert(ARGS...)(ARGS args) { return m_db.zadd(m_key, args); }
 	long remove(ARGS...)(ARGS members) { return m_db.zrem(m_key, members); }
+	bool remove() { return value.remove(); }
 	long length() { return m_db.zcard(m_key); }
 
 	long count(string INT = "[]")(double min, double max)
@@ -615,6 +619,8 @@ struct RedisZSet(T = string) {
 
 	long getRank(string member) { return m_db.zrank(m_key, member); }
 	long getReverseRank(string member) { return m_db.zrevRank(m_key, member); }
+
+	long countByLex(string min, string max) { return m_db.zlexCount(m_key, min, max); }
 
 	//TODO: zinterstore
 
@@ -636,6 +642,11 @@ struct RedisZSet(T = string) {
 	// supports only inclusive intervals
 	// see http://redis.io/commands/zrangebyscore
 	//RedisReply zrevRangeByScore(string key, double min, double max, bool withScores=false);
+
+	auto rangeByLex(T = string)(string min = "-", string max = "+", long offset = 0, long count = -1)
+	{
+		return m_db.zrangeByLex!T(m_key, min, max, offset, count);
+	}
 
 	// TODO:
 	// supports only inclusive intervals
