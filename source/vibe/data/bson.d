@@ -425,7 +425,7 @@ struct Bson {
 		else static if( is(T == BsonDate) ){ checkType(Type.date); return BsonDate(fromBsonData!long(m_data)); }
 		else static if( is(T == BsonRegex) ){
 			checkType(Type.regex);
-			auto d = m_data;
+			auto d = m_data[0 .. $];
 			auto expr = skipCString(d);
 			auto options = skipCString(d);
 			return BsonRegex(expr, options);
@@ -754,12 +754,28 @@ struct Bson {
 	///
 	bool opEquals(ref const Bson other) const {
 		if( m_type != other.m_type ) return false;
-		return m_data == other.m_data;
+		if (m_type != Type.object)
+			return m_data == other.m_data;
+
+		if (m_data == other.m_data)
+			return true;
+		// Similar objects can have a different key order, but they must have a same length
+		if (m_data.length != other.m_data.length)
+			return false;
+
+		foreach (k, ref v; this.byKeyValue)
+		{
+			if (other[k] != v)
+				return false;
+		}
+
+		return true;
 	}
 	/// ditto
 	bool opEquals(const Bson other) const {
 		if( m_type != other.m_type ) return false;
-		return m_data == other.m_data;
+
+		return opEquals(other);
 	}
 
 	private void checkType(in Type[] valid_types...)
@@ -1038,11 +1054,17 @@ struct BsonDate {
 	*/
 	string toString() const { return toSysTime().toISOExtString(); }
 
-	/* Converts to a SysTime.
+	/* Converts to a SysTime using UTC timezone.
 	*/
 	SysTime toSysTime() const {
+		return toSysTime(UTC());
+	}
+
+	/* Converts to a SysTime with a given timezone.
+	*/
+	SysTime toSysTime(immutable TimeZone tz) const {
 		auto zero = unixTimeToStdTime(0);
-		return SysTime(zero + m_time * 10_000L, UTC());
+		return SysTime(zero + m_time * 10_000L, tz);
 	}
 
 	/** Allows relational and equality comparisons.
@@ -1350,6 +1372,14 @@ unittest { // issue #793
 	//assert(bson.get!string == "test");
 	assert(bson.type == Bson.Type.array);
 	assert(bson[0].type == Bson.Type.string && bson[0].get!string == "t");
+}
+
+@safe unittest { // issue #2212
+	auto bsonRegex = Bson(BsonRegex(".*", "i"));
+	auto parsedRegex = bsonRegex.get!BsonRegex;
+	assert(bsonRegex.type == Bson.Type.regex);
+	assert(parsedRegex.expression == ".*");
+	assert(parsedRegex.options == "i");
 }
 
 unittest

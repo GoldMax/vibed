@@ -470,7 +470,7 @@ HTTPServerRequestDelegate serveRestJSClient(I)(RestInterfaceSettings settings)
 	if (is(I == interface))
 {
 	import std.digest.md : md5Of;
-	import std.digest.digest : toHexString;
+	import std.digest : toHexString;
 	import std.array : appender;
 
 	auto app = appender!string();
@@ -505,6 +505,12 @@ HTTPServerRequestDelegate serveRestJSClient(I)(string base_url)
 	settings.baseURL = URL(base_url);
 	return serveRestJSClient!I(settings);
 }
+/// ditto
+HTTPServerRequestDelegate serveRestJSClient(I)()
+{
+	auto settings = new RestInterfaceSettings;
+	return serveRestJSClient!I(settings);
+}
 
 ///
 unittest {
@@ -524,6 +530,7 @@ unittest {
 		router.get("/myapi.js", serveRestJSClient!MyAPI(restsettings));
 		//router.get("/myapi.js", serveRestJSClient!MyAPI(URL("http://api.example.org/")));
 		//router.get("/myapi.js", serveRestJSClient!MyAPI("http://api.example.org/"));
+		//router.get("/myapi.js", serveRestJSClient!MyAPI()); // if want to request to self server
 		//router.get("/", staticTemplate!"index.dt");
 
 		listenHTTP(new HTTPServerSettings, router);
@@ -819,6 +826,10 @@ class RestInterfaceSettings {
 		ret.methodStyle = this.methodStyle;
 		ret.stripTrailingUnderscore = this.stripTrailingUnderscore;
 		ret.allowedOrigins = this.allowedOrigins.dup;
+		ret.errorHandler = this.errorHandler;
+		if (this.httpClientSettings) {
+			ret.httpClientSettings = this.httpClientSettings.dup;
+		}
 		return ret;
 	}
 }
@@ -1370,15 +1381,33 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 
 			if (settings.errorHandler) {
 				settings.errorHandler(req, res, RestErrorInformation(e, default_status));
-			} else if (auto se = cast(HTTPStatusException)e) {
-				res.writeJsonBody(["statusMessage": se.msg], se.status);
-			} else debug {
-				res.writeJsonBody(
-					[ "statusMessage": e.msg, "statusDebugMessage": () @trusted { return sanitizeUTF8(cast(ubyte[])e.toString()); } () ],
-					HTTPStatus.internalServerError
-				);
 			} else {
-				res.writeJsonBody(["statusMessage": e.msg], default_status);
+				import std.algorithm : among;
+				debug string debugMsg;
+
+				if (auto se = cast(HTTPStatusException)e)
+					res.statusCode = se.status;
+				else debug {
+					res.statusCode = HTTPStatus.internalServerError;
+					debugMsg = () @trusted { return sanitizeUTF8(cast(ubyte[])e.toString()); }();
+				}
+				else
+					res.statusCode = default_status;
+
+				// All 1xx(informational), 204 (no content), and 304 (not modified) responses MUST NOT include a message-body.
+				// See: https://tools.ietf.org/html/rfc2616#section-4.3
+				if (res.statusCode < 200 || res.statusCode.among(204, 304)) {
+					res.writeVoidBody();
+					return;
+				}
+
+				debug {
+					if (debugMsg) {
+						res.writeJsonBody(["statusMessage": e.msg, "statusDebugMessage": debugMsg]);
+						return;
+					}
+				}
+				res.writeJsonBody(["statusMessage": e.msg]);
 			}
 		}
 

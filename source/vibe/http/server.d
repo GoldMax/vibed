@@ -33,6 +33,7 @@ import vibe.utils.string;
 
 import core.atomic;
 import core.vararg;
+import diet.traits : SafeFilterCallback, dietTraits;
 import std.algorithm : canFind;
 import std.array;
 import std.conv;
@@ -339,99 +340,96 @@ void setVibeDistHost(string host, ushort port)
 	compileHTMLDietFile!(template_file, ALIASES, DefaultDietFilters)(output);
 }
 
-version (Have_diet_ng)
-{
-	import diet.traits;
 
-	/**
-		Provides the default `css`, `javascript`, `markdown` and `htmlescape` filters
-	 */
-	@dietTraits
-	struct DefaultDietFilters {
-		import diet.html : HTMLOutputStyle;
-		import std.string : splitLines;
+/**
+	Provides the default `css`, `javascript`, `markdown` and `htmlescape` filters
+ */
+@dietTraits
+struct DefaultDietFilters {
+	import diet.html : HTMLOutputStyle;
+	import diet.traits : SafeFilterCallback;
+	import std.string : splitLines;
 
-		version (VibeOutputCompactHTML) enum HTMLOutputStyle htmlOutputStyle = HTMLOutputStyle.compact;
-		else enum HTMLOutputStyle htmlOutputStyle = HTMLOutputStyle.pretty;
+	version (VibeOutputCompactHTML) enum HTMLOutputStyle htmlOutputStyle = HTMLOutputStyle.compact;
+	else enum HTMLOutputStyle htmlOutputStyle = HTMLOutputStyle.pretty;
 
-		static string filterCss(I)(I text, size_t indent = 0)
-		{
-			auto lines = splitLines(text);
+	static string filterCss(I)(I text, size_t indent = 0)
+	{
+		auto lines = splitLines(text);
 
-			string indent_string = "\n";
-			while (indent-- > 0) indent_string ~= '\t';
+		string indent_string = "\n";
+		while (indent-- > 0) indent_string ~= '\t';
 
-			string ret = indent_string~"<style type=\"text/css\"><!--";
-			indent_string = indent_string ~ '\t';
-			foreach (ln; lines) ret ~= indent_string ~ ln;
-			indent_string = indent_string[0 .. $-1];
-			ret ~= indent_string ~ "--></style>";
+		string ret = indent_string~"<style type=\"text/css\"><!--";
+		indent_string = indent_string ~ '\t';
+		foreach (ln; lines) ret ~= indent_string ~ ln;
+		indent_string = indent_string[0 .. $-1];
+		ret ~= indent_string ~ "--></style>";
 
-			return ret;
-		}
-
-
-		static string filterJavascript(I)(I text, size_t indent = 0)
-		{
-			auto lines = splitLines(text);
-
-			string indent_string = "\n";
-			while (indent-- > 0) indent_string ~= '\t';
-
-			string ret = indent_string~"<script type=\"application/javascript\">";
-			ret ~= indent_string~'\t' ~ "//<![CDATA[";
-			foreach (ln; lines) ret ~= indent_string ~ '\t' ~ ln;
-			ret ~= indent_string ~ '\t' ~ "//]]>" ~ indent_string ~ "</script>";
-
-			return ret;
-		}
-
-		static string filterMarkdown(I)(I text)
-		{
-			import vibe.textfilter.markdown : markdown = filterMarkdown;
-			// TODO: indent
-			return markdown(text);
-		}
-
-		static string filterHtmlescape(I)(I text)
-		{
-			import vibe.textfilter.html : htmlEscape;
-			// TODO: indent
-			return htmlEscape(text);
-		}
-
-		static this()
-		{
-			filters["css"] = (input, scope output) { output(filterCss(input)); };
-			filters["javascript"] = (input, scope output) { output(filterJavascript(input)); };
-			filters["markdown"] = (input, scope output) { output(filterMarkdown(() @trusted { return cast(string)input; } ())); };
-			filters["htmlescape"] = (input, scope output) { output(filterHtmlescape(input)); };
-		}
-
-		static SafeFilterCallback[string] filters;
+		return ret;
 	}
 
 
-	unittest {
-		static string compile(string diet)() {
-			import std.array : appender;
-			import std.string : strip;
-			import diet.html : compileHTMLDietString;
-			auto dst = appender!string;
-			dst.compileHTMLDietString!(diet, DefaultDietFilters);
-			return strip(cast(string)(dst.data));
-		}
+	static string filterJavascript(I)(I text, size_t indent = 0)
+	{
+		auto lines = splitLines(text);
 
-		assert(compile!":css .test" == "<style type=\"text/css\"><!--\n\t.test\n--></style>");
-		assert(compile!":javascript test();" == "<script type=\"application/javascript\">\n\t//<![CDATA[\n\ttest();\n\t//]]>\n</script>");
-		assert(compile!":markdown **test**" == "<p><strong>test</strong>\n</p>");
-		assert(compile!":htmlescape <test>" == "&lt;test&gt;");
-		assert(compile!":css !{\".test\"}" == "<style type=\"text/css\"><!--\n\t.test\n--></style>");
-		assert(compile!":javascript !{\"test();\"}" == "<script type=\"application/javascript\">\n\t//<![CDATA[\n\ttest();\n\t//]]>\n</script>");
-		assert(compile!":markdown !{\"**test**\"}" == "<p><strong>test</strong>\n</p>");
-		assert(compile!":htmlescape !{\"<test>\"}" == "&lt;test&gt;");
-		assert(compile!":javascript\n\ttest();" == "<script type=\"application/javascript\">\n\t//<![CDATA[\n\ttest();\n\t//]]>\n</script>");
+		string indent_string = "\n";
+		while (indent-- > 0) indent_string ~= '\t';
+
+		string ret = indent_string~"<script type=\"application/javascript\">";
+		ret ~= indent_string~'\t' ~ "//<![CDATA[";
+		foreach (ln; lines) ret ~= indent_string ~ '\t' ~ ln;
+		ret ~= indent_string ~ '\t' ~ "//]]>" ~ indent_string ~ "</script>";
+
+		return ret;
 	}
+
+	static string filterMarkdown(I)(I text)
+	{
+		import vibe.textfilter.markdown : markdown = filterMarkdown;
+		// TODO: indent
+		return markdown(text);
+	}
+
+	static string filterHtmlescape(I)(I text)
+	{
+		import vibe.textfilter.html : htmlEscape;
+		// TODO: indent
+		return htmlEscape(text);
+	}
+
+	static this()
+	{
+		filters["css"] = (input, scope output) { output(filterCss(input)); };
+		filters["javascript"] = (input, scope output) { output(filterJavascript(input)); };
+		filters["markdown"] = (input, scope output) { output(filterMarkdown(() @trusted { return cast(string)input; } ())); };
+		filters["htmlescape"] = (input, scope output) { output(filterHtmlescape(input)); };
+	}
+
+	static SafeFilterCallback[string] filters;
+}
+
+
+unittest {
+	static string compile(string diet)() {
+		import std.array : appender;
+		import std.string : strip;
+		import diet.html : compileHTMLDietString;
+		auto dst = appender!string;
+		dst.compileHTMLDietString!(diet, DefaultDietFilters);
+		return strip(cast(string)(dst.data));
+	}
+
+	assert(compile!":css .test" == "<style type=\"text/css\"><!--\n\t.test\n--></style>");
+	assert(compile!":javascript test();" == "<script type=\"application/javascript\">\n\t//<![CDATA[\n\ttest();\n\t//]]>\n</script>");
+	assert(compile!":markdown **test**" == "<p><strong>test</strong>\n</p>");
+	assert(compile!":htmlescape <test>" == "&lt;test&gt;");
+	assert(compile!":css !{\".test\"}" == "<style type=\"text/css\"><!--\n\t.test\n--></style>");
+	assert(compile!":javascript !{\"test();\"}" == "<script type=\"application/javascript\">\n\t//<![CDATA[\n\ttest();\n\t//]]>\n</script>");
+	assert(compile!":markdown !{\"**test**\"}" == "<p><strong>test</strong>\n</p>");
+	assert(compile!":htmlescape !{\"<test>\"}" == "&lt;test&gt;");
+	assert(compile!":javascript\n\ttest();" == "<script type=\"application/javascript\">\n\t//<![CDATA[\n\ttest();\n\t//]]>\n</script>");
 }
 
 
@@ -1014,7 +1012,6 @@ final class HTTPServerRequest : HTTPRequest {
 
 		private void parseFormAndFiles() @safe {
 			_form = FormFields.init;
-			assert(!!bodyReader);
 			parseFormData(_form, _files, headers.get("Content-Type", ""), bodyReader, MaxHTTPHeaderLineLength);
 		}
 
@@ -1175,6 +1172,7 @@ final class HTTPServerResponse : HTTPResponse {
 		bool m_headerWritten = false;
 		bool m_isHeadResponse = false;
 		bool m_tls;
+		bool m_requiresConnectionClose;
 		SysTime m_timeFinalized;
 	}
 
@@ -1513,6 +1511,7 @@ final class HTTPServerResponse : HTTPResponse {
 		statusCode = HTTPStatus.SwitchingProtocols;
 		if (protocol.length) headers["Upgrade"] = protocol;
 		writeVoidBody();
+		m_requiresConnectionClose = true;
 		return createConnectionProxyStream(m_conn, m_rawConnection);
 	}
 	/// ditto
@@ -1521,13 +1520,12 @@ final class HTTPServerResponse : HTTPResponse {
 		statusCode = HTTPStatus.SwitchingProtocols;
 		if (protocol.length) headers["Upgrade"] = protocol;
 		writeVoidBody();
+		m_requiresConnectionClose = true;
 		() @trusted {
 			auto conn = createConnectionProxyStreamFL(m_conn, m_rawConnection);
 			del(conn);
 		} ();
 		finalize();
-		if (m_rawConnection && m_rawConnection.connected)
-			m_rawConnection.close(); // connection not reusable after a protocol upgrade
 	}
 
 	/** Special method for handling CONNECT proxy tunnel
@@ -1548,7 +1546,6 @@ final class HTTPServerResponse : HTTPResponse {
 			del(conn);
 		} ();
 		finalize();
-		m_rawConnection.close(); // connection not reusable after a protocol upgrade
 	}
 
 	/** Sets the specified cookie value.
@@ -1668,8 +1665,9 @@ final class HTTPServerResponse : HTTPResponse {
 			catch (Exception e) logDebug("Failed to flush connection after finishing HTTP response: %s", e.msg);
 			if (!isHeadResponse && bytesWritten < headers.get("Content-Length", "0").to!long) {
 				logDebug("HTTP response only written partially before finalization. Terminating connection.");
-				m_rawConnection.close();
+				m_requiresConnectionClose = true;
 			}
+
 			m_rawConnection = InterfaceProxy!ConnectionStream.init;
 		}
 
@@ -1997,7 +1995,7 @@ private HTTPListener listenHTTPPlain(HTTPServerSettings settings, HTTPServerRequ
 	import vibe.core.core : runWorkerTaskDist;
 	import std.algorithm : canFind, find;
 
-	static TCPListener doListen(HTTPServerContext listen_info, bool dist, bool reusePort)
+	static TCPListener doListen(HTTPServerContext listen_info, bool dist, bool reusePort, bool is_tls)
 	@safe {
 		try {
 			TCPListenOptions options = TCPListenOptions.defaults;
@@ -2016,7 +2014,7 @@ private HTTPListener listenHTTPPlain(HTTPServerSettings settings, HTTPServerRequ
 			if (listen_info.bindPort == 0)
 				listen_info.m_bindPort = ret.bindAddress.port;
 
-			auto proto = listen_info.tlsContext ? "https" : "http";
+			auto proto = is_tls ? "https" : "http";
 			auto urladdr = listen_info.bindAddress;
 			if (urladdr.canFind(':')) urladdr = "["~urladdr~"]";
 			logInfo("Listening for requests on %s://%s:%s/", proto, urladdr, listen_info.bindPort);
@@ -2038,7 +2036,10 @@ private HTTPListener listenHTTPPlain(HTTPServerSettings settings, HTTPServerRequ
 		if (!l.empty) linfo = l.front;
 		else {
 			auto li = new HTTPServerContext(addr, settings.port);
-			if (auto tcp_lst = doListen(li, (settings.options & HTTPServerOptionImpl.distribute) != 0, (settings.options & HTTPServerOption.reusePort) != 0)) // DMD BUG 2043
+			if (auto tcp_lst = doListen(li,
+					(settings.options & HTTPServerOptionImpl.distribute) != 0,
+					(settings.options & HTTPServerOption.reusePort) != 0,
+					settings.tlsContext !is null)) // DMD BUG 2043
 			{
 				li.m_listener = tcp_lst;
 				s_listeners ~= li;
@@ -2270,7 +2271,7 @@ private bool handleRequest(InterfaceProxy!Stream http_stream, TCPConnection tcp_
 		if (!parsed || res.headerWritten || !cast(Exception)e) keep_alive = false;
 	}
 
-	if (tcp_connection.connected) {
+	if (tcp_connection.connected && keep_alive) {
 		if (req.bodyReader && !req.bodyReader.empty) {
 			req.bodyReader.pipe(nullSink);
 			logTrace("dropped body");
@@ -2279,6 +2280,9 @@ private bool handleRequest(InterfaceProxy!Stream http_stream, TCPConnection tcp_
 
 	// finalize (e.g. for chunked encoding)
 	res.finalize();
+
+	if (res.m_requiresConnectionClose)
+		keep_alive = false;
 
 	foreach (k, v ; req._files) {
 		if (existsFile(v.tempPath)) {

@@ -328,9 +328,10 @@ struct Json {
 			case Type.float_: return Json(m_float);
 			case Type.string: return Json(m_string);
 			case Type.array:
-				auto ret = Json.emptyArray;
+				Json[] ret;
 				foreach (v; this.byValue) ret ~= v.clone();
-				return ret;
+
+				return Json(ret);
 			case Type.object:
 				auto ret = Json.emptyObject;
 				foreach (name, v; this.byKeyValue) ret[name] = v.clone();
@@ -2111,6 +2112,16 @@ struct JsonStringSerializer(R, bool pretty = false)
 	}
 }
 
+/// Cloning JSON arrays
+unittest
+{
+	Json value = Json([ Json([ Json.emptyArray ]), Json.emptyArray ]).clone;
+
+	assert(value.length == 2);
+	assert(value[0].length == 1);
+	assert(value[0][0].length == 0);
+}
+
 unittest
 {
 	assert(serializeToJsonString(double.nan) == "null");
@@ -2132,6 +2143,8 @@ unittest
 	Params:
 		dst   = References the string output range to which the result is written.
 		json  = Specifies the JSON value that is to be stringified.
+		level = Specifies the base amount of indentation for the output. Indentation is always
+				done using tab characters.
 
 	See_Also: Json.toString, writePrettyJsonString
 */
