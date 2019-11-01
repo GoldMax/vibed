@@ -97,6 +97,7 @@ vibe\http\common.d=0
 vibe\http\dist.d=0
 vibe\http\fileserver.d=0
 vibe\http\form.d=0
+vibe\http\internal\basic_auth_client.d=0
 vibe\http\log.d=0
 vibe\http\proxy.d=0
 vibe\http\router.d=0

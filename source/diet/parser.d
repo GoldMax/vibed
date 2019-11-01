@@ -748,8 +748,8 @@ private Node[] parseDietWithExtensions(FileInfo[] files, size_t file_index, ref 
 				auto np = processNode(n);
 				if (!np.isNull()) {
 					if (ret.isNull) ret = nodes[0 .. i];
-					ret ~= np;
-				} else if (!ret.isNull) ret ~= n;
+					ret = ret.get ~ np.get;
+				} else if (!ret.isNull) ret = ret.get ~ n;
 			}
 			if (ret.isNull && nodes.length) ret = nodes;
 		}
@@ -1550,7 +1550,7 @@ private void modifyArray(alias modify, T)(ref T[] arr)
 		if (mod.isNull()) i++;
 		else {
 			arr = arr[0 .. i] ~ mod.get() ~ arr[i+1 .. $];
-			i += mod.length;
+			i += mod.get.length;
 		}
 	}
 }

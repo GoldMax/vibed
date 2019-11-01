@@ -17,6 +17,7 @@ import std.conv;
 import std.exception;
 import std.string;
 import std.traits : isInstanceOf;
+import std.ascii : isAlpha;
 
 
 /**
@@ -36,7 +37,7 @@ struct URL {
 	}
 
 	/// Constructs a new URL object from its components.
-	this(string schema, string host, ushort port, InetPath path)
+	this(string schema, string host, ushort port, InetPath path) pure
 	{
 		m_schema = schema;
 		m_host = host;
@@ -45,31 +46,65 @@ struct URL {
 		else m_pathString = urlEncode(path.toString(), "/");
 	}
 	/// ditto
-	this(string schema, InetPath path)
+	this(string schema, InetPath path) pure
 	{
 		this(schema, null, 0, path);
 	}
 
 	version (Have_vibe_core) {
 		/// ditto
-		this(string schema, string host, ushort port, PosixPath path)
+		this(string schema, string host, ushort port, PosixPath path) pure
 		{
 			this(schema, host, port, cast(InetPath)path);
 		}
 		/// ditto
-		this(string schema, PosixPath path)
+		this(string schema, PosixPath path) pure
 		{
 			this(schema, null, 0, cast(InetPath)path);
 		}
 		/// ditto
-		this(string schema, string host, ushort port, WindowsPath path)
+		this(string schema, string host, ushort port, WindowsPath path) pure
 		{
 			this(schema, host, port, cast(InetPath)path);
 		}
 		/// ditto
-		this(string schema, WindowsPath path)
+		this(string schema, WindowsPath path) pure
 		{
 			this(schema, null, 0, cast(InetPath)path);
+		}
+
+		/** Constructs a "file:" URL from a native file system path.
+
+			Note that the path must be absolute. On Windows, both, paths starting
+			with a drive letter and UNC paths are supported.
+		*/
+		this(WindowsPath path) pure
+		{
+			import std.algorithm.iteration : map;
+			import std.range : chain, only, repeat;
+
+			enforce(path.absolute, "Only absolute paths can be converted to a URL.");
+
+			// treat UNC paths properly
+			if (path.startsWith(WindowsPath(`\\`))) {
+				auto segs = path.bySegment;
+				segs.popFront();
+				segs.popFront();
+				auto host = segs.front.name;
+				segs.popFront();
+
+				this("file", host, 0, InetPath(
+					only(InetPath.Segment("", '/'))
+					.chain(segs.map!(s => cast(InetPath.Segment)s))
+				));
+			} else this("file", host, 0, cast(InetPath)path);
+		}
+		/// ditto
+		this(PosixPath path) pure
+		{
+			enforce(path.absolute, "Only absolute paths can be converted to a URL.");
+
+			this("file", null, 0, cast(InetPath)path);
 		}
 	}
 
@@ -82,9 +117,12 @@ struct URL {
 		auto str = url_string;
 		enforce(str.length > 0, "Empty URL.");
 		if( str[0] != '/' ){
-			auto idx = str.indexOfCT(':');
+			auto idx = str.indexOf(':');
 			enforce(idx > 0, "No schema in URL:"~str);
 			m_schema = str[0 .. idx];
+			enforce(m_schema[0].isAlpha,
+					"Schema must start with an alphabetical char, found: " ~
+					m_schema[0]);
 			str = str[idx+1 .. $];
 			bool requires_host = false;
 
@@ -95,13 +133,13 @@ struct URL {
 				str = str[2 .. $];
 			}
 
-			auto si = str.indexOfCT('/');
+			auto si = str.indexOf('/');
 			if( si < 0 ) si = str.length;
-			auto ai = str[0 .. si].indexOfCT('@');
+			auto ai = str[0 .. si].indexOf('@');
 			sizediff_t hs = 0;
 			if( ai >= 0 ){
 				hs = ai+1;
-				auto ci = str[0 .. ai].indexOfCT(':');
+				auto ci = str[0 .. ai].indexOf(':');
 				if( ci >= 0 ){
 					m_username = str[0 .. ci];
 					m_password = str[ci+1 .. ai];
@@ -113,7 +151,7 @@ struct URL {
 
 			auto findPort ( string src )
 			{
-				auto pi = src.indexOfCT(':');
+				auto pi = src.indexOf(':');
 				if(pi > 0) {
 					enforce(pi < src.length-1, "Empty port in URL.");
 					m_port = to!ushort(src[pi+1..$]);
@@ -122,9 +160,9 @@ struct URL {
 			}
 
 
-			auto ip6 = m_host.indexOfCT('[');
+			auto ip6 = m_host.indexOf('[');
 			if (ip6 == 0) { // [ must be first char
-				auto pe = m_host.indexOfCT(']');
+				auto pe = m_host.indexOf(']');
 				if (pe > 0) {
 					findPort(m_host[pe..$]);
 					m_host = m_host[1 .. pe];
@@ -198,7 +236,7 @@ struct URL {
 	}
 
 	/// The host part of the URL (depends on the schema)
-	@property string host() const { return m_host; }
+	@property string host() const pure { return m_host; }
 	/// ditto
 	@property void host(string v) { m_host = v; }
 
@@ -261,13 +299,13 @@ struct URL {
 	/// ditto
 	@property void localURI(string str)
 	{
-		auto ai = str.indexOfCT('#');
+		auto ai = str.indexOf('#');
 		if( ai >= 0 ){
 			m_anchor = str[ai+1 .. $];
 			str = str[0 .. ai];
 		} else m_anchor = null;
 
-		auto qi = str.indexOfCT('?');
+		auto qi = str.indexOf('?');
 		if( qi >= 0 ){
 			m_queryString = str[qi+1 .. $];
 			str = str[0 .. qi];
@@ -316,6 +354,37 @@ struct URL {
 		return dst.data;
 	}
 
+	/** Converts a "file" URL back to a native file system path.
+	*/
+	NativePath toNativePath()
+	const {
+		import std.algorithm.iteration : map;
+		import std.range : dropOne;
+
+		enforce(this.schema == "file", "Only file:// URLs can be converted to a native path.");
+
+		version (Windows) {
+			if (this.host.length) {
+				version (Have_vibe_core) {
+					auto p = NativePath(this.path
+							.bySegment
+							.dropOne
+							.map!(s => cast(WindowsPath.Segment)s)
+						);
+				} else {
+					auto p = NativePath(this.path
+							.bySegment
+							.dropOne
+							.array,
+						false);
+				}
+				return NativePath(`\\`~this.host) ~ p;
+			}
+		}
+
+		return cast(NativePath)this.path;
+	}
+
 	bool startsWith(const URL rhs) const {
 		if( m_schema != rhs.m_schema ) return false;
 		if( m_host != rhs.m_host ) return false;
@@ -355,6 +424,7 @@ private bool isDoubleSlashSchema(string schema)
 	switch (schema) {
 		case "ftp", "http", "https", "http+unix", "https+unix":
 		case "spdy", "sftp", "ws", "wss", "file", "redis", "tcp":
+		case "rtsp", "rtsps":
 			return true;
 		default:
 			return false;
@@ -434,6 +504,14 @@ unittest {
 	assert(url.localURI == "/echo");
 }
 
+//rtsp unittest
+unittest {
+	URL url = URL("rtsp://127.0.0.1:554/echo");
+	assert(url.host == "127.0.0.1");
+	assert(url.port == 554);
+	assert(url.localURI == "/echo");
+}
+
 unittest {
 	auto p = PosixPath("/foo bar/boo oom/");
 	URL url = URL("http", "example.com", 0, p); // constructor test
@@ -501,4 +579,49 @@ unittest { // host name role in file:// URLs
 	assert(url.host == "foo");
 	assert(url.path == InetPath("/bar/baz"));
 	assert(url.toString() == "file://foo/bar/baz");
+}
+
+unittest { // native path <-> URL conversion
+	import std.exception : assertThrown;
+
+	version (Have_vibe_core)
+		auto url = URL(NativePath("/foo/bar"));
+	else
+		auto url = URL("file", "", 0, InetPath("/foo/bar"));
+	assert(url.schema == "file");
+	assert(url.host == "");
+	assert(url.path == InetPath("/foo/bar"));
+	assert(url.toNativePath == NativePath("/foo/bar"));
+
+	assertThrown(URL("http://example.org/").toNativePath);
+	version (Have_vibe_core) {
+		assertThrown(URL(NativePath("foo/bar")));
+	}
+}
+
+version (Windows) unittest { // Windows drive letter paths
+	version (Have_vibe_core)
+		auto url = URL(WindowsPath(`C:\foo`));
+	else
+		auto url = URL("file", "", 0, InetPath("/C:/foo"));
+	assert(url.schema == "file");
+	assert(url.host == "");
+	assert(url.path == InetPath("/C:/foo"));
+	auto p = url.toNativePath;
+	p.normalize();
+	assert(p == WindowsPath(`C:\foo`));
+}
+
+version (Windows) unittest { // UNC paths
+	version (Have_vibe_core)
+		auto url = URL(WindowsPath(`\\server\share\path`));
+	else
+		auto url = URL("file", "server", 0, InetPath("/share/path"));
+	assert(url.schema == "file");
+	assert(url.host == "server");
+	assert(url.path == InetPath("/share/path"));
+
+	auto p = url.toNativePath;
+	p.normalize(); // convert slash to backslash if necessary
+	assert(p == WindowsPath(`\\server\share\path`));
 }
