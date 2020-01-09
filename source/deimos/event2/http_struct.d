@@ -40,6 +40,7 @@ nothrow:
 /* For int types. */
 public import deimos.event2.util;
 import deimos.event2.http;
+import deimos.event2.tag;
 import deimos.event2._d_util;
 import std.bitmanip;
 
@@ -93,6 +94,8 @@ enum EVHTTP_REQ_NEEDS_FREE = 0x0010;
 
 	int response_code;		/* HTTP Response code */
 	char* response_code_line;	/* Readable response */
+
+
 
 	evbuffer* input_buffer;	/* read data */
 	ev_int64_t ntoread;
