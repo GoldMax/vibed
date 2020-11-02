@@ -3,7 +3,7 @@
 
 	See `URLRouter` for more details.
 
-	Copyright: © 2012-2015 RejectedSoftware e.K.
+	Copyright: © 2012-2015 Sönke Ludwig
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
@@ -92,7 +92,7 @@ final class URLRouter : HTTPServerRequestHandler {
 	/// Returns a single route handle to conveniently register multiple methods.
 	URLRoute route(string path)
 	in { assert(path.length, "Cannot register null or empty path!"); }
-	body { return URLRoute(this, path); }
+	do { return URLRoute(this, path); }
 
 	///
 	unittest {
@@ -212,7 +212,6 @@ final class URLRouter : HTTPServerRequestHandler {
 				auto r = () @trusted { return &m_routes.getTerminalData(ridx); } ();
 				if (r.method != method) return false;
 
-				logDebugV("route match: %s -> %s %s %s", req.path, r.method, r.pattern, values);
 				logDiagnostic("route match: %s -> %s %s %s", req.path, r.method, r.pattern, values);
 				foreach (i, v; values) req.params[m_routes.getTerminalVarNames(ridx)[i]] = v;
 				if (m_computeBasePath) req.params["routerRootDir"] = calcBasePath();
@@ -225,7 +224,6 @@ final class URLRouter : HTTPServerRequestHandler {
 			else break;
 		}
 
-		logDebug("no route match: %s %s", req.method, req.requestURL);
 		logDiagnostic("no route match: %s %s", req.method, req.requestURL);
 	}
 

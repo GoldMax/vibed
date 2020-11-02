@@ -7,13 +7,10 @@ facilities, or import individual heap building blocks and assemble them.
 */
 module stdx.allocator.showcase;
 
-version (D_BetterC) {} else version = HasDRuntime;
-
-version (HasDRuntime):
-
 import stdx.allocator.building_blocks.fallback_allocator,
     stdx.allocator.gc_allocator,
     stdx.allocator.building_blocks.region;
+import std.traits : hasMember;
 
 /**
 
@@ -24,7 +21,7 @@ then falls back to $(D Allocator). Defined as:
 alias StackFront(size_t stackSize, Allocator) =
     FallbackAllocator!(
         InSituRegion!(stackSize, Allocator.alignment,
-            __traits(hasMember, Allocator, "deallocate")
+            hasMember!(Allocator, "deallocate")
                 ? Yes.defineDeallocate
                 : No.defineDeallocate),
         Allocator);
@@ -64,7 +61,7 @@ auto mmapRegionList(size_t bytesPerRegion)
     static struct Factory
     {
         size_t bytesPerRegion;
-        import mir.utility : max;
+        import std.algorithm.comparison : max;
         import stdx.allocator.building_blocks.region
             : Region;
         import stdx.allocator.mmap_allocator

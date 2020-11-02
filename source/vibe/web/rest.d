@@ -220,7 +220,7 @@
 		To see how to implement the client side in detail, jump to
 		the `RestInterfaceClient` documentation.
 
-	Copyright: © 2012-2018 RejectedSoftware e.K.
+	Copyright: © 2012-2018 Sönke Ludwig
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig, Михаил Страшун, Mathias 'Geod24' Lang
 */
@@ -586,6 +586,10 @@ unittest {
 	the matching method style for this. The RestInterfaceClient class will derive from the
 	interface that is passed as a template argument. It can be used as a drop-in replacement
 	of the real implementation of the API this way.
+
+	Non-success:
+		If a request failed, timed out, or the server returned an non-success status code,
+		an `vibe.web.common.RestException` will be thrown.
 */
 class RestInterfaceClient(I) : I
 {
@@ -708,7 +712,7 @@ class RestInterfaceClient(I) : I
 		 *     The Json object returned by the request
 		 */
 		Json request(HTTPMethod verb, string name,
-					 in ref InetHeaderMap hdrs, string query, string body_,
+					 const scope ref InetHeaderMap hdrs, string query, string body_,
 					 ref InetHeaderMap reqReturnHdrs,
 					 ref InetHeaderMap optReturnHdrs) const
 		{
@@ -1462,7 +1466,7 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 					else if (v.isNull()) {
 						static if (!is(PDefaults[i] == void)) params[i] = PDefaults[i];
 						else enforceBadRequest(false, "Missing non-optional "~sparam.kind.to!string~" parameter '"~(fieldname.length?fieldname:sparam.name)~"'.");
-					} else params[i] = v;
+					} else params[i] = v.get;
 				}
 			}
 		} catch (Exception e) {
@@ -1679,7 +1683,7 @@ private string generateRestClientMethods(I)()
 
 
 private auto executeClientMethod(I, size_t ridx, ARGS...)
-	(in ref RestInterface!I intf, scope void delegate(HTTPClientRequest) @safe request_filter,
+	(const scope ref RestInterface!I intf, scope void delegate(HTTPClientRequest) @safe request_filter,
 		scope void delegate(HTTPClientRequest, scope InputStream) @safe request_body_filter)
 {
 	import vibe.web.internal.rest.common : ParameterKind;
@@ -1824,7 +1828,7 @@ import vibe.http.client : HTTPClientRequest;
 private Json request(URL base_url,
 	scope void delegate(HTTPClientRequest) @safe request_filter,
 	scope void delegate(HTTPClientRequest, scope InputStream) @safe request_body_filter,
-	HTTPMethod verb, string path, in ref InetHeaderMap hdrs, string query,
+	HTTPMethod verb, string path, const scope ref InetHeaderMap hdrs, string query,
 	string body_, ref InetHeaderMap reqReturnHdrs,
 	ref InetHeaderMap optReturnHdrs, in HTTPClientSettings http_settings)
 @safe {
@@ -2003,7 +2007,7 @@ unittest
 // errors in the server and client.
 package string getInterfaceValidationError(I)()
 out (result) { assert((result is null) == !result.length); }
-body {
+do {
 	import vibe.web.internal.rest.common : ParameterKind;
 	import std.typetuple : TypeTuple;
 	import std.algorithm : strip;

@@ -158,9 +158,10 @@ struct StatsCollector(Allocator, ulong flags = Options.all,
     ulong perCallFlags = 0)
 {
 private:
+    import std.traits : hasMember, Signed;
     import stdx.allocator.internal : Ternary;
 
-    enum define = (string type, string[] names...)
+    static string define(string type, string[] names...)
     {
         string result;
         foreach (v; names)
@@ -169,9 +170,9 @@ private:
                 ~ "public const("~type~") "~v~"() const { return _"~v~"; }"
                 ~ "}";
         return result;
-    };
+    }
 
-    void add(string counter)(sizediff_t n)
+    void add(string counter)(Signed!size_t n)
     {
         mixin("static if (flags & Options." ~ counter
             ~ ") _" ~ counter ~ " += n;");
@@ -282,7 +283,7 @@ public:
     Increments $(D numOwns) (per instance and and per call) and forwards to $(D
     parent.owns(b)).
     */
-    static if (__traits(hasMember, Allocator, "owns"))
+    static if (hasMember!(Allocator, "owns"))
     {
         static if ((perCallFlags & Options.numOwns) == 0)
         Ternary owns(void[] b)
@@ -356,8 +357,8 @@ public:
     private bool expandImpl(string f = null, uint n = 0)(ref void[] b, size_t s)
     {
         up!"numExpand";
-        sizediff_t slack = 0;
-        static if (!__traits(hasMember, Allocator, "expand"))
+        Signed!size_t slack = 0;
+        static if (!hasMember!(Allocator, "expand"))
         {
             auto result = s == 0;
         }
@@ -371,7 +372,7 @@ public:
                 add!"bytesUsed"(s);
                 add!"bytesAllocated"(s);
                 add!"bytesExpanded"(s);
-                slack = sizediff_t(this.goodAllocSize(b.length) - b.length
+                slack = Signed!size_t(this.goodAllocSize(b.length) - b.length
                     - bytesSlackB4);
                 add!"bytesSlack"(slack);
             }
@@ -418,16 +419,16 @@ public:
 
         const result = parent.reallocate(b, s);
 
-        sizediff_t slack = 0;
+        Signed!size_t slack = 0;
         bool wasInPlace = false;
-        sizediff_t delta = 0;
+        Signed!size_t delta = 0;
 
         if (result)
         {
             up!"numReallocateOK";
             slack = (this.goodAllocSize(b.length) - b.length) - bytesSlackB4;
             add!"bytesSlack"(slack);
-            add!"bytesUsed"(sizediff_t(b.length - oldLength));
+            add!"bytesUsed"(Signed!size_t(b.length - oldLength));
             if (oldB == b.ptr)
             {
                 // This was an in-place reallocation, yay
@@ -479,16 +480,16 @@ public:
     private bool deallocateImpl(string f = null, uint n = 0)(void[] b)
     {
         up!"numDeallocate";
-        add!"bytesUsed"(-sizediff_t(b.length));
+        add!"bytesUsed"(-Signed!size_t(b.length));
         add!"bytesSlack"(-(this.goodAllocSize(b.length) - b.length));
         addPerCall!(f, n, "numDeallocate", "bytesContracted")(1, b.length);
-        static if (__traits(hasMember, Allocator, "deallocate"))
+        static if (hasMember!(Allocator, "deallocate"))
             return parent.deallocate(b);
         else
             return false;
     }
 
-    static if (__traits(hasMember, Allocator, "deallocateAll"))
+    static if (hasMember!(Allocator, "deallocateAll"))
     {
         /**
         Defined only if $(D Allocator.deallocateAll) is defined. Affects
@@ -528,13 +529,14 @@ public:
     */
     void reportStatistics(R)(auto ref R output)
     {
-        foreach (member; __traits(allMembers, Options))
-        {{
-            enum e = __traits(getMember, Options, member);
+        import std.conv : to;
+        import std.traits : EnumMembers;
+        foreach (e; EnumMembers!Options)
+        {
             static if ((flags & e) && e != Options.numAll
                     && e != Options.bytesAll && e != Options.all)
-                output.write(member, ":", e, '\n');
-        }}
+                output.write(e.to!string, ":", mixin(e.to!string), '\n');
+        }
     }
 
     static if (perCallFlags)
@@ -559,7 +561,7 @@ public:
             Format to a string such as:
             $(D mymodule.d(655): [numAllocate:21, numAllocateOK:21, bytesAllocated:324202]).
             */
-            string toString()() const
+            string toString() const
             {
                 import std.conv : text, to;
                 auto result = text(file, "(", line, "): [");
@@ -609,7 +611,11 @@ public:
 
         private PerCallStatistics* statsAt(string f, uint n, opts...)()
         {
-            static PerCallStatistics s = { f, n, [ opts ], new ulong[opts.length] };
+            import std.array : array;
+            import std.range : repeat;
+
+            static PerCallStatistics s = { f, n, [ opts ],
+                repeat(0UL, opts.length).array };
             static bool inserted;
 
             if (!inserted)

@@ -4,20 +4,19 @@
 	Note that this module currently is a big sand box for testing allocation related stuff.
 	Nothing here, including the interfaces, is final but rather a lot of experimentation.
 
-	Copyright: © 2012-2013 RejectedSoftware e.K.
+	Copyright: © 2012-2013 Sönke Ludwig
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
 module vibe.internal.freelistref;
 
 import vibe.internal.allocator;
-import vibe.internal.meta.traits : synchronizedIsNothrow;
+import vibe.internal.traits : synchronizedIsNothrow;
 
 import core.exception : OutOfMemoryError;
 import core.stdc.stdlib;
 import core.memory;
 import std.conv;
-import std.exception : enforceEx;
 import std.traits;
 import std.algorithm;
 
@@ -44,7 +43,7 @@ struct FreeListObjectAlloc(T, bool USE_GC = true, bool INIT = true, EXTRA = void
 			auto ret = s_firstFree;
 			s_firstFree = s_firstFree.next;
 			ret.next = null;
-			mem = () @trusted { return (cast(void*)ret)[0 .. ElemSlotSize]; } ();
+			mem = () @trusted { return (cast(void*)ret)[0 .. ElemSize]; } ();
 		} else {
 			//logInfo("alloc %s/%d", T.stringof, ElemSize);
 			mem = Mallocator.instance.allocate(ElemSlotSize);
@@ -52,7 +51,7 @@ struct FreeListObjectAlloc(T, bool USE_GC = true, bool INIT = true, EXTRA = void
 		}
 
 		// FIXME: this emplace has issues with qualified types, but Unqual!T may result in the wrong constructor getting called.
-		static if (INIT) internalEmplace!(Unqual!T)(mem[0 .. ElemSize], args);
+		static if (INIT) internalEmplace!(Unqual!T)(mem, args);
 
 		return () @trusted { return cast(TR)mem.ptr; } ();
 	}
@@ -107,10 +106,10 @@ struct FreeListRef(T, bool INIT = true)
 
 	static FreeListRef opCall(ARGS...)(ARGS args)
 	{
-		FreeListRef ret;
-		ret.m_object = ObjAlloc.alloc!ARGS(args);
-		ret.refCount = 1;
 		//logInfo("refalloc %s/%d", T.stringof, ElemSize);
+		FreeListRef ret;
+		ret.m_object = ObjAlloc.alloc(args);
+		ret.refCount = 1;
 		return ret;
 	}
 
@@ -132,6 +131,8 @@ struct FreeListRef(T, bool INIT = true)
 			this.refCount++;
 		}
 	}
+
+	bool opCast(T)() const if (is(T == bool)) { return m_object !is null; }
 
 	void opAssign(FreeListRef other)
 	{
@@ -159,13 +160,11 @@ struct FreeListRef(T, bool INIT = true)
 		@property inout(T) get() inout @safe nothrow { return m_object; }
 	} else {
 		@property ref inout(T) get() inout @safe nothrow { return *m_object; }
-		void opAssign(T t) { *m_object = t; }
 	}
 	alias get this;
 
 	private @property ref int refCount()
 	const @trusted {
-		assert(m_object !is null);
 		auto ptr = cast(ubyte*)cast(void*)m_object;
 		ptr += ElemSize;
 		return *cast(int*)ptr;
@@ -190,7 +189,7 @@ in {
 	assert((cast(size_t) chunk.ptr) % T.alignof == 0,
 		   format("emplace: Misaligned memory block (0x%X): it must be %s-byte aligned for type %s", &chunk[0], T.alignof, T.stringof));
 
-} body {
+} do {
 	enum classSize = __traits(classInstanceSize, T);
 	auto result = () @trusted { return cast(T) chunk.ptr; } ();
 
@@ -217,7 +216,7 @@ in {
 
 /// Dittor
 private auto internalEmplace(T, Args...)(void[] chunk, auto ref Args args)
-@safe	if (!is(T == class))
+	if (!is(T == class))
 in {
 	import std.string, std.format;
 	assert(chunk.length >= T.sizeof,
@@ -226,7 +225,7 @@ in {
 	assert((cast(size_t) chunk.ptr) % T.alignof == 0,
 		   format("emplace: Misaligned memory block (0x%X): it must be %s-byte aligned for type %s", &chunk[0], T.alignof, T.stringof));
 
-} body {
+} do {
 	return emplace(() @trusted { return cast(T*)chunk.ptr; } (), args);
 }
 

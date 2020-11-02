@@ -18,6 +18,7 @@ for $(D Bucketizer). To handle them separately, $(D Segregator) may be of use.
 struct Bucketizer(Allocator, size_t min, size_t max, size_t step)
 {
     import common = stdx.allocator.common : roundUpToMultipleOf;
+    import std.traits : hasMember;
     import stdx.allocator.internal : Ternary;
 
     static assert((max - (min - 1)) % step == 0,
@@ -71,7 +72,7 @@ struct Bucketizer(Allocator, size_t min, size_t max, size_t step)
     Directs the call to either one of the $(D buckets) allocators. Defined only
     if `Allocator` defines `alignedAllocate`.
     */
-    static if (__traits(hasMember, Allocator, "alignedAllocate"))
+    static if (hasMember!(Allocator, "alignedAllocate"))
     void[] alignedAllocate(size_t bytes, uint a)
     {
         if (!bytes) return null;
@@ -132,7 +133,7 @@ struct Bucketizer(Allocator, size_t min, size_t max, size_t step)
     Similar to `reallocate`, with alignment. Defined only if `Allocator`
     defines `alignedReallocate`.
     */
-    static if (__traits(hasMember, Allocator, "alignedReallocate"))
+    static if (hasMember!(Allocator, "alignedReallocate"))
     bool alignedReallocate(ref void[] b, size_t size, uint a)
     {
         if (size == 0)
@@ -158,7 +159,7 @@ struct Bucketizer(Allocator, size_t min, size_t max, size_t step)
     /**
     Defined only if `Allocator` defines `owns`. Finds the owner of `b` and forwards the call to it.
     */
-    static if (__traits(hasMember, Allocator, "owns"))
+    static if (hasMember!(Allocator, "owns"))
     Ternary owns(void[] b)
     {
         if (!b.ptr) return Ternary.no;
@@ -173,7 +174,7 @@ struct Bucketizer(Allocator, size_t min, size_t max, size_t step)
     /**
     This method is only defined if $(D Allocator) defines $(D deallocate).
     */
-    static if (__traits(hasMember, Allocator, "deallocate"))
+    static if (hasMember!(Allocator, "deallocate"))
     bool deallocate(void[] b)
     {
         if (!b.ptr) return true;
@@ -189,7 +190,7 @@ struct Bucketizer(Allocator, size_t min, size_t max, size_t step)
     deallocateAll), and calls it for each bucket in turn. Returns `true` if all
     allocators could deallocate all.
     */
-    static if (__traits(hasMember, Allocator, "deallocateAll"))
+    static if (hasMember!(Allocator, "deallocateAll"))
     bool deallocateAll()
     {
         bool result = true;
@@ -204,7 +205,7 @@ struct Bucketizer(Allocator, size_t min, size_t max, size_t step)
     This method is only defined if all allocators involved define $(D
     resolveInternalPointer), and tries it for each bucket in turn.
     */
-    static if (__traits(hasMember, Allocator, "resolveInternalPointer"))
+    static if (hasMember!(Allocator, "resolveInternalPointer"))
     Ternary resolveInternalPointer(const void* p, ref void[] result)
     {
         foreach (ref a; buckets)
@@ -219,7 +220,7 @@ struct Bucketizer(Allocator, size_t min, size_t max, size_t step)
 ///
 @system unittest
 {
-    import mir.utility : max;
+    import std.algorithm.comparison : max;
     import stdx.allocator.building_blocks.allocator_list : AllocatorList;
     import stdx.allocator.building_blocks.free_list : FreeList;
     import stdx.allocator.building_blocks.region : Region;
@@ -229,7 +230,7 @@ struct Bucketizer(Allocator, size_t min, size_t max, size_t step)
     Bucketizer!(
         FreeList!(
             AllocatorList!(
-                (size_t n) => Region!Mallocator(max(n, 1024u * 1024))),
+                (size_t n) => Region!Mallocator(max(n, 1024 * 1024))),
             0, unbounded),
         65, 512, 64) a;
     auto b = a.allocate(400);

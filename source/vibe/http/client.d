@@ -1,7 +1,7 @@
 /**
 	A simple HTTP/1.1 client implementation.
 
-	Copyright: © 2012-2014 RejectedSoftware e.K.
+	Copyright: © 2012-2014 Sönke Ludwig
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig, Jan Krüger
 */
@@ -552,6 +552,7 @@ final class HTTPClient {
 		}
 
 		Exception user_exception;
+		while (true)
 		{
 			scope (failure) {
 				m_responding = false;
@@ -562,6 +563,14 @@ final class HTTPClient {
 				logDebug("Error while handling response: %s", e.toString().sanitize());
 				user_exception = e;
 			}
+			if (res.statusCode < 200) {
+				// just an informational status -> read and handle next response
+				if (m_responding) res.dropBody();
+				if (m_conn) {
+					res = scoped!HTTPClientResponse(this, has_body, close_conn, request_allocator, connected_time);
+					continue;
+				}
+			}
 			if (m_responding) {
 				logDebug("Failed to handle the complete response of the server - disconnecting.");
 				res.disconnect();
@@ -570,6 +579,7 @@ final class HTTPClient {
 
 			if (user_exception || res.headers.get("Connection") == "close")
 				disconnect();
+			break;
 		}
 		if (user_exception) throw user_exception;
 	}
@@ -625,7 +635,7 @@ final class HTTPClient {
 		m_requesting = true;
 		scope(exit) m_requesting = false;
 
-		if (!m_conn || !m_conn.connected) {
+		if (!m_conn || !m_conn.connected || m_conn.waitForDataEx(0.seconds) == WaitForDataStatus.noMoreData) {
 			if (m_conn) {
 				m_conn.close(); // make sure all resources are freed
 				m_conn = TCPConnection.init;
@@ -668,7 +678,8 @@ final class HTTPClient {
 					use_dns = true;
 				}
 
-				NetworkAddress proxyAddr = resolveHost(m_settings.proxyURL.host, m_settings.dnsAddressFamily, use_dns);
+				NetworkAddress proxyAddr = resolveHost(m_settings.proxyURL.host, m_settings.dnsAddressFamily, use_dns,
+					m_settings.connectTimeout);
 				proxyAddr.port = m_settings.proxyURL.port;
 				m_conn = connectTCPWithTimeout(proxyAddr, m_settings.networkInterface, m_settings.connectTimeout);
 			}
@@ -690,13 +701,13 @@ final class HTTPClient {
 						() @trusted { strcpy(cast(char*)s.sun_path.ptr,m_server.toStringz()); } ();
 					} else
 					{
-						addr = resolveHost(m_server, m_settings.dnsAddressFamily);
+						addr = resolveHost(m_server, m_settings.dnsAddressFamily, true, m_settings.connectTimeout);
 						addr.port = m_port;
 					}
 					m_conn = connectTCPWithTimeout(addr, m_settings.networkInterface, m_settings.connectTimeout);
 				} else
 				{
-					auto addr = resolveHost(m_server, m_settings.dnsAddressFamily);
+					auto addr = resolveHost(m_server, m_settings.dnsAddressFamily, true, m_settings.connectTimeout);
 					addr.port = m_port;
 					m_conn = connectTCPWithTimeout(addr, m_settings.networkInterface, m_settings.connectTimeout);
 				}

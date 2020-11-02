@@ -1,7 +1,7 @@
 /**
 	A static HTTP file server.
 
-	Copyright: © 2012-2015 RejectedSoftware e.K.
+	Copyright: © 2012-2015 Sönke Ludwig
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig
 */
@@ -119,7 +119,7 @@ unittest {
 
 		auto fsettings = new HTTPFileServerSettings;
 		fsettings.serverPathPrefix = "/static";
-		router.get("static/*", serveStaticFiles("public/", fsettings));
+		router.get("/static/*", serveStaticFiles("public/", fsettings));
 
 		auto settings = new HTTPServerSettings;
 		listenHTTP(settings, router);

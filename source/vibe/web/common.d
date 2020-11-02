@@ -1,7 +1,7 @@
 /**
 	Contains common functionality for the REST and WEB interface generators.
 
-	Copyright: © 2012-2017 RejectedSoftware e.K.
+	Copyright: © 2012-2017 Sönke Ludwig
 	License: Subject to the terms of the MIT license, as written in the included LICENSE.txt file.
 	Authors: Sönke Ludwig, Михаил Страшун
 */
@@ -523,7 +523,7 @@ WebParamAttribute bodyParam(string identifier, string field) @safe
 in {
 	assert(field.length > 0, "fieldname can't be empty.");
 }
-body
+do
 {
 	import vibe.web.internal.rest.common : ParameterKind;
 	if (!__ctfe)
@@ -725,10 +725,10 @@ package ParamResult readFormParamRec(T)(scope HTTPServerRequest req, ref T dst, 
 		alias EL = typeof(T.init[0]);
 		enum isSimpleElement = !(isDynamicArray!EL && !isSomeString!(OriginalType!EL)) &&
 			!isStaticArray!EL &&
-			!(is(T == struct) &&
-					!is(typeof(T.fromString(string.init))) &&
-					!is(typeof(T.fromStringValidate(string.init, null))) &&
-					!is(typeof(T.fromISOExtString(string.init))));
+			!(is(EL == struct) &&
+					!is(typeof(EL.fromString(string.init))) &&
+					!is(typeof(EL.fromStringValidate(string.init, null))) &&
+					!is(typeof(EL.fromISOExtString(string.init))));
 
 		static if (isStaticArray!T)
 		{
@@ -956,6 +956,30 @@ unittest {
 	result = req.readFormParamRec(arr, "arr", false, NestedNameStyle.d, err);
 	assert(result == ParamResult.ok);
 	assert(arr.length == 0);
+}
+
+unittest { // complex array parameters
+	import vibe.http.server;
+	import vibe.inet.url;
+
+	static struct S {
+		int a, b;
+	}
+
+	S[] arr;
+	ParamError err;
+
+	// d style
+	auto req = createTestHTTPServerRequest(URL("http://localhost/route?arr[0].a=1&arr[0].b=2"));
+	auto result = req.readFormParamRec(arr, "arr", false, NestedNameStyle.d, err);
+	assert(result == ParamResult.ok);
+	assert(arr == [S(1, 2)]);
+
+	// underscore style
+	req = createTestHTTPServerRequest(URL("http://localhost/route?arr_0_a=1&arr_0_b=2"));
+	result = req.readFormParamRec(arr, "arr", false, NestedNameStyle.underscore, err);
+	assert(result == ParamResult.ok);
+	assert(arr == [S(1, 2)]);
 }
 
 package bool webConvTo(T)(string str, ref T dst, ref ParamError err)
