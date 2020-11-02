@@ -196,7 +196,7 @@ package final class Libevent2TCPConnection : TCPConnection {
 		scope (exit) cleanup();
 
 		if (m_ctx.event) {
-			logDiagnostic("Actively closing TCP connection");
+			logTrace("Actively closing TCP connection");
 			auto fd = m_ctx.socketfd;
 
 			scope (exit) () @trusted {

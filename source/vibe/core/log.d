@@ -32,7 +32,10 @@ nothrow @safe {
 		ss_stdoutLogger.lock().minLevel = level;
 }
 
-
+LogLevel getLogLevel()
+nothrow @safe {
+	return ss_stdoutLogger ? ss_stdoutLogger.lock().minLevel : LogLevel.none;
+}
 /**
 	Sets the log format used for the default console logger.
 
