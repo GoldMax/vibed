@@ -1,6 +1,6 @@
 [General]
 CompilePriority=1000
-ExtraArgs="-version=EventcoreEpollDriver"
+ExtraArgs="-version=EventcoreEpollDriver -version=VibeUseOpenSSL11 -version=Have_openssl"
 Includes=
 Libs=crypto ssl
 SourceRoot=source
