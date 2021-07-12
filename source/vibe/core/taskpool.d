@@ -27,6 +27,7 @@ shared final class TaskPool {
 			TaskQueue queue;
 			bool term;
 		}
+		static import vibe.core.sync;
 		vibe.core.sync.Monitor!(State, shared(Mutex)) m_state;
 		shared(ManualEvent) m_signal;
 		immutable size_t m_threadCount;
