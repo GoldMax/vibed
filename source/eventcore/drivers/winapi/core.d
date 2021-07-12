@@ -45,12 +45,7 @@ final class WinAPIEventDriverCore : EventDriverCore {
 		m_fileCompletionEvent = () @trusted { return CreateEventW(null, false, false, null); } ();
 		registerEvent(m_fileCompletionEvent);
 		m_ioEvents = mallocT!(ConsumableQueue!IOEvent);
-
-		static if (__VERSION__ >= 2074)
-			m_threadCallbackMutex = mallocT!(shared(Mutex));
-		else {
-			() @trusted { m_threadCallbackMutex = cast(shared)mallocT!Mutex; } ();
-		}
+        m_threadCallbackMutex = mallocT!(shared(Mutex));
 		m_threadCallbacks = mallocT!(ConsumableQueue!ThreadCallbackEntry);
 		m_threadCallbacks.reserve(1000);
 	}
@@ -217,10 +212,10 @@ final class WinAPIEventDriverCore : EventDriverCore {
 		/*if (ret == WAIT_OBJECT_0) {
 			got_event = true;
 			Win32TCPConnection[] to_remove;
-			foreach( fw; m_fileWriters.byKey )
-				if( fw.testFileWritten() )
+			foreach (fw; m_fileWriters.byKey)
+				if (fw.testFileWritten())
 					to_remove ~= fw;
-			foreach( fw; to_remove )
+			foreach (fw; to_remove)
 			m_fileWriters.remove(fw);
 		}*/
 

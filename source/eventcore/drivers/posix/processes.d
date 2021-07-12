@@ -135,6 +135,7 @@ final class PosixEventDriverProcesses(Loop : PosixEventLoop) : EventDriverProces
 				stderrFile = stdoutFile;
 			}
 
+			static import std.process;
 			Pid stdPid = spawnProcess(
 				args,
 				stdinFile,

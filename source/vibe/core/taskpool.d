@@ -10,7 +10,7 @@ module vibe.core.taskpool;
 import vibe.core.concurrency : isWeaklyIsolated;
 import vibe.core.core : exitEventLoop, logicalProcessorCount, runEventLoop, runTask, runTask_internal;
 import vibe.core.log;
-import vibe.core.sync : ManualEvent, Monitor, createSharedManualEvent, createMonitor;
+import vibe.core.sync : ManualEvent, VibeSyncMonitor = Monitor, createSharedManualEvent, createMonitor;
 import vibe.core.task : Task, TaskFuncInfo, TaskSettings, callWithMove;
 import core.sync.mutex : Mutex;
 import core.thread : Thread;
@@ -27,8 +27,7 @@ shared final class TaskPool {
 			TaskQueue queue;
 			bool term;
 		}
-		static import vibe.core.sync;
-		vibe.core.sync.Monitor!(State, shared(Mutex)) m_state;
+		VibeSyncMonitor!(State, shared(Mutex)) m_state;
 		shared(ManualEvent) m_signal;
 		immutable size_t m_threadCount;
 	}
@@ -347,7 +346,16 @@ private final class WorkerThread : Thread {
 		try {
 			if (m_pool.m_state.lock.term) return;
 			logDebug("entering worker thread");
-			handleWorkerTasks();
+
+			// There is an issue where a task that periodically calls yield()
+			// but otherwise only performs a CPU computation will cause a
+			// call to runEventLoopOnce() or yield() called from the global
+			// thread context to not return before the task is finished. For
+			// this reason we start a task here, which in turn is scheduled
+			// properly together with such a task, and also is schduled
+			// according to the task priorities.
+			runTask(&handleWorkerTasks).joinUninterruptible();
+
 			logDebug("Worker thread exit.");
 		} catch (Throwable th) {
 			th.logException!(LogLevel.fatal)("Worker thread terminated due to uncaught error");

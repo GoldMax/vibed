@@ -132,21 +132,22 @@ struct ScopedMutexLock(M)
 	@property bool locked() const { return m_locked; }
 
 	void unlock()
-	{
+	in { assert(this.locked); }
+	do {
 		enforce(m_locked);
 		m_mutex.unlock();
 		m_locked = false;
 	}
 
 	bool tryLock()
-	{
-		enforce(!m_locked);
+	in { assert(!this.locked); }
+	do {
 		return m_locked = m_mutex.tryLock();
 	}
 
 	void lock()
-	{
-		enforce(!m_locked);
+	in { assert(!this.locked); }
+	do {
 		m_locked = true;
 		m_mutex.lock();
 	}
@@ -210,7 +211,7 @@ final class LocalTaskSemaphore
 		LocalManualEvent m_signal;
 	}
 
-	this(uint max_locks)
+	this(uint max_locks) nothrow
 	{
 		m_maxLocks = max_locks;
 		m_signal = createManualEvent();
@@ -326,8 +327,8 @@ final class TaskMutex : core.sync.mutex.Mutex, Lockable {
 @safe:
 	private TaskMutexImpl!false m_impl;
 
-	this(Object o) { m_impl.setup(); super(o); }
-	this() { m_impl.setup(); }
+	this(Object o) nothrow { m_impl.setup(); super(o); }
+	this() nothrow { m_impl.setup(); }
 
 	override bool tryLock() nothrow { return m_impl.tryLock(); }
 	override void lock() nothrow { m_impl.lock(); }
@@ -1024,7 +1025,7 @@ struct ManualEvent {
 	shared nothrow @trusted {
 		import core.atomic : atomicOp, cas;
 
-		() @trusted { logTrace("emit shared %s", cast(void*)&this); } ();
+		debug (VibeMutexLog) () @trusted { logTrace("emit shared %s", cast(void*)&this); } ();
 
 		auto ec = atomicOp!"+="(m_emitCount, 1);
 		auto thisthr = Thread.getThis();
@@ -1032,7 +1033,7 @@ struct ManualEvent {
 		ThreadWaiter lw;
 		auto drv = eventDriver;
 		m_waiters.lock.active.filter((ThreadWaiter w) {
-			() @trusted { logTrace("waiter %s", cast(void*)w); } ();
+			debug (VibeMutexLog) () @trusted { logTrace("waiter %s", cast(void*)w); } ();
 			if (w.m_driver is drv) {
 				lw = w;
 				lw.addRef();
@@ -1044,13 +1045,13 @@ struct ManualEvent {
 			}
 			return true;
 		});
-		() @trusted { logTrace("lw %s", cast(void*)lw); } ();
+		debug (VibeMutexLog) () @trusted { logTrace("lw %s", cast(void*)lw); } ();
 		if (lw) {
 			lw.emit();
 			releaseWaiter(lw);
 		}
 
-		logTrace("emit shared done");
+		debug (VibeMutexLog) logTrace("emit shared done");
 
 		return ec;
 	}

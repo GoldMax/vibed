@@ -13,9 +13,8 @@ module stdx.allocator.typed;
 
 import stdx.allocator;
 import stdx.allocator.common;
-import std.range : isInputRange, isForwardRange, walkLength, save, empty,
+import std.range.primitives : isInputRange, isForwardRange, save, empty,
     front, popFront;
-import std.traits : isPointer, hasElaborateDestructor;
 import std.typecons : Flag, Yes, No;
 
 /**
@@ -403,11 +402,11 @@ struct TypedAllocator(PrimaryAllocator, Policies...)
             MmapAllocator,
     );
     MyAllocator a;
-    auto b = &a.allocatorFor!0();
-    static assert(is(typeof(*b) == shared GCAllocator));
+    auto b = a.allocatorFor!0();
+    static assert(is(typeof(b) == GCAllocator));
     enum f1 = AllocFlag.fixedSize | AllocFlag.threadLocal;
-    auto c = &a.allocatorFor!f1();
-    static assert(is(typeof(*c) == Mallocator));
+    auto c = a.allocatorFor!f1();
+    static assert(is(typeof(c) == Mallocator));
     enum f2 = AllocFlag.fixedSize | AllocFlag.threadLocal;
     static assert(is(typeof(a.allocatorFor!f2()) == Mallocator));
     // Partial match

@@ -428,6 +428,7 @@ package Task runTask_internal(alias TFI_SETUP)()
 		() @trusted { TaskFiber.ms_taskEventCallback(TaskEvent.preStart, handle); } ();
 	}
 
+	debug (VibeTaskLog) logTrace("Switching to newly created task");
 	switchToTask(handle);
 
 	debug if (TaskFiber.ms_taskEventCallback) {
@@ -720,6 +721,18 @@ public void setupWorkerThreads(uint num = logicalProcessorCount())
 }
 
 
+/** Returns the default worker task pool.
+
+	This pool is used by `runWorkerTask`, `runWorkerTaskH` and
+	`runWorkerTaskDist`.
+*/
+@property shared(TaskPool) workerTaskPool()
+{
+	setupWorkerThreads();
+	return st_workerPool;
+}
+
+
 /**
 	Determines the number of logical processors in the system.
 
@@ -838,6 +851,22 @@ void switchToTask(Task t, TaskSwitchPriority priority)
 	wait time, in contrast to $(D core.thread.Thread.sleep), which shouldn't be
 	used in vibe.d applications.
 
+	Repeated_sleep:
+	  As this method creates a new `Timer` every time, it is not recommended to
+	  use it in a tight loop. For functions that calls `sleep` frequently,
+	  it is preferable to instantiate a single `Timer` and reuse it,
+	  as shown in the following example:
+	  ---
+	  void myPollingFunction () {
+		  Timer waiter = createTimer(null); // Create a re-usable timer
+		  while (true) {
+			  // Your awesome code goes here
+			  timer.rearm(timeout, false);
+			  timer.wait();
+		  }
+	  }
+	  ---
+
 	Throws: May throw an `InterruptException` if the task gets interrupted using
 		`Task.interrupt()`.
 */
@@ -864,18 +893,67 @@ unittest {
 
 
 /**
-	Returns a new armed timer.
+	Creates a new timer, that will fire `callback` after `timeout`
 
-	Note that timers can only work if an event loop is running, explicitly or
-	implicitly by running a blocking operation, such as `sleep` or `File.read`.
+	Timers can be be separated into two categories: one-off or periodic.
+	One-off timers fire only once, after a specific amount of time,
+	while periodic timer fire at a regular interval.
+
+	One-off_timers:
+	One-off timers can be used for performing a task after a specific delay,
+	or to schedule a time without interrupting the currently running code.
+	For example, the following is a way to emulate a 'schedule' primitive,
+	a way to schedule a task without starting it immediately (unlike `runTask`):
+	---
+	void handleRequest (scope HTTPServerRequest req, scope HTTPServerResponse res) {
+		Payload payload = parse(req);
+		if (payload.isValid())
+		  // Don't immediately yield, finish processing the data and the query
+		  setTimer(0.msecs, () => sendToPeers(payload));
+		process(payload);
+		res.writeVoidBody();
+	}
+	---
+
+	In this example, the server delays the network communication that
+	will be	 performed by `sendToPeers` until after the request is fully
+	processed, ensuring the client doesn't wait more than the actual processing
+	time for the response.
+
+	Periodic_timers:
+	Periodic timers will trigger for the first time after `timeout`,
+	then at best every `timeout` period after this. Periodic timers may be
+	explicitly stopped by calling the `Timer.stop()` method on the return value
+	of this function.
+
+	As timer are non-preemtive (see the "Preemption" section), user code does
+	not need to compensate for time drift, as the time spent in the function
+	will not affect the frequency, unless the function takes longer to complete
+	than the timer.
+
+	Preemption:
+	Like other events in Vibe.d, timers are non-preemptive, meaning that
+	the currently executing function will not be interrupted to let a timer run.
+	This is usually not a problem in server applications, as any blocking code
+	will be easily noticed (the server will stop to handle requests), but might
+	come at a surprise in code that doesn't handle request.
+	If this is a problem, the solution is usually to either explicitly give
+	control to the event loop (by calling `yield`) or ensuring operations are
+	asynchronous (e.g. call functions from `vibe.core.file` instead of `std.file`).
+
+	Reentrancy:
+	The event loop guarantees that the same timer will never be called more than
+	once at a time. Hence, functions run on a timer do not need to be re-entrant,
+	even if they execute for longer than the timer frequency.
 
 	Params:
 		timeout = Determines the minimum amount of time that elapses before the timer fires.
-		callback = If non-`null`, this delegate will be called when the timer fires
+		callback = A delegate to be called when the timer fires. Can be `null`,
+				   in which case the timer will not do anything.
 		periodic = Speficies if the timer fires repeatedly or only once
 
 	Returns:
-		Returns a Timer object that can be used to identify and modify the timer.
+		Returns a `Timer` object that can be used to identify and modify the timer.
 
 	See_also: `createTimer`
 */
@@ -912,6 +990,28 @@ Timer setTimer(Duration timeout, void delegate() callback, bool periodic = false
 	}, periodic);
 }
 
+unittest { // make sure that periodic timer calls never overlap
+	int ccount = 0;
+	int fcount = 0;
+	Timer tm;
+
+	tm = setTimer(10.msecs, {
+		ccount++;
+		scope (exit) ccount--;
+		assert(ccount == 1); // no concurrency allowed
+		assert(fcount < 5);
+		sleep(100.msecs);
+		if (++fcount >= 5)
+			tm.stop();
+	}, true);
+
+	while (tm.pending) sleep(50.msecs);
+
+	sleep(50.msecs);
+
+	assert(fcount == 5);
+}
+
 
 /** Creates a new timer without arming it.
 
@@ -927,8 +1027,34 @@ Timer setTimer(Duration timeout, void delegate() callback, bool periodic = false
 Timer createTimer(void delegate() nothrow @safe callback = null)
 @safe nothrow {
 	static struct C {
-		void delegate() nothrow @safe callback;
-		void opCall() nothrow @safe { runTask(callback); }
+		void delegate() nothrow @safe m_callback;
+		bool m_running = false;
+		bool m_pendingFire = false;
+
+		void opCall(Timer tm)
+		nothrow @safe {
+			if (m_running) {
+				m_pendingFire = true;
+				return;
+			}
+
+			m_running = true;
+
+			runTask((Timer tm) nothrow {
+				assert(m_running);
+				scope (exit) m_running = false;
+
+				do {
+					m_pendingFire = false;
+					m_callback();
+
+					// make sure that no callbacks are fired after the timer
+					// has been actively stopped
+					if (m_pendingFire && !tm.pending)
+						m_pendingFire = false;
+				} while (m_pendingFire);
+			}, tm);
+		}
 	}
 
 	if (callback) {
@@ -956,7 +1082,8 @@ Timer createTimer(void delegate() nothrow @safe callback = null)
 	See_also: `createTimer`
 */
 Timer createLeanTimer(CALLABLE)(CALLABLE callback)
-	if (is(typeof(() @safe nothrow { callback(); } ())))
+	if (is(typeof(() @safe nothrow { callback(); } ()))
+		|| is(typeof(() @safe nothrow { callback(Timer.init); } ())))
 {
 	return Timer.create(eventDriver.timers.create(), callback);
 }
@@ -1102,7 +1229,7 @@ void setTaskCreationCallback(TaskCreationCallback func)
 /**
 	A version string representing the current vibe.d core version
 */
-enum vibeVersionString = "1.10.1 (0.9.2)";
+enum vibeVersionString = "1.16.0";
 
 
 /**
@@ -1283,9 +1410,15 @@ private struct TimerCallbackHandler(CALLABLE) {
 	void handle(TimerID timer, bool fired)
 	@safe nothrow {
 		if (fired) {
-			auto cb = eventDriver.timers.userData!CALLABLE(timer);
 			auto l = yieldLock();
-			cb();
+			auto cb = () @trusted { return &eventDriver.timers.userData!CALLABLE(timer); } ();
+			static if (is(typeof(CALLABLE.init(Timer.init)))) {
+				Timer tm;
+				tm.m_driver = eventDriver;
+				tm.m_id = timer;
+				eventDriver.timers.addRef(timer);
+				(*cb)(tm);
+			} else (*cb)();
 		}
 
 		if (!eventDriver.timers.isUnique(timer) || eventDriver.timers.isPending(timer))
@@ -1368,6 +1501,8 @@ private void setupGcTimer()
 
 package(vibe) void performIdleProcessing(bool force_process_events = false)
 @safe nothrow {
+	debug (VibeTaskLog) logTrace("Performing idle processing...");
+
 	bool again = !getExitFlag();
 	while (again) {
 		again = performIdleProcessingOnce(force_process_events);

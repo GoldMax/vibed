@@ -256,7 +256,7 @@ struct Json {
 		Allows assignment of D values to a JSON value.
 	*/
 	ref Json opAssign(Json v) return
-	{
+	nothrow {
 		if (v.type != Type.bigInt)
 			runDestructors();
 		auto old_type = m_type;
@@ -279,16 +279,16 @@ struct Json {
 		return this;
 	}
 	/// ditto
-	void opAssign(typeof(null)) { runDestructors(); m_type = Type.null_; m_string = null; }
+	void opAssign(typeof(null)) nothrow { runDestructors(); m_type = Type.null_; m_string = null; }
 	/// ditto
-	bool opAssign(bool v) { runDestructors(); m_type = Type.bool_; m_bool = v; return v; }
+	bool opAssign(bool v) nothrow { runDestructors(); m_type = Type.bool_; m_bool = v; return v; }
 	/// ditto
-	int opAssign(int v) { runDestructors(); m_type = Type.int_; m_int = v; return v; }
+	int opAssign(int v) nothrow { runDestructors(); m_type = Type.int_; m_int = v; return v; }
 	/// ditto
-	long opAssign(long v) { runDestructors(); m_type = Type.int_; m_int = v; return v; }
+	long opAssign(long v) nothrow { runDestructors(); m_type = Type.int_; m_int = v; return v; }
 	/// ditto
 	BigInt opAssign(BigInt v)
-	{
+	nothrow {
 		if (m_type != Type.bigInt)
 			initBigInt();
 		m_type = Type.bigInt;
@@ -296,32 +296,39 @@ struct Json {
 		return v;
 	}
 	/// ditto
-	double opAssign(double v) { runDestructors(); m_type = Type.float_; m_float = v; return v; }
+	double opAssign(double v) nothrow { runDestructors(); m_type = Type.float_; m_float = v; return v; }
 	/// ditto
-	string opAssign(string v) { runDestructors(); m_type = Type.string; m_string = v; return v; }
+	string opAssign(string v) nothrow { runDestructors(); m_type = Type.string; m_string = v; return v; }
 	/// ditto
-	Json[] opAssign(Json[] v) {
+	Json[] opAssign(Json[] v) nothrow {
 		runDestructors();
 		m_type = Type.array;
 		m_array = v;
 		version (VibeJsonFieldNames) {
-			foreach (idx, ref av; m_array)
-				av.m_name = format("%s[%s]", m_name, idx);
+			try {
+				foreach (idx, ref av; m_array)
+					av.m_name = format("%s[%s]", m_name, idx);
+			} catch (Exception e) assert(false, e.msg);
 		}
 		return v;
 	}
 	/// ditto
 	Json[string] opAssign(Json[string] v)
-	{
+	nothrow {
 		runDestructors();
 		m_type = Type.object;
 		m_object = v;
-		version (VibeJsonFieldNames) { foreach (key, ref av; m_object) av.m_name = format("%s.%s", m_name, key); }
+		version (VibeJsonFieldNames) {
+			try {
+				foreach (key, ref av; m_object)
+					av.m_name = format("%s.%s", m_name, key);
+			} catch (Exception e) assert(false, e.msg);
+		}
 		return v;
 	}
 
 	// used internally for UUID serialization support
-	private UUID opAssign(UUID v) { opAssign(v.toString()); return v; }
+	private UUID opAssign(UUID v) nothrow { opAssign(v.toString()); return v; }
 
 	/**
 		Allows removal of values from Type.Object Json objects.
@@ -331,13 +338,13 @@ struct Json {
 	/**
 		The current type id of this JSON object.
 	*/
-	@property Type type() const @safe { return m_type; }
+	@property Type type() const @safe nothrow { return m_type; }
 
 	/**
 		Clones a JSON value recursively.
 	*/
 	Json clone()
-	const {
+	const nothrow {
 		final switch (m_type) {
 			case Type.undefined: return Json.undefined;
 			case Type.null_: return Json(null);
@@ -348,13 +355,13 @@ struct Json {
 			case Type.string: return Json(m_string);
 			case Type.array:
 				Json[] ret;
-				foreach (v; this.byValue) ret ~= v.clone();
-
+				foreach (v; m_array) ret ~= v.clone();
 				return Json(ret);
 			case Type.object:
-				auto ret = Json.emptyObject;
-				foreach (name, v; this.byKeyValue) ret[name] = v.clone();
-				return ret;
+				Json[string] ret;
+				foreach (kv; m_object.byKeyValue)
+					ret[kv.key] = kv.value.clone();
+				return Json(ret);
 		}
 	}
 
@@ -530,7 +537,8 @@ struct Json {
 	/// ditto
 	@property auto byIndexValue() const { checkType!(Json[])("byIndexValue"); return zip(iota(0, m_array.length), m_array); }
 	/// Iterates over all values of an object or array.
-	@property auto byValue() @trusted {
+	@property auto byValue()
+	@trusted {
 		checkType!(Json[], Json[string])("byValue");
 		static struct Rng {
 			private {
@@ -539,16 +547,17 @@ struct Json {
 				typeof(Json.init.m_object.byValue) object;
 			}
 
-			bool empty() @trusted { if (isArray) return array.length == 0; else return object.empty; }
-			auto front() @trusted { if (isArray) return array[0]; else return object.front; }
-			void popFront() @trusted { if (isArray) array = array[1 .. $]; else object.popFront(); }
+			bool empty() @trusted nothrow { if (isArray) return array.length == 0; else return object.empty; }
+			auto front() @trusted nothrow { if (isArray) return array[0]; else return object.front; }
+			void popFront() @trusted nothrow { if (isArray) array = array[1 .. $]; else object.popFront(); }
 		}
 
 		if (m_type == Type.array) return Rng(true, m_array);
 		else return Rng(false, null, m_object.byValue);
 	}
 	/// ditto
-	@property auto byValue() const @trusted {
+	@property auto byValue()
+	const @trusted {
 		checkType!(Json[], Json[string])("byValue");
 		static struct Rng {
 		@safe:
@@ -558,9 +567,9 @@ struct Json {
 				typeof(const(Json).init.m_object.byValue) object;
 			}
 
-			bool empty() @trusted { if (isArray) return array.length == 0; else return object.empty; }
-			auto front() @trusted { if (isArray) return array[0]; else return object.front; }
-			void popFront() @trusted { if (isArray) array = array[1 .. $]; else object.popFront(); }
+			bool empty() @trusted nothrow { if (isArray) return array.length == 0; else return object.empty; }
+			auto front() @trusted nothrow { if (isArray) return array[0]; else return object.front; }
+			void popFront() @trusted nothrow { if (isArray) array = array[1 .. $]; else object.popFront(); }
 		}
 
 		if (m_type == Type.array) return Rng(true, m_array);
@@ -1207,7 +1216,7 @@ struct Json {
 	}
 
 	private void runDestructors()
-	{
+	nothrow {
 		if (m_type != Type.bigInt) return;
 
 		BigInt init_;
@@ -1251,7 +1260,7 @@ struct Json {
 	Throws a JSONException if any parsing error occured.
 */
 Json parseJson(R)(ref R range, int* line = null, string filename = null)
-	if( is(R == string) )
+	if (isForwardRange!R)
 {
 	Json ret;
 	enforceJson(!range.empty, "JSON string is empty.", filename, 0);
@@ -1267,17 +1276,20 @@ Json parseJson(R)(ref R range, int* line = null, string filename = null)
 	bool minus = false;
 	switch( range.front ){
 		case 'f':
-			enforceJson(range[1 .. $].startsWith("alse"), "Expected 'false', got '"~range[0 .. min(5, $)]~"'.", filename, line);
+			enforceJson(range.save.dropOne.startsWith("alse"),
+				"Expected 'false', got '"~range.take(5).to!string~"'.", filename, line);
 			range.popFrontN(5);
 			ret = false;
 			break;
 		case 'n':
-			enforceJson(range[1 .. $].startsWith("ull"), "Expected 'null', got '"~range[0 .. min(4, $)]~"'.", filename, line);
+			enforceJson(range.save.dropOne.startsWith("ull"),
+				"Expected 'null', got '"~range.take(4).to!string~"'.", filename, line);
 			range.popFrontN(4);
 			ret = null;
 			break;
 		case 't':
-			enforceJson(range[1 .. $].startsWith("rue"), "Expected 'true', got '"~range[0 .. min(4, $)]~"'.", filename, line);
+			enforceJson(range.save.dropOne.startsWith("rue"),
+				"Expected 'true', got '"~range.take(4).to!string~"'.", filename, line);
 			range.popFrontN(4);
 			ret = true;
 			break;
@@ -1341,7 +1353,7 @@ Json parseJson(R)(ref R range, int* line = null, string filename = null)
 			ret = obj;
 			break;
 		default:
-			enforceJson(false, format("Expected valid JSON token, got '%s'.", range[0 .. min(12, $)]), filename, line);
+			enforceJson(false, format("Expected valid JSON token, got '%s'.", range.take(12)), filename, line);
 			assert(false);
 	}
 
@@ -1349,6 +1361,24 @@ Json parseJson(R)(ref R range, int* line = null, string filename = null)
 	version(JsonLineNumbers) ret.line = curline;
 	return ret;
 }
+
+
+unittest { // ensure parseJson works with a generic forward range
+	static struct R {
+		const(char)[] text;
+
+		@property char front() { return text[0]; }
+		@property R save() { return this; }
+		@property bool empty() const { return text.length == 0; }
+		void popFront() { text = text[1 .. $]; }
+	}
+
+	auto r = R(`{"i":42, "s": "foo"}`);
+	auto j = parseJson(r);
+	assert(j["i"] == 42);
+	assert(j["s"] == "foo");
+}
+
 
 /**
 	Parses the given JSON string and returns the corresponding Json object.
@@ -1547,7 +1577,7 @@ T deserializeJson(T)(Json src)
 }
 /// ditto
 T deserializeJson(T, R)(R input)
-	if (!is(R == Json) && isInputRange!R)
+	if (!is(R == Json) && isForwardRange!R)
 {
 	return deserialize!(JsonStringSerializer!R, T)(input);
 }
@@ -1977,6 +2007,27 @@ struct JsonStringSerializer(R, bool pretty = false)
 			} else static assert(false, "Unsupported type: " ~ UT.stringof);
 		}
 
+		void writeStringSinkValue(Traits, T)(scope auto ref T value)
+		{
+			void sink(scope const(char)[] str) {
+				m_range.jsonEscape(str);
+			}
+
+			final class R {
+				void put(char ch) { put(() @trusted { return (&ch)[0 .. 1]; } ()); }
+				void put(scope const(char)[] str) { m_range.jsonEscape(str); }
+			}
+
+			m_range.put('"');
+			static if (__traits(compiles, value.toString((scope s) => sink(s)))) {
+				value.toString((scope s) => sink(s));
+			} else {
+				scope r = new R;
+				value.toString(r);
+			}
+			m_range.put('"');
+		}
+
 		private void startComposite()
 		{
 			static if (pretty) m_level++;
@@ -2137,6 +2188,18 @@ struct JsonStringSerializer(R, bool pretty = false)
 			return true;
 		}
 	}
+}
+
+unittest {
+	static assert(doesSerializerSupportStringSink!(JsonStringSerializer!(Appender!string)));
+
+	auto app = appender!string;
+	auto ser = JsonStringSerializer!(Appender!string)(app);
+	static struct T1 { void toString(scope void delegate(scope const(char)[])) {} }
+	static struct T2 { void toString(R)(scope ref R dst) { dst.put('f'); dst.put("foo"); } }
+
+	ser.writeStringSinkValue!void(T1.init);
+	ser.writeStringSinkValue!void(T2.init);
 }
 
 /// Cloning JSON arrays

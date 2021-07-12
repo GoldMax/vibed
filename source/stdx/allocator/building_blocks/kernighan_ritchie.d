@@ -3,7 +3,6 @@ module stdx.allocator.building_blocks.kernighan_ritchie;
 import stdx.allocator.building_blocks.null_allocator;
 
 //debug = KRRegion;
-version(unittest) import std.conv : text;
 debug(KRRegion) import std.stdio;
 
 // KRRegion
@@ -96,12 +95,13 @@ information is available in client code at deallocation time.)
 struct KRRegion(ParentAllocator = NullAllocator)
 {
     import stdx.allocator.common : stateSize, alignedAt;
-    import std.traits : hasMember;
     import stdx.allocator.internal : Ternary;
 
     private static struct Node
     {
-        import std.typecons : tuple, Tuple;
+        import mir.functional : RefTuple;
+
+        alias Tuple = RefTuple!(void[], Node*);
 
         Node* next;
         size_t size;
@@ -136,7 +136,7 @@ struct KRRegion(ParentAllocator = NullAllocator)
             return true;
         }
 
-        Tuple!(void[], Node*) allocateHere(size_t bytes)
+        Tuple allocateHere(size_t bytes)
         {
             assert(bytes >= Node.sizeof);
             assert(bytes % Node.alignof == 0);
@@ -153,11 +153,11 @@ struct KRRegion(ParentAllocator = NullAllocator)
                 newNode.size = leftover;
                 newNode.next = next == &this ? newNode : next;
                 assert(next);
-                return tuple(payload, newNode);
+                return Tuple(payload, newNode);
             }
 
             // No slack space, just return next node
-            return tuple(payload, next == &this ? null : next);
+            return Tuple(payload, next == &this ? null : next);
         }
     }
 
@@ -193,7 +193,7 @@ struct KRRegion(ParentAllocator = NullAllocator)
         return Range(root, root);
     }
 
-    string toString()
+    string toString()()
     {
         import std.format : format;
         string s = "KRRegion@";
@@ -343,7 +343,7 @@ struct KRRegion(ParentAllocator = NullAllocator)
 
     /// Ditto
     static if (!is(ParentAllocator == NullAllocator)
-        && hasMember!(ParentAllocator, "deallocate"))
+        && __traits(hasMember, ParentAllocator, "deallocate"))
     ~this()
     {
         parent.deallocate(payload);
@@ -639,17 +639,17 @@ it actually returns memory to the operating system when possible.
 */
 @system unittest
 {
-    import std.algorithm.comparison : max;
+    import mir.utility : max;
     import stdx.allocator.building_blocks.allocator_list
         : AllocatorList;
     import stdx.allocator.gc_allocator : GCAllocator;
     import stdx.allocator.mmap_allocator : MmapAllocator;
-    AllocatorList!(n => KRRegion!MmapAllocator(max(n * 16, 1024 * 1024))) alloc;
+    AllocatorList!(n => KRRegion!MmapAllocator(max(n * 16, 1024u * 1024))) alloc;
 }
 
 @system unittest
 {
-    import std.algorithm.comparison : max;
+    import mir.utility : max;
     import stdx.allocator.building_blocks.allocator_list
         : AllocatorList;
     import stdx.allocator.gc_allocator : GCAllocator;
@@ -660,7 +660,7 @@ it actually returns memory to the operating system when possible.
     from the garbage-collected heap. Each block is organized as a KR-style
     heap. More blocks are allocated and freed on a need basis.
     */
-    AllocatorList!(n => KRRegion!Mallocator(max(n * 16, 1024 * 1024)),
+    AllocatorList!(n => KRRegion!Mallocator(max(n * 16, 1024u * 1024)),
         NullAllocator) alloc;
     void[][50] array;
     foreach (i; 0 .. array.length)
@@ -682,7 +682,7 @@ it actually returns memory to the operating system when possible.
 
 @system unittest
 {
-    import std.algorithm.comparison : max;
+    import mir.utility : max;
     import stdx.allocator.building_blocks.allocator_list
         : AllocatorList;
     import stdx.allocator.gc_allocator : GCAllocator;
@@ -694,7 +694,7 @@ it actually returns memory to the operating system when possible.
     heap. More blocks are allocated and freed on a need basis.
     */
     AllocatorList!((n) {
-        auto result = KRRegion!MmapAllocator(max(n * 2, 1024 * 1024));
+        auto result = KRRegion!MmapAllocator(max(n * 2, 1024u * 1024));
         return result;
     }) alloc;
     void[][99] array;
@@ -720,20 +720,20 @@ it actually returns memory to the operating system when possible.
 
 @system unittest
 {
-    import std.algorithm.comparison : max;
+    import mir.utility : max;
     import stdx.allocator.building_blocks.allocator_list
         : AllocatorList;
     import stdx.allocator.common : testAllocator;
     import stdx.allocator.gc_allocator : GCAllocator;
     testAllocator!(() => AllocatorList!(
-        n => KRRegion!GCAllocator(max(n * 16, 1024 * 1024)))());
+        n => KRRegion!GCAllocator(max(n * 16, 1024u * 1024)))());
 }
 
 @system unittest
 {
     import stdx.allocator.gc_allocator : GCAllocator;
 
-    auto alloc = KRRegion!GCAllocator(1024 * 1024);
+    auto alloc = KRRegion!GCAllocator(1024u * 1024);
 
     void[][] array;
     foreach (i; 1 .. 4)
@@ -744,20 +744,21 @@ it actually returns memory to the operating system when possible.
     alloc.deallocate(array[1]);
     alloc.deallocate(array[0]);
     alloc.deallocate(array[2]);
-    assert(alloc.allocateAll().length == 1024 * 1024);
+    assert(alloc.allocateAll().length == 1024u * 1024);
 }
 
 @system unittest
 {
+    import std.conv : text;
     import stdx.allocator.gc_allocator : GCAllocator;
     import stdx.allocator.internal : Ternary;
     auto alloc = KRRegion!()(
-                    cast(ubyte[])(GCAllocator.instance.allocate(1024 * 1024)));
+                    cast(ubyte[])(GCAllocator.instance.allocate(1024u * 1024)));
     const store = alloc.allocate(KRRegion!().sizeof);
     auto p = cast(KRRegion!()* ) store.ptr;
     import core.stdc.string : memcpy;
     import std.algorithm.mutation : move;
-    import std.conv : emplace;
+    import mir.conv : emplace;
 
     memcpy(p, &alloc, alloc.sizeof);
     emplace(&alloc);
@@ -778,19 +779,19 @@ it actually returns memory to the operating system when possible.
         p.deallocate(array[i]);
     }
     auto b = p.allocateAll();
-    assert(b.length == 1024 * 1024 - KRRegion!().sizeof, text(b.length));
+    assert(b.length == 1024u * 1024 - KRRegion!().sizeof, text(b.length));
 }
 
 @system unittest
 {
     import stdx.allocator.gc_allocator : GCAllocator;
     auto alloc = KRRegion!()(
-                    cast(ubyte[])(GCAllocator.instance.allocate(1024 * 1024)));
+                    cast(ubyte[])(GCAllocator.instance.allocate(1024u * 1024)));
     auto p = alloc.allocateAll();
-    assert(p.length == 1024 * 1024);
+    assert(p.length == 1024u * 1024);
     alloc.deallocateAll();
     p = alloc.allocateAll();
-    assert(p.length == 1024 * 1024);
+    assert(p.length == 1024u * 1024);
 }
 
 @system unittest

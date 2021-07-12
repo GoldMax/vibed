@@ -197,7 +197,7 @@ final class URLRouter : HTTPServerRequestHandler {
 
 		string calcBasePath()
 		@safe {
-			import vibe.inet.path;
+			import vibe.core.path : InetPath, relativeToWeb;
 			auto p = InetPath(prefix.length ? prefix : "/");
 			p.endsWithSlash = true;
 			return p.relativeToWeb(InetPath(req.path)).toString();
@@ -212,6 +212,7 @@ final class URLRouter : HTTPServerRequestHandler {
 				auto r = () @trusted { return &m_routes.getTerminalData(ridx); } ();
 				if (r.method != method) return false;
 
+				logDebugV("route match: %s -> %s %s %s", req.path, r.method, r.pattern, values);
 				logDiagnostic("route match: %s -> %s %s %s", req.path, r.method, r.pattern, values);
 				foreach (i, v; values) req.params[m_routes.getTerminalVarNames(ridx)[i]] = v;
 				if (m_computeBasePath) req.params["routerRootDir"] = calcBasePath();
@@ -224,7 +225,7 @@ final class URLRouter : HTTPServerRequestHandler {
 			else break;
 		}
 
-		logDiagnostic("no route match: %s %s", req.method, req.requestURL);
+		logDebug("no route match: %s %s", req.method, req.requestURL);
 	}
 
 	/// Returns all registered routes as const AA

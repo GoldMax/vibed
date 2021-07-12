@@ -126,7 +126,7 @@ final class PosixEventDriver(Loop : PosixEventLoop) : EventDriver {
 					} catch (Exception ex) { print("exception happened in Driver.dispose() during formatting"); }
 		}
 
-		if(leaking_handle_desc.length) {
+		if (leaking_handle_desc.length) {
 			print("Warning (thread: %s): leaking eventcore driver because there are still active handles", getThreadName());
 			print(leaking_handle_desc);
 		}
@@ -191,13 +191,7 @@ final class PosixEventDriverCore(Loop : PosixEventLoop, Timers : EventDriverTime
 		m_events = events;
 		m_processes = processes;
 		m_wakeupEvent = events.createInternal();
-
-		static if (__VERSION__ >= 2074)
-			m_threadCallbackMutex = mallocT!(shared(Mutex));
-		else {
-			() @trusted { m_threadCallbackMutex = cast(shared)mallocT!Mutex; } ();
-		}
-
+        m_threadCallbackMutex = mallocT!(shared(Mutex));
 		m_threadCallbacks = mallocT!(ConsumableQueue!ThreadCallbackEntry);
 		m_threadCallbacks.reserve(1000);
 	}

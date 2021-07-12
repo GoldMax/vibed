@@ -294,7 +294,7 @@ unittest {
 		},
 		(scope res){
 			logInfo("Headers:");
-			foreach(key, ref value; res.headers) {
+			foreach (key, ref value; res.headers.byKeyValue) {
 				logInfo("%s: %s", key, value);
 			}
 			logInfo("Response: %s", res.bodyReader.readAllUTF8());
@@ -539,6 +539,11 @@ final class HTTPClient {
 		else
 			scope request_allocator = new RegionListAllocator!(shared(GCAllocator), true)(1024, GCAllocator.instance);
 
+		scope (failure) {
+			m_responding = false;
+			disconnect();
+		}
+
 		bool close_conn;
 		SysTime connected_time;
 		bool has_body = doRequestWithRetry(requester, false, close_conn, connected_time);
@@ -554,10 +559,6 @@ final class HTTPClient {
 		Exception user_exception;
 		while (true)
 		{
-			scope (failure) {
-				m_responding = false;
-				disconnect();
-			}
 			try responder(res);
 			catch (Exception e) {
 				logDebug("Error while handling response: %s", e.toString().sanitize());
@@ -589,6 +590,10 @@ final class HTTPClient {
 	{
 		bool close_conn;
 		SysTime connected_time;
+		scope (failure) {
+			m_responding = false;
+			disconnect();
+		}
 		bool has_body = doRequestWithRetry(requester, false, close_conn, connected_time);
 		m_responding = true;
 		auto res = new HTTPClientResponse(this, has_body, close_conn, () @trusted { return vibeThreadAllocator(); } (), connected_time);
@@ -621,8 +626,6 @@ final class HTTPClient {
 
 			logTrace("HTTP client waiting for response");
 			if (!m_stream.empty) break;
-
-			enforce(i != 1, "Second attempt to send HTTP request failed.");
 		}
 		return has_body;
 	}
@@ -636,10 +639,8 @@ final class HTTPClient {
 		scope(exit) m_requesting = false;
 
 		if (!m_conn || !m_conn.connected || m_conn.waitForDataEx(0.seconds) == WaitForDataStatus.noMoreData) {
-			if (m_conn) {
-				m_conn.close(); // make sure all resources are freed
-				m_conn = TCPConnection.init;
-			}
+			if (m_conn)
+				disconnect(); // make sure all resources are freed
 
 			if (m_settings.proxyURL.host !is null){
 
@@ -1076,7 +1077,10 @@ final class HTTPClientResponse : HTTPResponse {
 
 	~this()
 	{
-		debug if (m_client) { import std.stdio; writefln("WARNING: HTTPClientResponse not fully processed before being finalized"); }
+		debug if (m_client) {
+			import core.stdc.stdio;
+			printf("WARNING: HTTPClientResponse not fully processed before being finalized\n");
+		}
 	}
 
 	/**

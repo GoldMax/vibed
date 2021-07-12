@@ -42,13 +42,7 @@ version (linux) {
 	static if (!is(typeof(SOCK_CLOEXEC)))
 		enum SOCK_CLOEXEC = 0x80000;
 
-	static if (__VERSION__ < 2077)
-	{
-		enum IP_ADD_MEMBERSHIP =  35;
-		enum IP_MULTICAST_LOOP =  34;
-	}
-	else
-		import core.sys.linux.netinet.in_ : IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP;
+    import core.sys.linux.netinet.in_ : IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP;
 
 	// Linux-specific TCP options
 	// https://github.com/torvalds/linux/blob/master/include/uapi/linux/tcp.h#L95
@@ -64,21 +58,15 @@ version (linux) {
 	static if (!is(typeof(TCP_USER_TIMEOUT)))
 		enum TCP_USER_TIMEOUT = 18;
 }
-version(OSX) {
-	static if (__VERSION__ < 2077) {
-		enum IP_ADD_MEMBERSHIP = 12;
-		enum IP_MULTICAST_LOOP = 11;
-	} else import core.sys.darwin.netinet.in_ : IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP;
+version (OSX) {
+    import core.sys.darwin.netinet.in_ : IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP;
 
 	static if (!is(typeof(ESHUTDOWN))) enum ESHUTDOWN = 58;
 }
-version(FreeBSD) {
-	static if (__VERSION__ < 2077) {
-		enum IP_ADD_MEMBERSHIP  = 12;
-		enum IP_MULTICAST_LOOP  = 11;
-	} else import core.sys.freebsd.netinet.in_ : IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP;
+version (FreeBSD) {
+    import core.sys.freebsd.netinet.in_ : IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP;
 }
-version(DragonFlyBSD) {
+version (DragonFlyBSD) {
 	import core.sys.dragonflybsd.netinet.in_ : IP_ADD_MEMBERSHIP, IP_MULTICAST_LOOP;
 }
 version (Solaris) {

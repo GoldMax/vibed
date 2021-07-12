@@ -6,7 +6,8 @@ appropriate parts of `std`.
 Authors: $(HTTP erdani.com, Andrei Alexandrescu), Timon Gehr (`Ternary`)
 */
 module stdx.allocator.common;
-import std.algorithm.comparison, std.traits;
+import mir.utility;
+import std.traits;
 
 /**
 Returns the size in bytes of the state that needs to be allocated to hold an
@@ -77,7 +78,7 @@ enum unbounded = size_t.max;
 The alignment that is guaranteed to accommodate any D object allocation on the
 current platform.
 */
-enum uint platformAlignment = std.algorithm.comparison.max(double.alignof, real.alignof);
+enum uint platformAlignment = mir.utility.max(double.alignof, real.alignof);
 
 /**
 The default good size allocation is deduced as $(D n) rounded up to the
@@ -92,7 +93,7 @@ size_t goodAllocSize(A)(auto ref A a, size_t n)
 Returns s rounded up to a multiple of base.
 */
 @safe @nogc nothrow pure
-package size_t roundUpToMultipleOf(size_t s, uint base)
+package size_t roundUpToMultipleOf()(size_t s, uint base)
 {
     assert(base);
     auto rem = s % base;
@@ -112,7 +113,7 @@ unittest
 Returns `n` rounded up to a multiple of alignment, which must be a power of 2.
 */
 @safe @nogc nothrow pure
-package size_t roundUpToAlignment(size_t n, uint alignment)
+package size_t roundUpToAlignment()(size_t n, uint alignment)
 {
     import stdx.allocator.internal : isPowerOf2;
     assert(alignment.isPowerOf2);
@@ -137,7 +138,7 @@ unittest
 Returns `n` rounded down to a multiple of alignment, which must be a power of 2.
 */
 @safe @nogc nothrow pure
-package size_t roundDownToAlignment(size_t n, uint alignment)
+package size_t roundDownToAlignment()(size_t n, uint alignment)
 {
     import stdx.allocator.internal : isPowerOf2;
     assert(alignment.isPowerOf2);
@@ -159,7 +160,7 @@ may therefore be shorter. Returns the adjusted buffer, or null if obtaining a
 non-empty buffer is impossible.
 */
 @nogc nothrow pure
-package void[] roundUpToAlignment(void[] b, uint a)
+package void[] roundUpToAlignment()(void[] b, uint a)
 {
     auto e = b.ptr + b.length;
     auto p = cast(void*) roundUpToAlignment(cast(size_t) b.ptr, a);
@@ -181,7 +182,7 @@ package void[] roundUpToAlignment(void[] b, uint a)
 Like `a / b` but rounds the result up, not down.
 */
 @safe @nogc nothrow pure
-package size_t divideRoundUp(size_t a, size_t b)
+package size_t divideRoundUp()(size_t a, size_t b)
 {
     assert(b);
     return (a + b - 1) / b;
@@ -191,7 +192,7 @@ package size_t divideRoundUp(size_t a, size_t b)
 Returns `s` rounded up to a multiple of `base`.
 */
 @nogc nothrow pure
-package void[] roundStartToMultipleOf(void[] s, uint base)
+package void[] roundStartToMultipleOf()(void[] s, uint base)
 {
     assert(base);
     auto p = cast(void*) roundUpToMultipleOf(
@@ -213,7 +214,7 @@ nothrow pure
 Returns $(D s) rounded up to the nearest power of 2.
 */
 @safe @nogc nothrow pure
-package size_t roundUpToPowerOf2(size_t s)
+package size_t roundUpToPowerOf2()(size_t s)
 {
     import std.meta : AliasSeq;
     assert(s <= (size_t.max >> 1) + 1);
@@ -250,7 +251,7 @@ unittest
 Returns the number of trailing zeros of $(D x).
 */
 @safe @nogc nothrow pure
-package uint trailingZeros(ulong x)
+package uint trailingZeros()(ulong x)
 {
     uint result;
     while (result < 64 && !(x & (1UL << result)))
@@ -284,7 +285,7 @@ Returns the effective alignment of `ptr`, i.e. the largest power of two that is
 a divisor of `ptr`.
 */
 @nogc nothrow pure
-package uint effectiveAlignment(void* ptr)
+package uint effectiveAlignment()(void* ptr)
 {
     return 1U << trailingZeros(cast(size_t) ptr);
 }
@@ -301,7 +302,7 @@ Aligns a pointer down to a specified alignment. The resulting pointer is less
 than or equal to the given pointer.
 */
 @nogc nothrow pure
-package void* alignDownTo(void* ptr, uint alignment)
+package void* alignDownTo()(void* ptr, uint alignment)
 {
     import stdx.allocator.internal : isPowerOf2;
     assert(alignment.isPowerOf2);
@@ -313,7 +314,7 @@ Aligns a pointer up to a specified alignment. The resulting pointer is greater
 than or equal to the given pointer.
 */
 @nogc nothrow pure
-package void* alignUpTo(void* ptr, uint alignment)
+package void* alignUpTo()(void* ptr, uint alignment)
 {
     import stdx.allocator.internal : isPowerOf2;
     assert(alignment.isPowerOf2);
@@ -322,14 +323,14 @@ package void* alignUpTo(void* ptr, uint alignment)
 }
 
 @safe @nogc nothrow pure
-package bool isGoodStaticAlignment(uint x)
+package bool isGoodStaticAlignment()(uint x)
 {
     import stdx.allocator.internal : isPowerOf2;
     return x.isPowerOf2;
 }
 
 @safe @nogc nothrow pure
-package bool isGoodDynamicAlignment(uint x)
+package bool isGoodDynamicAlignment()(uint x)
 {
     import stdx.allocator.internal : isPowerOf2;
     return x.isPowerOf2 && x >= (void*).sizeof;
@@ -347,10 +348,10 @@ defined. This is deliberate so allocators may use it internally within their own
 implementation of $(D reallocate).
 
 */
-bool reallocate(Allocator)(ref Allocator a, ref void[] b, size_t s)
+bool reallocate(Allocator)(auto ref Allocator a, ref void[] b, size_t s)
 {
     if (b.length == s) return true;
-    static if (hasMember!(Allocator, "expand"))
+    static if (__traits(hasMember, Allocator, "expand"))
     {
         if (b.length <= s && a.expand(b, s - b.length)) return true;
     }
@@ -358,7 +359,7 @@ bool reallocate(Allocator)(ref Allocator a, ref void[] b, size_t s)
     if (newB.length != s) return false;
     if (newB.length <= b.length) newB[] = b[0 .. newB.length];
     else newB[0 .. b.length] = b[];
-    static if (hasMember!(Allocator, "deallocate"))
+    static if (__traits(hasMember, Allocator, "deallocate"))
         a.deallocate(b);
     b = newB;
     return true;
@@ -378,10 +379,10 @@ defined. This is deliberate so allocators may use it internally within their own
 implementation of $(D reallocate).
 
 */
-bool alignedReallocate(Allocator)(ref Allocator alloc,
+bool alignedReallocate(Allocator)(auto ref Allocator alloc,
         ref void[] b, size_t s, uint a)
 {
-    static if (hasMember!(Allocator, "expand"))
+    static if (__traits(hasMember, Allocator, "expand"))
     {
         if (b.length <= s && b.ptr.alignedAt(a)
             && alloc.expand(b, s - b.length)) return true;
@@ -393,7 +394,7 @@ bool alignedReallocate(Allocator)(ref Allocator alloc,
     auto newB = alloc.alignedAllocate(s, a);
     if (newB.length <= b.length) newB[] = b[0 .. newB.length];
     else newB[0 .. b.length] = b[];
-    static if (hasMember!(Allocator, "deallocate"))
+    static if (__traits(hasMember, Allocator, "deallocate"))
         alloc.deallocate(b);
     b = newB;
     return true;
@@ -404,14 +405,22 @@ Forwards each of the methods in `funs` (if defined) to `member`.
 */
 /*package*/ string forwardToMember(string member, string[] funs...)
 {
-    string result = "    import std.traits : hasMember, Parameters;\n";
+    string result = "    import std.traits : Parameters;\n";
     foreach (fun; funs)
     {
         result ~= "
-    static if (hasMember!(typeof("~member~"), `"~fun~"`))
-    auto ref "~fun~"(Parameters!(typeof("~member~"."~fun~")) args)
+    static if (__traits(hasMember, typeof("~member~"), `"~fun~"`))
     {
-        return "~member~"."~fun~"(args);
+        static if (__traits(isTemplate, "~member~"."~fun~"))
+        auto ref "~fun~"(Parameters!(typeof("~member~"."~fun~"!())) args)
+        {
+            return "~member~"."~fun~"(args);
+        }
+        else
+        auto ref "~fun~"(Parameters!(typeof("~member~"."~fun~")) args)
+        {
+            return "~member~"."~fun~"(args);
+        }
     }\n";
     }
     return result;
@@ -451,26 +460,26 @@ version(unittest)
         assert(b2.ptr + b2.length <= b1.ptr || b1.ptr + b1.length <= b2.ptr);
 
         // Test alignedAllocate
-        static if (hasMember!(A, "alignedAllocate"))
+        static if (__traits(hasMember, A, "alignedAllocate"))
         {{
              auto b3 = a.alignedAllocate(1, 256);
              assert(b3.length <= 1);
              assert(b3.ptr.alignedAt(256));
              assert(a.alignedReallocate(b3, 2, 512));
              assert(b3.ptr.alignedAt(512));
-             static if (hasMember!(A, "alignedDeallocate"))
+             static if (__traits(hasMember, A, "alignedDeallocate"))
              {
                  a.alignedDeallocate(b3);
              }
          }}
         else
         {
-            static assert(!hasMember!(A, "alignedDeallocate"));
+            static assert(!__traits(hasMember, A, "alignedDeallocate"));
             // This seems to be a bug in the compiler:
-            //static assert(!hasMember!(A, "alignedReallocate"), A.stringof);
+            //static assert(!__traits(hasMember, A, "alignedReallocate"), A.stringof);
         }
 
-        static if (hasMember!(A, "allocateAll"))
+        static if (__traits(hasMember, A, "allocateAll"))
         {{
              auto aa = make();
              if (aa.allocateAll().ptr)
@@ -485,7 +494,7 @@ version(unittest)
              assert(!ab.allocate(1).ptr);
          }}
 
-        static if (hasMember!(A, "expand"))
+        static if (__traits(hasMember, A, "expand"))
         {{
              assert(a.expand(b1, 0));
              auto len = b1.length;
@@ -510,7 +519,7 @@ version(unittest)
         assert(b6.length == 2);
 
         // Test owns
-        static if (hasMember!(A, "owns"))
+        static if (__traits(hasMember, A, "owns"))
         {{
              assert(a.owns(null) == Ternary.no);
              assert(a.owns(b1) == Ternary.yes);
@@ -518,7 +527,7 @@ version(unittest)
              assert(a.owns(b6) == Ternary.yes);
          }}
 
-        static if (hasMember!(A, "resolveInternalPointer"))
+        static if (__traits(hasMember, A, "resolveInternalPointer"))
         {{
              void[] p;
              assert(a.resolveInternalPointer(null, p) == Ternary.no);

@@ -236,19 +236,19 @@ version (OPENSSL_NO_LOCKING) {
 	void CRYPTO_add()(int* addr, int amount, int type) { *addr += amount; }
 } else {
 	void CRYPTO_w_lock(string file = __FILE__, size_t line = __LINE__)(int type) {
-		CRYPTO_lock(CRYPTO_LOCK|CRYPTO_WRITE,type,file,line);
+		CRYPTO_lock(CRYPTO_LOCK|CRYPTO_WRITE,type,file.ptr,line);
 	}
 	void CRYPTO_w_unlock(string file = __FILE__, size_t line = __LINE__)(int type) {
-		CRYPTO_lock(CRYPTO_UNLOCK|CRYPTO_WRITE,type,file,line);
+		CRYPTO_lock(CRYPTO_UNLOCK|CRYPTO_WRITE,type,file.ptr,line);
 	}
 	void CRYPTO_r_lock(string file = __FILE__, size_t line = __LINE__)(int type) {
-		CRYPTO_lock(CRYPTO_LOCK|CRYPTO_READ,type,file,line);
+		CRYPTO_lock(CRYPTO_LOCK|CRYPTO_READ,type,file.ptr,line);
 	}
 	void CRYPTO_r_unlock(string file = __FILE__, size_t line = __LINE__)(int type) {
-		CRYPTO_lock(CRYPTO_UNLOCK|CRYPTO_READ,type,file,line);
+		CRYPTO_lock(CRYPTO_UNLOCK|CRYPTO_READ,type,file.ptr,line);
 	}
 	void CRYPTO_add(string file = __FILE__, size_t line = __LINE__)(int* addr, int amount, int type) {
-		CRYPTO_add_lock(addr,amount,type,file,line);
+		CRYPTO_add_lock(addr,amount,type,file.ptr,line);
 	}
 }
 
@@ -368,25 +368,25 @@ int MemCheck_off()() { return CRYPTO_mem_ctrl(CRYPTO_MEM_CHECK_DISABLE); }
 alias CRYPTO_is_mem_check_on is_MemCheck_on;
 
 auto OPENSSL_malloc(string file = __FILE__, size_t line = __LINE__)(int num) {
-	return CRYPTO_malloc(num,file,line);
+	return CRYPTO_malloc(num,file.ptr,line);
 }
 auto OPENSSL_strdup(string file = __FILE__, size_t line = __LINE__)(const(char)* str) {
-	return CRYPTO_strdup(str,file,line);
+	return CRYPTO_strdup(str,file.ptr,line);
 }
 auto OPENSSL_realloc(string file = __FILE__, size_t line = __LINE__)(void* addr, int num) {
-	return CRYPTO_realloc(addr,num,file,line);
+	return CRYPTO_realloc(addr,num,file.ptr,line);
 }
 auto OPENSSL_realloc_clean(string file = __FILE__, size_t line = __LINE__)(void* addr,int old_num,int num) {
-	CRYPTO_realloc_clean(addr,old_num,num,file,line);
+	CRYPTO_realloc_clean(addr,old_num,num,file.ptr,line);
 }
 auto OPENSSL_remalloc(string file = __FILE__, size_t line = __LINE__)(void** addr, int num) {
-	return CRYPTO_remalloc(cast(char**)addr,num,file,line);
+	return CRYPTO_remalloc(cast(char**)addr,num,file.ptr,line);
 }
 alias CRYPTO_free OPENSSL_freeFunc;
 alias CRYPTO_free OPENSSL_free;
 
 auto OPENSSL_malloc_locked(string file = __FILE__, size_t line = __LINE__)(int num) {
-	return CRYPTO_malloc_locked(num, file, line);
+	return CRYPTO_malloc_locked(num, file.ptr, line);
 }
 alias CRYPTO_free_locked OPENSSL_free_locked;
 
@@ -419,20 +419,10 @@ void CRYPTO_free_ex_data(int class_index, void* obj, CRYPTO_EX_DATA* ad);
  * (relative to the class type involved) */
 int CRYPTO_set_ex_data(CRYPTO_EX_DATA* ad, int idx, void* val);
 void* CRYPTO_get_ex_data(const(CRYPTO_EX_DATA)* ad,int idx);
-/* This function cleans up all "ex_data" state. It mustn't be called under
- * potential race-conditions. */
-void CRYPTO_cleanup_all_ex_data();
 
 int CRYPTO_get_new_lockid(char* name);
 
-int CRYPTO_num_locks(); /* return CRYPTO_NUM_LOCKS (shared libs!) */
 void CRYPTO_lock(int mode, int type,const(char)* file,int line);
-void CRYPTO_set_locking_callback(ExternC!(void function(int mode,int type,
-					      const(char)* file,int line)) func);
-ExternC!(void function(int mode,int type,const(char)* file,int line)) CRYPTO_get_locking_callback();
-void CRYPTO_set_add_lock_callback(ExternC!(int function(int* num,int mount,int type,
-					      const(char)* file, int line)) func);
-ExternC!(void function(int* num,int mount,int type,const(char)* file, int line)) CRYPTO_get_add_lock_callback();
 
 /* Don't use this structure directly. */
 struct crypto_threadid_st {
@@ -463,12 +453,6 @@ int CRYPTO_get_new_dynlockid();
 void CRYPTO_destroy_dynlockid(int i);
 struct CRYPTO_dynlock_value;
 CRYPTO_dynlock_value* CRYPTO_get_dynlock_value(int i);
-void CRYPTO_set_dynlock_create_callback(ExternC!(CRYPTO_dynlock_value* function(const(char)* file, int line)) dyn_create_function);
-void CRYPTO_set_dynlock_lock_callback(ExternC!(void function(int mode, CRYPTO_dynlock_value* l, const(char)* file, int line)) dyn_lock_function);
-void CRYPTO_set_dynlock_destroy_callback(ExternC!(void function(CRYPTO_dynlock_value* l, const(char)* file, int line)) dyn_destroy_function);
-ExternC!(CRYPTO_dynlock_value* function(const(char)* file,int line)) CRYPTO_get_dynlock_create_callback();
-ExternC!(void function(int mode, CRYPTO_dynlock_value* l, const(char)* file,int line)) CRYPTO_get_dynlock_lock_callback();
-ExternC!(void function(CRYPTO_dynlock_value* l, const(char)* file,int line)) CRYPTO_get_dynlock_destroy_callback();
 
 /* CRYPTO_set_mem_functions includes CRYPTO_set_locked_mem_functions --
  * call the latter last if you need different functions */
@@ -513,7 +497,7 @@ void CRYPTO_set_mem_debug_options(c_long bits);
 c_long CRYPTO_get_mem_debug_options();
 
 auto CRYPTO_push_info(string file = __FILE__, size_t line = __LINE__)(const(char)* info) {
-	return CRYPTO_push_info_(info, file, line);
+	return CRYPTO_push_info_(info, file.ptr, line);
 }
 int CRYPTO_push_info_(const(char)* info, const(char)* file, int line);
 int CRYPTO_pop_info();
@@ -553,7 +537,7 @@ void CRYPTO_mem_leaks_cb(CRYPTO_MEM_LEAK_CB* cb);
 /* die if we have to */
 void OpenSSLDie(const(char)* file,int line,const(char)* assertion);
 void OPENSSL_assert(string file = __FILE__, size_t line = __LINE__)(int e) {
-	if (!e) OpenSSLDie(file, line, "assertion failed"); // No good way to translate.
+	if (!e) OpenSSLDie(file.ptr, line, "assertion failed"); // No good way to translate.
 }
 
 c_ulong* OPENSSL_ia32cap_loc();

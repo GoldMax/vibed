@@ -22,6 +22,11 @@ import core.thread;
 import std.traits : isSomeString;
 import std.range.primitives : isInputRange, isOutputRange;
 
+LogLevel getLogLevel()
+nothrow @safe {
+	return ss_stdoutLogger ? ss_stdoutLogger.lock().minLevel : LogLevel.none;
+}
+
 /**
 	Sets the minimum log level to be printed using the default console logger.
 
@@ -32,10 +37,7 @@ nothrow @safe {
 	if (ss_stdoutLogger)
 		ss_stdoutLogger.lock().minLevel = level;
 }
-LogLevel getLogLevel()
-nothrow @safe {
-	return ss_stdoutLogger ? ss_stdoutLogger.lock().minLevel : LogLevel.none;
-}
+
 
 /**
 	Sets the log format used for the default console logger.
@@ -645,7 +647,7 @@ final class SyslogLogger(OutputStream) : Logger {
 		string m_hostName;
 		string m_appName;
 		OutputStream m_ostream;
-		Facility m_facility;
+		SyslogFacility m_facility;
 	}
 
 	deprecated("Use `SyslogFacility` instead.")
@@ -683,7 +685,7 @@ final class SyslogLogger(OutputStream) : Logger {
 		Logger uses the stream's write function when it logs and would hence
 		log forevermore.
 	*/
-	this(OutputStream stream, Facility facility, string appName = null, string hostName = hostName())
+	this(OutputStream stream, SyslogFacility facility, string appName = null, string hostName = hostName())
 	{
 		m_hostName = hostName != "" ? hostName : NILVALUE;
 		m_appName = appName != "" ? appName : NILVALUE;
@@ -842,6 +844,7 @@ unittest
 		logger.endLine();
 	}
 	auto path = fstream.path;
+	destroy(logger);
 	fstream.close();
 
 	import std.file;

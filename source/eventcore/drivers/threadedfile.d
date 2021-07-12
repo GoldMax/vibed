@@ -7,16 +7,13 @@ import core.atomic;
 import core.stdc.errno;
 import std.algorithm.comparison : among, min;
 
-version(Posix){
+version (Posix) {
 	import core.sys.posix.fcntl;
 	import core.sys.posix.sys.stat;
 	import core.sys.posix.unistd;
 }
-version(Windows){
-	static if (__VERSION__ >= 2070)
-		import core.sys.windows.stat;
-	else
-		import std.c.windows.stat;
+version (Windows) {
+    import core.sys.windows.stat;
 
 	private {
 		// TODO: use CreateFile/HANDLE instead of the Posix API on Windows

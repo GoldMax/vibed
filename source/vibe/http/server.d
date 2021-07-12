@@ -200,6 +200,12 @@ void handleHTTPConnection(TCPConnection connection, HTTPServerContext context)
 
 	scope (exit) connection.close();
 
+	// check wether the client's address is banned
+	foreach (ref virtual_host; context.m_virtualHosts)
+		if ((virtual_host.settings.rejectConnectionPredicate !is null) &&
+			virtual_host.settings.rejectConnectionPredicate(connection.remoteAddress()))
+			return;
+
 	// Set NODELAY to true, to avoid delays caused by sending the response
 	// header and body in separate chunks. Note that to avoid other performance
 	// issues (caused by tiny packets), this requires using an output buffer in
@@ -633,6 +639,16 @@ final class HTTPServerSettings {
 	*/
 	string hostName;
 
+	/** Provides a way to reject incoming connections as early as possible.
+
+		Allows to ban and unban network addresses and reduce the impact of DOS
+		attacks.
+
+		If the callback returns `true` for a specific `NetworkAddress`,
+		then all incoming requests from that address will be rejected.
+	*/
+	RejectConnectionPredicate rejectConnectionPredicate;
+
 	/** Configures optional features of the HTTP server
 
 		Disabling unneeded features can improve performance or reduce the server
@@ -793,6 +809,10 @@ final class HTTPServerSettings {
 		assert(s.port == 443);
 	}
 }
+
+
+/// Callback type used to determine whether to reject incoming connections
+alias RejectConnectionPredicate = bool delegate (in NetworkAddress) @safe nothrow;
 
 
 /**
@@ -2040,8 +2060,7 @@ private HTTPListener listenHTTPPlain(HTTPServerSettings settings, HTTPServerRequ
 
 			auto proto = is_tls ? "https" : "http";
 			auto urladdr = listen_info.bindAddress;
-			if (urladdr.canFind(':'))
-				urladdr = "["~urladdr~"]";
+			if (urladdr.canFind(':')) urladdr = "["~urladdr~"]";
 			logInfo("Listening for requests on %s://%s:%s/", proto, urladdr, listen_info.bindPort);
 			return ret;
 		} catch( Exception e ) {

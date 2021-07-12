@@ -97,7 +97,14 @@ struct Task {
 
 	void join() @trusted { if (m_fiber) m_fiber.join!true(m_taskCounter); }
 	void joinUninterruptible() @trusted nothrow { if (m_fiber) m_fiber.join!false(m_taskCounter); }
-	void interrupt() @trusted nothrow { if (m_fiber) m_fiber.interrupt(m_taskCounter); }
+	void interrupt() @trusted nothrow { if (m_fiber && this.running) m_fiber.interrupt(m_taskCounter); }
+
+	unittest { // regression test for bogus "task cannot interrupt itself"
+		import vibe.core.core : runTask;
+		auto t = runTask({});
+		t.join();
+		runTask({ t.interrupt(); }).join();
+	}
 
 	string toString() const @safe { import std.string; return format("%s:%s", () @trusted { return cast(void*)m_fiber; } (), m_taskCounter); }
 
@@ -137,7 +144,6 @@ struct Task {
 		return m_fiber is other.m_fiber && m_taskCounter == other.m_taskCounter;
 	}
 }
-
 
 /** Settings to control the behavior of newly started tasks.
 */
@@ -434,7 +440,7 @@ final package class TaskFiber : Fiber {
 					debug if (ms_taskEventCallback) ms_taskEventCallback(TaskEvent.end, handle);
 
 					debug if (() @trusted { return (cast(shared)this); } ().getTaskStatus().interrupt)
-						logDebug("Task exited while an interrupt was in flight.");
+						logDebugV("Task exited while an interrupt was in flight.");
 				} catch (Exception e) {
 					debug if (ms_taskEventCallback) ms_taskEventCallback(TaskEvent.fail, handle);
 					e.logException!(LogLevel.critical)("Task terminated with uncaught exception");
@@ -817,12 +823,13 @@ package struct TaskScheduler {
 
 		bool any_events = false;
 		while (true) {
+			debug (VibeTaskLog) logTrace("Scheduling before peeking new events...");
 			// process pending tasks
 			bool any_tasks_processed = schedule() != ScheduleStatus.idle;
 
 			debug (VibeTaskLog) logTrace("Processing pending events...");
 			ExitReason er = eventDriver.core.processEvents(0.seconds);
-			debug (VibeTaskLog) logTrace("Done.");
+			debug (VibeTaskLog) logTrace("Done: %s", er);
 
 			final switch (er) {
 				case ExitReason.exited: return ExitReason.exited;
@@ -871,7 +878,7 @@ package struct TaskScheduler {
 		// process one chunk
 		debug (VibeTaskLog) logTrace("Wait for new events to process...");
 		er = eventDriver.core.processEvents(Duration.max);
-		debug (VibeTaskLog) logTrace("Done.");
+		debug (VibeTaskLog) logTrace("Done: %s", er);
 		final switch (er) {
 			case ExitReason.exited: return ExitReason.exited;
 			case ExitReason.outOfWaiters:
@@ -946,7 +953,7 @@ package struct TaskScheduler {
 			auto thistf = () @trusted { return thist.taskFiber; } ();
 			assert(!thistf || !thistf.m_queue, "Calling task is running, but scheduled to be resumed!?");
 
-			debug (VibeTaskLog) logDebugV("Switching tasks (%s already in queue)", m_taskQueue.length);
+			debug (VibeTaskLog) logDebugV("Switching tasks (%s already in queue, prio=%s)", m_taskQueue.length, priority);
 			final switch (priority) {
 				case TaskSwitchPriority.normal:
 					reschedule(tf);

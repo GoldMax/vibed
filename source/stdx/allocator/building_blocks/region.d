@@ -33,7 +33,6 @@ struct Region(ParentAllocator = NullAllocator,
     static assert(minAlign.isGoodStaticAlignment);
     static assert(ParentAllocator.alignment >= minAlign);
 
-    import std.traits : hasMember;
     import stdx.allocator.internal : Ternary;
 
     // state
@@ -98,7 +97,7 @@ struct Region(ParentAllocator = NullAllocator,
     memory chunk.
     */
     static if (!is(ParentAllocator == NullAllocator)
-        && hasMember!(ParentAllocator, "deallocate"))
+        && __traits(hasMember, ParentAllocator, "deallocate"))
     ~this()
     {
         parent.deallocate(_begin[0 .. _end - _begin]);
@@ -329,14 +328,14 @@ struct Region(ParentAllocator = NullAllocator,
 ///
 @system unittest
 {
-    import std.algorithm.comparison : max;
+    import mir.utility : max;
     import stdx.allocator.building_blocks.allocator_list
         : AllocatorList;
     import stdx.allocator.mallocator : Mallocator;
     // Create a scalable list of regions. Each gets at least 1MB at a time by
     // using malloc.
     auto batchAllocator = AllocatorList!(
-        (size_t n) => Region!Mallocator(max(n, 1024 * 1024))
+        (size_t n) => Region!Mallocator(max(n, 1024u * 1024))
     )();
     auto b = batchAllocator.allocate(101);
     assert(b.length == 101);
@@ -375,9 +374,7 @@ hot memory is used first.
 */
 struct InSituRegion(size_t size, size_t minAlign = platformAlignment)
 {
-    import std.algorithm.comparison : max;
-    import std.conv : to;
-    import std.traits : hasMember;
+    import mir.utility : max;
     import stdx.allocator.internal : Ternary;
 
     static assert(minAlign.isGoodStaticAlignment);
@@ -492,7 +489,7 @@ struct InSituRegion(size_t size, size_t minAlign = platformAlignment)
     Expands an allocated block in place. Expansion will succeed only if the
     block is the last allocated.
     */
-    static if (hasMember!(typeof(_impl), "expand"))
+    static if (__traits(hasMember, typeof(_impl), "expand"))
     bool expand(ref void[] b, size_t delta)
     {
         if (!_impl._current) lazyInit;
@@ -567,8 +564,8 @@ struct InSituRegion(size_t size, size_t minAlign = platformAlignment)
     InSituRegion!(4096, 1) r1;
     auto a = r1.allocate(2001);
     assert(a.length == 2001);
-    import std.conv : text;
-    assert(r1.available == 2095, text(r1.available));
+    import std.conv : to;
+    assert(r1.available == 2095, r1.available.to!string);
 
     InSituRegion!(65_536, 1024*4) r2;
     assert(r2.available <= 65_536);
@@ -599,12 +596,12 @@ version(Posix) struct SbrkRegion(uint minAlign = platformAlignment)
 
     static assert(minAlign.isGoodStaticAlignment);
     static assert(size_t.sizeof == (void*).sizeof);
-    private shared void* _brkInitial, _brkCurrent;
+    private static shared void* _brkInitial, _brkCurrent;
 
     /**
     Instance shared by all callers.
     */
-    static shared SbrkRegion instance;
+    enum SbrkRegion instance = SbrkRegion();
 
     /**
     Standard allocator primitives.
@@ -612,7 +609,7 @@ version(Posix) struct SbrkRegion(uint minAlign = platformAlignment)
     enum uint alignment = minAlign;
 
     /// Ditto
-    void[] allocate(size_t bytes) shared
+    static void[] allocate(size_t bytes)
     {
         static if (minAlign > 1)
             const rounded = bytes.roundUpToMultipleOf(alignment);
@@ -640,7 +637,7 @@ version(Posix) struct SbrkRegion(uint minAlign = platformAlignment)
     }
 
     /// Ditto
-    void[] alignedAllocate(size_t bytes, uint a) shared
+    static void[] alignedAllocate(size_t bytes, uint a)
     {
         pthread_mutex_lock(cast(pthread_mutex_t*) &sbrkMutex) == 0 || assert(0);
         scope(exit) pthread_mutex_unlock(cast(pthread_mutex_t*) &sbrkMutex) == 0
@@ -676,7 +673,7 @@ version(Posix) struct SbrkRegion(uint minAlign = platformAlignment)
     the right.
 
     */
-    bool expand(ref void[] b, size_t delta) shared
+    static bool expand(ref void[] b, size_t delta)
     {
         if (b is null) return delta == 0;
         assert(_brkInitial && _brkCurrent); // otherwise where did b come from?
@@ -700,7 +697,7 @@ version(Posix) struct SbrkRegion(uint minAlign = platformAlignment)
     }
 
     /// Ditto
-    Ternary owns(void[] b) shared
+    static Ternary owns(void[] b)
     {
         // No need to lock here.
         assert(!_brkCurrent || b.ptr + b.length <= _brkCurrent);
@@ -715,7 +712,7 @@ version(Posix) struct SbrkRegion(uint minAlign = platformAlignment)
     must be the last block allocated.
 
     */
-    bool deallocate(void[] b) shared
+    static bool deallocate(void[] b)
     {
         static if (minAlign > 1)
             const rounded = b.length.roundUpToMultipleOf(alignment);
@@ -737,7 +734,7 @@ version(Posix) struct SbrkRegion(uint minAlign = platformAlignment)
     that support reducing the  break address (i.e. accept calls to $(D sbrk)
     with negative offsets). OSX does not accept such.
     */
-    bool deallocateAll() shared
+    static bool deallocateAll()
     {
         pthread_mutex_lock(cast(pthread_mutex_t*) &sbrkMutex) == 0 || assert(0);
         scope(exit) pthread_mutex_unlock(cast(pthread_mutex_t*) &sbrkMutex) == 0
