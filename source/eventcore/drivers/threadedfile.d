@@ -25,7 +25,7 @@ version (Windows) {
 			int close(int fd) @safe;
 			int read(int fd, void *buffer, uint count);
 			int write(int fd, in void *buffer, uint count);
-			off_t lseek(int fd, off_t offset, int whence) @safe;
+			long _lseeki64(int fd, long offset, int origin) @safe;
 		}
 
 		enum O_RDONLY = 0;
@@ -44,6 +44,18 @@ version (Windows) {
 else
 {
 	enum O_BINARY = 0;
+}
+
+version (darwin) {
+	// NOTE: Always building for 64-bit, so these are identical
+	alias lseek64 = lseek;
+}
+
+version (Android) {
+	static if (!is(off64_t)) {
+		alias off64_t = long;
+		extern(C) off64_t lseek64(int, off64_t, int) @safe nothrow;
+	}
 }
 
 private {
@@ -181,9 +193,7 @@ final class ThreadedFileEventDriver(Events : EventDriverEvents) : EventDriverFil
 		}
 
 		// TODO: close may block and should be executed in a worker thread
-		int res;
-		do res = .close(cast(int)file.value);
-		while (res != 0 && errno == EINTR);
+		int res = .close(cast(int)file.value);
 
 		m_files[file.value] = FileInfo.init;
 
@@ -197,7 +207,9 @@ final class ThreadedFileEventDriver(Events : EventDriverEvents) : EventDriverFil
 
 		version (linux) {
 			// stat_t seems to be defined wrong on linux/64
-			return .lseek(cast(int)file, 0, SEEK_END);
+			return .lseek64(cast(int)file, 0, SEEK_END);
+		} else version (Windows) {
+			return _lseeki64(cast(int)file, 0, SEEK_END);
 		} else {
 			stat_t st;
 			() @trusted { fstat(cast(int)file, &st); } ();
@@ -217,6 +229,30 @@ final class ThreadedFileEventDriver(Events : EventDriverEvents) : EventDriverFil
 				return;
 			}
 			on_finish(file, IOStatus.ok, 0);
+		} else version (Windows) {
+			version (Win64) {
+				import core.sys.windows.windows : FILE_BEGIN, HANDLE, INVALID_HANDLE_VALUE,
+					LARGE_INTEGER, SetFilePointerEx, SetEndOfFile;
+				import core.stdc.stdio : _get_osfhandle;
+
+				auto h = () @trusted { return cast(HANDLE)_get_osfhandle(cast(int)file); } ();
+				if (h == INVALID_HANDLE_VALUE) {
+					on_finish(file, IOStatus.error, 0);
+					return;
+				}
+				LARGE_INTEGER ls = { QuadPart: size };
+				if (!() @trusted { return SetFilePointerEx(h, ls, null, FILE_BEGIN); } ()) {
+					on_finish(file, IOStatus.error, 0);
+					return;
+				}
+				if (!() @trusted { return SetEndOfFile(h); } ()) {
+					on_finish(file, IOStatus.error, 0);
+					return;
+				}
+				on_finish(file, IOStatus.ok, 0);
+			} else {
+				on_finish(file, IOStatus.error, 0);
+			}
 		} else {
 			on_finish(file, IOStatus.error, 0);
 		}
@@ -361,9 +397,8 @@ log("start processing");
 
 		auto bytes = buffer;
 		version (Windows) {
-			assert(offset <= off_t.max);
-			.lseek(cast(int)file, cast(off_t)offset, SEEK_SET);
-		} else .lseek(cast(int)file, offset, SEEK_SET);
+			._lseeki64(cast(int)file, offset, SEEK_SET);
+		} else .lseek64(cast(int)file, offset, SEEK_SET);
 
 		scope (exit) {
 log("trigger event");
@@ -373,7 +408,7 @@ log("trigger event");
 		if (bytes.length == 0) safeAtomicStore(f.ioStatus, IOStatus.ok);
 
 		while (bytes.length > 0) {
-			auto sz = min(bytes.length, 4096);
+			auto sz = min(bytes.length, 512*1024);
 			auto ret = () @trusted { return mixin("."~op)(cast(int)file, bytes.ptr, cast(uint)sz); } ();
 			if (ret != sz) {
 				safeAtomicStore(f.ioStatus, IOStatus.error);

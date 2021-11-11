@@ -36,6 +36,7 @@ value for a given $(D n).)
 */
 struct Quantizer(ParentAllocator, alias roundingFunction)
 {
+    import std.traits : hasMember;
 
     /**
     The parent allocator. Depending on whether $(D ParentAllocator) holds state
@@ -49,7 +50,7 @@ struct Quantizer(ParentAllocator, alias roundingFunction)
     else
     {
         alias parent = ParentAllocator.instance;
-        enum Quantizer instance = Quantizer();
+        static __gshared Quantizer instance;
     }
 
     /**
@@ -83,7 +84,7 @@ struct Quantizer(ParentAllocator, alias roundingFunction)
     $(D allocate) by forwarding to
     $(D parent.alignedAllocate(goodAllocSize(n), a)).
     */
-    static if (__traits(hasMember, ParentAllocator, "alignedAllocate"))
+    static if (hasMember!(ParentAllocator, "alignedAllocate"))
     void[] alignedAllocate(size_t n, uint)
     {
         auto result = parent.alignedAllocate(goodAllocSize(n));
@@ -113,7 +114,7 @@ struct Quantizer(ParentAllocator, alias roundingFunction)
             return true;
         }
         // Hail Mary
-        static if (__traits(hasMember, ParentAllocator, "expand"))
+        static if (hasMember!(ParentAllocator, "expand"))
         {
             // Expand to the appropriate quantum
             auto original = b.ptr[0 .. allocated];
@@ -165,7 +166,7 @@ struct Quantizer(ParentAllocator, alias roundingFunction)
     occurs in place under the conditions required by $(D expand). Shrinking
     occurs in place if $(D goodAllocSize(b.length) == goodAllocSize(s)).
     */
-    static if (__traits(hasMember, ParentAllocator, "alignedAllocate"))
+    static if (hasMember!(ParentAllocator, "alignedAllocate"))
     bool alignedReallocate(ref void[] b, size_t s, uint a)
     {
         if (!b.ptr)
@@ -195,7 +196,7 @@ struct Quantizer(ParentAllocator, alias roundingFunction)
     Defined if $(D ParentAllocator.deallocate) exists and forwards to
     $(D parent.deallocate(b.ptr[0 .. goodAllocSize(b.length)])).
     */
-    static if (__traits(hasMember, ParentAllocator, "deallocate"))
+    static if (hasMember!(ParentAllocator, "deallocate"))
     bool deallocate(void[] b)
     {
         if (!b.ptr) return true;

@@ -159,7 +159,7 @@ private final class ChannelImpl(T, size_t buffer_size) {
 	}
 
 	this(ChannelConfig config)
-	shared @trusted {
+	shared @trusted nothrow {
 		m_mutex = cast(shared)new Mutex;
 		m_condition = cast(shared)new TaskCondition(cast(Mutex)m_mutex);
 		m_config = config;
@@ -371,10 +371,12 @@ unittest {
 	void test(ChannelPriority prio)
 	{
 		auto ch = createChannel!int(ChannelConfig(prio));
-		runTask({
-			ch.put(1);
-			ch.put(2);
-			ch.put(3);
+		runTask(() nothrow {
+			try {
+				ch.put(1);
+				ch.put(2);
+				ch.put(3);
+			} catch (Exception e) assert(false, e.msg);
 			ch.close();
 		});
 

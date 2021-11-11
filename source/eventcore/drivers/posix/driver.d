@@ -117,18 +117,28 @@ final class PosixEventDriver(Loop : PosixEventLoop) : EventDriver {
 			return thname.length ? thname : "unknown";
 		}
 
-		string leaking_handle_desc;
+		bool hasPrintedHeader;
 		foreach (id, ref s; m_loop.m_fds) {
-			if (!s.specific.hasType!(typeof(null)) && !(s.common.flags & FDFlags.internal) &&
-			   (!s.specific.hasType!(StreamSocketSlot) || s.streamSocket.state == ConnectionState.connected))
-					try {
-						leaking_handle_desc ~= format!"   FD %s (%s)\n"(id, s.specific.kind);
-					} catch (Exception ex) { print("exception happened in Driver.dispose() during formatting"); }
+			if (!s.specific.hasType!(typeof(null)) && !(s.common.flags & FDFlags.internal)
+				&& (!s.specific.hasType!(StreamSocketSlot) || s.streamSocket.state == ConnectionState.connected))
+			{
+				if (!hasPrintedHeader) {
+					print("Warning (thread: %s): leaking eventcore driver because there are still active handles", getThreadName());
+					hasPrintedHeader = true;
+				}
+				print("  FD %s (%s)", id, s.specific.kind);
+				debug (EventCoreLeakTrace) {
+					import std.array : replace;
+					string origin_str = s.common.origin.toString();
+					print("    Created by;\n      %s",
+						origin_str.replace("\n","\n      "));
+				}
+			}
 		}
-
-		if (leaking_handle_desc.length) {
-			print("Warning (thread: %s): leaking eventcore driver because there are still active handles", getThreadName());
-			print(leaking_handle_desc);
+		debug (EventCoreLeakTrace) {}
+		else {
+			if (hasPrintedHeader)
+					print("Use '-debug=EventCoreLeakTrace' to show where the instantiation happened");
 		}
 
 		if (m_loop.m_handleCount > 0)
@@ -334,8 +344,15 @@ package class PosixEventLoop {
 
 	protected @property int maxFD() const { return cast(int)m_fds.length; }
 
-	protected abstract void dispose();
+	protected void dispose() @nogc { destroy(m_fds); }
 
+	/** Waits for and processes a single batch of events.
+
+		Returns:
+			Returns `false` if no event was received before the timeout expired
+			and `true` if either an event was received, or if the wait was
+			interrupted by an error or signal.
+	*/
 	protected abstract bool doProcessEvents(Duration dur);
 
 	/// Registers the FD for general notification reception.
@@ -390,6 +407,11 @@ package class PosixEventLoop {
 			assert(specific.kind == typeof(specific).Kind.none, "Initializing slot that has not been cleared.");
 			common.refCount = 1;
 			common.flags = flags;
+			debug (EventCoreLeakTrace)
+			{
+				import core.runtime : defaultTraceHandler;
+				common.origin = defaultTraceHandler(null);
+			}
 			specific = slot_init;
 			vc = common.validationCounter;
 		}
@@ -451,6 +473,8 @@ private struct FDSlot {
 
 	DataInitializer userDataDestructor;
 	ubyte[16*size_t.sizeof] userData;
+	debug (EventCoreLeakTrace)
+		Throwable.TraceInfo origin;
 
 	@property EventMask eventMask() const nothrow {
 		EventMask ret = cast(EventMask)0;

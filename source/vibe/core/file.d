@@ -412,6 +412,11 @@ void createDirectory(NativePath path)
 	createDirectory(path.toNativeString);
 }
 /// ditto
+void createDirectory(NativePath path, Flag!"recursive" recursive)
+{
+	createDirectory(path.toNativeString, recursive);
+}
+/// ditto
 void createDirectory(string path, Flag!"recursive" recursive = No.recursive)
 {
 	auto fail = performInWorker((string p, bool rec) {
@@ -633,7 +638,7 @@ struct FileStream {
 	}
 
 	private this(FileFD fd, NativePath path, FileMode mode)
-	{
+	nothrow {
 		assert(fd != FileFD.invalid, "Constructing FileStream from invalid file descriptor.");
 		m_fd = fd;
 		m_ctx = new CTX; // TODO: use FD custom storage
@@ -647,24 +652,24 @@ struct FileStream {
 	}
 
 	this(this)
-	{
+	nothrow {
 		if (m_fd != FileFD.invalid)
 			eventDriver.files.addRef(m_fd);
 	}
 
 	~this()
-	{
+	nothrow {
 		if (m_fd != FileFD.invalid)
 			releaseHandle!"files"(m_fd, m_ctx.driver);
 	}
 
-	@property int fd() { return cast(int)m_fd; }
+	@property int fd() const nothrow { return cast(int)m_fd; }
 
 	/// The path of the file.
-	@property NativePath path() const { return ctx.path; }
+	@property NativePath path() const nothrow { return ctx.path; }
 
 	/// Determines if the file stream is still open
-	@property bool isOpen() const { return m_fd != FileFD.invalid; }
+	@property bool isOpen() const nothrow { return m_fd != FileFD.invalid; }
 	@property ulong size() const nothrow { return ctx.size; }
 	@property bool readable() const nothrow { return ctx.mode != FileMode.append; }
 	@property bool writable() const nothrow { return ctx.mode != FileMode.read; }
@@ -783,7 +788,7 @@ struct FileStream {
 	private inout(CTX)* ctx() inout nothrow { return m_ctx; }
 }
 
-mixin validateRandomAccessStream!FileStream;
+mixin validateClosableRandomAccessStream!FileStream;
 
 
 /**
@@ -808,7 +813,7 @@ struct DirectoryWatcher { // TODO: avoid all those heap allocations!
 		// Support for `-preview=in`
 		static if (!is(typeof(mixin(q{(in ref int a) => a}))))
 		{
-			void onChange(WatcherID id, in FileChange change) nothrow {
+			void onChange(WatcherID id, const scope ref FileChange change) nothrow {
 				this.onChangeImpl(id, change);
 			}
 		} else {
@@ -1146,6 +1151,8 @@ private void performListDirectory(ListDirectoryRequest req)
 							nsecs = __traits(getMember, st, f ~ "ensec");
 						else static if (is(typeof(__traits(getMember, st, "__" ~ f ~ "ensec"))))
 							nsecs = __traits(getMember, st, "__" ~ f ~ "ensec");
+						else static if (is(typeof(__traits(getMember, st, f ~ "e_nsec"))))
+							nsecs = __traits(getMember, st, f ~ "e_nsec");
 						else static if (is(typeof(__traits(getMember, st, "__" ~ f ~ "e_nsec"))))
 							nsecs = __traits(getMember, st, "__" ~ f ~ "e_nsec");
 						else static assert(false, "Found no nanoseconds fields in struct stat");
@@ -1208,8 +1215,12 @@ version (Posix) {
 			 int dirfd(DIR*);
 		static if (!is(typeof(fstatat))) {
 			version (OSX) {
-				pragma(mangle, "fstatat$INODE64")
-				int fstatat(int dirfd, const(char)* pathname, stat_t *statbuf, int flags);
+    				version (AArch64) {
+        				int fstatat(int dirfd, const(char)* pathname, stat_t *statbuf, int flags);
+        			} else {
+						pragma(mangle, "fstatat$INODE64")
+						int fstatat(int dirfd, const(char)* pathname, stat_t *statbuf, int flags);
+    				}
 			} else int fstatat(int dirfd, const(char)* pathname, stat_t *statbuf, int flags);
 		}
 	}
@@ -1220,6 +1231,11 @@ version (Posix) {
 	}
 
 	version (CRuntime_Musl) {
+		static if (!is(typeof(AT_SYMLINK_NOFOLLOW)))
+			enum AT_SYMLINK_NOFOLLOW = 0x0100;
+	}
+
+	version (Android) {
 		static if (!is(typeof(AT_SYMLINK_NOFOLLOW)))
 			enum AT_SYMLINK_NOFOLLOW = 0x0100;
 	}

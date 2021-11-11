@@ -453,7 +453,7 @@ class RestException : HTTPStatusException {
 		Throwable next = null) @safe
 	{
 		Json jsonResult = Json.emptyObject;
-		jsonResult["message"] = result;
+		jsonResult["statusMessage"] = result;
 		this(status, jsonResult, file, line);
 	}
 
@@ -554,7 +554,7 @@ struct ResultSerializer(alias ST, alias DT, string ContentType) {
 }
 
 
-package void defaultSerialize (alias P, T, RT) (ref RT output_range, in ref T value)
+package void defaultSerialize (alias P, T, RT) (ref RT output_range, const scope ref T value)
 {
 	static struct R {
 		typeof(output_range) underlying;
@@ -572,7 +572,7 @@ package T defaultDeserialize (alias P, T, R) (R input_range)
 }
 
 package alias DefaultSerializerT = ResultSerializer!(
-	defaultSerialize, defaultDeserialize, "application/json");
+	defaultSerialize, defaultDeserialize, "application/json; charset=UTF-8");
 
 
 /// Convenience template to get all the ResultSerializers for a function
@@ -850,19 +850,19 @@ enum MethodStyle
 	/// UPPER-CASE-NAMING
 	upperDashed,
 
-	/// deprecated
+	deprecated
 	Unaltered = unaltered,
-	/// deprecated
+	deprecated
 	CamelCase = camelCase,
-	/// deprecated
+	deprecated
 	PascalCase = pascalCase,
-	/// deprecated
+	deprecated
 	LowerCase = lowerCase,
-	/// deprecated
+	deprecated
 	UpperCase = upperCase,
-	/// deprecated
+	deprecated
 	LowerUnderscored = lowerUnderscored,
-	/// deprecated
+	deprecated
 	UpperUnderscored = upperUnderscored,
 }
 

@@ -22,20 +22,21 @@ import core.thread;
 import std.traits : isSomeString;
 import std.range.primitives : isInputRange, isOutputRange;
 
-LogLevel getLogLevel()
-nothrow @safe {
-	return ss_stdoutLogger ? ss_stdoutLogger.lock().minLevel : LogLevel.none;
-}
-
 /**
 	Sets the minimum log level to be printed using the default console logger.
 
 	This level applies to the default stdout/stderr logger only.
 */
 void setLogLevel(LogLevel level)
-nothrow @safe {
+@safe nothrow {
 	if (ss_stdoutLogger)
 		ss_stdoutLogger.lock().minLevel = level;
+}
+
+/// Gets the minimum log level used for stdout/stderr logging.
+LogLevel getLogLevel()
+@safe nothrow {
+	return ss_stdoutLogger ? ss_stdoutLogger.lock().minLevel : LogLevel.none;
 }
 
 

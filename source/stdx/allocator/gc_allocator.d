@@ -22,7 +22,7 @@ struct GCAllocator
     deallocate) and $(D reallocate) methods are $(D @system) because they may
     move memory around, leaving dangling pointers in user code.
     */
-    static pure nothrow @trusted void[] allocate()(size_t bytes)
+    pure nothrow @trusted void[] allocate(size_t bytes) shared
     {
         if (!bytes) return null;
         auto p = GC.malloc(bytes);
@@ -30,7 +30,7 @@ struct GCAllocator
     }
 
     /// Ditto
-    static @system bool expand()(ref void[] b, size_t delta)
+    @system bool expand(ref void[] b, size_t delta) shared
     {
         if (delta == 0) return true;
         if (b is null) return false;
@@ -53,7 +53,7 @@ struct GCAllocator
     }
 
     /// Ditto
-    static pure nothrow @system bool reallocate()(ref void[] b, size_t newSize)
+    pure nothrow @system bool reallocate(ref void[] b, size_t newSize) shared
     {
         import core.exception : OutOfMemoryError;
         try
@@ -71,7 +71,7 @@ struct GCAllocator
 
     /// Ditto
     pure nothrow
-    static Ternary resolveInternalPointer()(const void* p, ref void[] result)
+    Ternary resolveInternalPointer(const void* p, ref void[] result) shared
     {
         auto r = GC.addrOf(cast(void*) p);
         if (!r) return Ternary.no;
@@ -80,14 +80,14 @@ struct GCAllocator
     }
 
     /// Ditto
-    static pure nothrow @system bool deallocate()(void[] b)
+    pure nothrow @system bool deallocate(void[] b) shared
     {
         GC.free(b.ptr);
         return true;
     }
 
     /// Ditto
-    static size_t goodAllocSize()(size_t n)
+    size_t goodAllocSize(size_t n) shared
     {
         if (n == 0)
             return 0;
@@ -105,14 +105,15 @@ struct GCAllocator
     }
 
     /**
-    Returns the global instance of this allocator type. The garbage collected allocator is
-    thread-safe, therefore all of its methods are $(D static) and `instance` itself is
-    $(D shared).
+    Returns the global instance of this allocator type. The garbage collected
+    allocator is thread-safe, therefore all of its methods and `instance` itself
+    are $(D shared).
     */
-    enum GCAllocator instance = GCAllocator();
+
+    static shared GCAllocator instance;
 
     // Leave it undocummented for now.
-    static nothrow @trusted void collect()()
+    nothrow @trusted void collect() shared
     {
         GC.collect();
     }

@@ -8,7 +8,8 @@
 module vibe.core.taskpool;
 
 import vibe.core.concurrency : isWeaklyIsolated;
-import vibe.core.core : exitEventLoop, logicalProcessorCount, runEventLoop, runTask, runTask_internal;
+import vibe.core.core : exitEventLoop, isCallable, isMethod, isNothrowCallable,
+	isNothrowMethod, logicalProcessorCount, runEventLoop, runTask, runTask_internal;
 import vibe.core.log;
 import vibe.core.sync : ManualEvent, VibeSyncMonitor = Monitor, createSharedManualEvent, createMonitor;
 import vibe.core.task : Task, TaskFuncInfo, TaskSettings, callWithMove;
@@ -38,7 +39,7 @@ shared final class TaskPool {
 			thread_count = The number of worker threads to create
 	*/
 	this(size_t thread_count = logicalProcessorCount())
-	@safe {
+	@safe nothrow {
 		import std.format : format;
 
 		m_threadCount = thread_count;
@@ -50,9 +51,10 @@ shared final class TaskPool {
 			threads.length = thread_count;
 			foreach (i; 0 .. thread_count) {
 				WorkerThread thr;
-				() @trusted {
+				() @trusted nothrow {
 					thr = new WorkerThread(this);
-					thr.name = format("vibe-%s", i);
+					try thr.name = format("vibe-%s", i);
+					catch (Exception e) logException(e, "Failed to set worker thread name");
 					thr.start();
 				} ();
 				threads[i] = thr;
@@ -62,7 +64,7 @@ shared final class TaskPool {
 
 	/** Returns the number of worker threads.
 	*/
-	@property size_t threadCount() const shared { return m_threadCount; }
+	@property size_t threadCount() const shared nothrow { return m_threadCount; }
 
 	/** Instructs all worker threads to terminate and waits until all have
 		finished.
@@ -148,7 +150,52 @@ shared final class TaskPool {
 		able to guarantee thread-safety.
 	*/
 	Task runTaskH(FT, ARGS...)(FT func, auto ref ARGS args)
-		if (isFunctionPointer!FT)
+		if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
+	{
+		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
+
+		// workaround for runWorkerTaskH to work when called outside of a task
+		if (Task.getThis() == Task.init) {
+			Task ret;
+			.runTask(() nothrow { ret = doRunTaskH(TaskSettings.init, func, args); }).joinUninterruptible();
+			return ret;
+		} else return doRunTaskH(TaskSettings.init, func, args);
+	}
+	/// ditto
+	Task runTaskH(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
+		if (isNothrowMethod!(shared(T), method, ARGS))
+	{
+		static void wrapper()(shared(T) object, ref ARGS args) {
+			__traits(getMember, object, __traits(identifier, method))(args);
+		}
+		return runTaskH(&wrapper!(), object, args);
+	}
+	/// ditto
+	Task runTaskH(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
+		if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
+	{
+		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
+
+		// workaround for runWorkerTaskH to work when called outside of a task
+		if (Task.getThis() == Task.init) {
+			Task ret;
+			.runTask(() nothrow { ret = doRunTaskH(settings, func, args); }).joinUninterruptible();
+			return ret;
+		} else return doRunTaskH(settings, func, args);
+	}
+	/// ditto
+	Task runTaskH(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
+		if (isNothrowMethod!(shared(T), method, ARGS))
+	{
+		static void wrapper()(shared(T) object, ref ARGS args) {
+			__traits(getMember, object, __traits(identifier, method))(args);
+		}
+		return runTaskH(settings, &wrapper!(), object, args);
+	}
+	/// ditto
+	deprecated("The `func` argument should be `nothrow`.")
+	Task runTaskH(FT, ARGS...)(FT func, auto ref ARGS args)
+		if (isFunctionPointer!FT && isCallable!(FT, ARGS) && !isNothrowCallable!(FT, ARGS))
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 
@@ -160,8 +207,9 @@ shared final class TaskPool {
 		} else return doRunTaskH(TaskSettings.init, func, args);
 	}
 	/// ditto
+	deprecated("The `method` argument should be `nothrow`.")
 	Task runTaskH(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
-		if (is(typeof(__traits(getMember, object, __traits(identifier, method)))))
+		if (isMethod!(shared(T), method, ARGS) && !isNothrowMethod!(shared(T), method, ARGS))
 	{
 		static void wrapper()(shared(T) object, ref ARGS args) {
 			__traits(getMember, object, __traits(identifier, method))(args);
@@ -169,8 +217,9 @@ shared final class TaskPool {
 		return runTaskH(&wrapper!(), object, args);
 	}
 	/// ditto
+	deprecated("The `func` argument should be `nothrow`.")
 	Task runTaskH(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
-		if (isFunctionPointer!FT)
+		if (isFunctionPointer!FT && isCallable!(FT, ARGS) && !isNothrowCallable!(FT, ARGS))
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 
@@ -182,8 +231,9 @@ shared final class TaskPool {
 		} else return doRunTaskH(settings, func, args);
 	}
 	/// ditto
+	deprecated("The `method` argument should be `nothrow`.")
 	Task runTaskH(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
-		if (is(typeof(__traits(getMember, object, __traits(identifier, method)))))
+		if (isMethod!(shared(T), method, ARGS) && !isNothrowMethod!(shared(T), method, ARGS))
 	{
 		static void wrapper()(shared(T) object, ref ARGS args) {
 			__traits(getMember, object, __traits(identifier, method))(args);
@@ -210,7 +260,8 @@ shared final class TaskPool {
 			mixin(callWithMove!ARGS("func", "args"));
 		}
 		runTask_unsafe(settings, &taskFun, caller, func, args);
-		return cast(Task)() @trusted { return receiveOnly!PrivateTask(); } ();
+		try return cast(Task)() @trusted { return receiveOnly!PrivateTask(); } ();
+		catch (Exception e) assert(false, "Failed to reveice task handle: " ~ e.msg);
 	}
 
 
@@ -224,13 +275,14 @@ shared final class TaskPool {
 		`threadCount`.
 	*/
 	void runTaskDist(FT, ARGS...)(FT func, auto ref ARGS args)
-		if (is(typeof(*func) == function))
+		if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 		runTaskDist_unsafe(TaskSettings.init, func, args);
 	}
 	/// ditto
 	void runTaskDist(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
+		if (isNothrowMethod!(shared(T), method, ARGS))
 	{
 		auto func = &__traits(getMember, object, __traits(identifier, method));
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
@@ -239,13 +291,50 @@ shared final class TaskPool {
 	}
 	/// ditto
 	void runTaskDist(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
-		if (is(typeof(*func) == function))
+		if (isFunctionPointer!FT && isNothrowCallable!(FT, ARGS))
 	{
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 		runTaskDist_unsafe(settings, func, args);
 	}
 	/// ditto
 	void runTaskDist(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
+		if (isNothrowMethod!(shared(T), method, ARGS))
+	{
+		auto func = &__traits(getMember, object, __traits(identifier, method));
+		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
+
+		runTaskDist_unsafe(settings, func, args);
+	}
+	/// ditto
+	deprecated("The `func` argument should be `nothrow`.")
+	void runTaskDist(FT, ARGS...)(FT func, auto ref ARGS args)
+		if (isFunctionPointer!FT && isCallable!(FT, ARGS) && !isNothrowCallable!(FT, ARGS))
+	{
+		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
+		runTaskDist_unsafe(TaskSettings.init, func, args);
+	}
+	/// ditto
+	deprecated("The `method` argument should be `nothrow`.")
+	void runTaskDist(alias method, T, ARGS...)(shared(T) object, auto ref ARGS args)
+		if (isMethod!(shared(T), method, ARGS) && !isNothrowMethod!(shared(T), method, ARGS))
+	{
+		auto func = &__traits(getMember, object, __traits(identifier, method));
+		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
+
+		runTaskDist_unsafe(TaskSettings.init, func, args);
+	}
+	/// ditto
+	deprecated("The `func` argument should be `nothrow`.")
+	void runTaskDist(FT, ARGS...)(TaskSettings settings, FT func, auto ref ARGS args)
+		if (isFunctionPointer!FT && isCallable!(FT, ARGS) && !isNothrowCallable!(FT, ARGS))
+	{
+		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
+		runTaskDist_unsafe(settings, func, args);
+	}
+	/// ditto
+	deprecated("The `method` argument should be `nothrow`.")
+	void runTaskDist(alias method, T, ARGS...)(TaskSettings settings, shared(T) object, auto ref ARGS args)
+		if (isMethod!(shared(T), method, ARGS) && !isNothrowMethod!(shared(T), method, ARGS))
 	{
 		auto func = &__traits(getMember, object, __traits(identifier, method));
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
@@ -275,12 +364,18 @@ shared final class TaskPool {
 
 		// workaround to work when called outside of a task
 		if (caller == Task.init) {
-			.runTask({ runTaskDistH(on_handle, func, args); }).join();
+			Exception ex;
+			.runTask(() {
+				try runTaskDistH(on_handle, func, args);
+				catch (Exception e) ex = e;
+			}).joinUninterruptible();
+			if (ex) throw ex;
 			return;
 		}
 
 		static void call(Task t, FT func, ARGS args) {
-			t.tid.send(Task.getThis());
+			try t.tid.send(Task.getThis());
+			catch (Exception e) assert(false, e.msg);
 			func(args);
 		}
 		runTaskDist(settings, &call, caller, func, args);
@@ -331,7 +426,7 @@ private final class WorkerThread : Thread {
 	}
 
 	this(shared(TaskPool) pool)
-	{
+	nothrow {
 		m_pool = pool;
 		m_queue.setup();
 		super(&main);

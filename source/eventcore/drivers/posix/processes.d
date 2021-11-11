@@ -64,7 +64,7 @@ final class PosixEventDriverProcesses(Loop : PosixEventLoop) : EventDriverProces
 		string working_dir)
 	@trusted {
 		// Use std.process to spawn processes
-		import std.process : pipe, Pid, spawnProcess;
+		import std.process : pipe, Pid, spawnProcess, StdProcessConfig = Config;
 		import std.stdio : File;
 		static import std.stdio;
 
@@ -135,14 +135,13 @@ final class PosixEventDriverProcesses(Loop : PosixEventLoop) : EventDriverProces
 				stderrFile = stdoutFile;
 			}
 
-			static import std.process;
 			Pid stdPid = spawnProcess(
 				args,
 				stdinFile,
 				stdoutFile,
 				stderrFile,
 				env,
-				cast(std.process.Config)config,
+				cast(StdProcessConfig)config,
 				working_dir);
 			process.pid = adopt(stdPid.osHandle);
 			stdPid.destroy();
@@ -344,7 +343,14 @@ final class PosixEventDriverProcesses(Loop : PosixEventLoop) : EventDriverProces
 
 		while (true) {
 			siginfo_t dummy;
-			auto ret = waitid(idtype_t.P_ALL, -1, &dummy, WEXITED|WNOWAIT);
+
+			version (Android) {
+				// P_ALL is defined as 0 on android
+				auto ret = waitid(0, -1, &dummy, WEXITED|WNOWAIT);
+			} else {
+				auto ret = waitid(idtype_t.P_ALL, -1, &dummy, WEXITED|WNOWAIT);
+			}
+
 			if (ret == -1) {
 				{
 					s_mutex.lock_nothrow();

@@ -85,6 +85,12 @@ interface EventDriverCore {
 		in the event queue. The function will return after either the specified
 		timeout has elapsed, or once the event queue has been fully emptied.
 
+		On implementations that support it, the function will treat
+		interruptions by POSIX signals as if an event was received and will
+		cause it to return. However, note that it is generally recommended to
+		use `EventDriverSignals` instead of raw signal handlers in order to
+		avoid their pitfalls as far as possible.
+
 		Params:
 			timeout = Maximum amount of time to wait for an event. A duration of
 				zero will cause the function to only process pending events. A
@@ -316,12 +322,16 @@ interface EventDriverSockets {
 			target_address = Optional default target address. If this is
 				specified and the target address parameter of `send` is
 				left to `null`, it will be used instead.
+			options = Optional options for datagram creation. If unset,
+				`DatagramCreateOptions.init` is used.
 
 		Returns:
 			Returns a datagram socket handle if the socket was created
 			successfully. Otherwise returns `DatagramSocketFD.invalid`.
 	*/
-	DatagramSocketFD createDatagramSocket(scope Address bind_address, scope Address target_address);
+	DatagramSocketFD createDatagramSocket(scope Address bind_address,
+		scope Address target_address,
+		DatagramCreateOptions options = DatagramCreateOptions.init);
 
 	/** Adopts an existing datagram socket.
 
@@ -674,15 +684,40 @@ interface EventDriverSignals {
 interface EventDriverTimers {
 @safe: /*@nogc:*/ nothrow:
 	TimerID create();
+
+	/** Run the timer.
+
+		Params:
+			timer = the id of the timer, created by `create` call.
+			timeout = a duration to the first firing of the timer
+			repeat = a duration between periodic timer firings - set to zero
+				to set a single-fire timer
+	*/
 	void set(TimerID timer, Duration timeout, Duration repeat);
+
 	void stop(TimerID timer);
+
 	bool isPending(TimerID timer);
 	bool isPeriodic(TimerID timer);
+
+	/** Waits for the timer to fire.
+
+		Important: the callback of the timer will be called exactly once, unless
+		`cancelWait` gets called first. `wait` needs to be called again to
+		receive future timer events (see https://github.com/vibe-d/eventcore/issues/172
+		for reasons behind that behavior).
+
+		Note that the `TimerCallback` based overload will not call the
+		callback if `stop` gets called before the timer fires, whereas the
+		`TimerCallback2` based overload will call the callback with the `fired`
+		parameter set to `false`.
+	*/
 	final void wait(TimerID timer, TimerCallback callback) {
 		wait(timer, (tm, fired) {
 			if (fired) callback(tm);
 		});
 	}
+	/// ditto
 	void wait(TimerID timer, TimerCallback2 callback);
 	void cancelWait(TimerID timer);
 
@@ -968,14 +1003,14 @@ final class RefAddress : Address {
 	this() @safe nothrow {}
 	this(sockaddr* addr, socklen_t addr_len) @safe nothrow { set(addr, addr_len); }
 
-	override @property sockaddr* name() { return m_addr; }
-	override @property const(sockaddr)* name() const { return m_addr; }
-	override @property socklen_t nameLen() const { return m_addrLen; }
+	override @property sockaddr* name() scope { return m_addr; }
+	override @property const(sockaddr)* name() const scope { return m_addr; }
+	override @property socklen_t nameLen() const scope { return m_addrLen; }
 
 	void set(sockaddr* addr, socklen_t addr_len) @safe nothrow { m_addr = addr; m_addrLen = addr_len; }
 
 	void cap(socklen_t new_len)
-	@safe nothrow {
+	scope @safe nothrow {
 		assert(new_len <= m_addrLen, "Cannot grow size of a RefAddress.");
 		m_addrLen = new_len;
 	}
@@ -996,18 +1031,7 @@ alias EventCallback = void delegate(EventID);
 alias SignalCallback = void delegate(SignalListenID, SignalStatus, int);
 alias TimerCallback = void delegate(TimerID);
 alias TimerCallback2 = void delegate(TimerID, bool fired);
-// Support for `-preview=in`
-// Using template because of https://issues.dlang.org/show_bug.cgi?id=21207
-private template FileChangesCallbackWorkaround ()
-{
-	static if (!is(typeof(mixin(q{(in ref int a) => a}))))
-		alias FileChangesCallbackWorkaround = void delegate(WatcherID, in FileChange change);
-	else
-		mixin(q{
-			alias FileChangesCallbackWorkaround = void delegate(WatcherID, in ref FileChange change);
-		});
-}
-alias FileChangesCallback = FileChangesCallbackWorkaround!();
+alias FileChangesCallback = void delegate(WatcherID, ref const FileChange change);
 
 alias ProcessWaitCallback = void delegate(ProcessID, int);
 @system alias DataInitializer = void function(void*) @nogc;
@@ -1063,6 +1087,14 @@ enum StreamListenOptions {
 enum StreamSocketOption {
 	noDelay,
 	keepAlive
+}
+
+enum DatagramCreateOptions {
+	none = 0,
+	/// Applies the `SO_REUSEPORT` flag
+	reusePort = 1<<0,
+	/// Avoids applying the `SO_REUSEADDR` flag
+	reuseAddress = 1<<1,
 }
 
 enum DatagramSocketOption {

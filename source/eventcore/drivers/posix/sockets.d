@@ -96,6 +96,11 @@ version (Windows) {
 	extern (C) int close(int fd) nothrow @safe;
 }
 
+version (Android) {
+	static if (!is(typeof(MSG_NOSIGNAL)))
+		enum MSG_NOSIGNAL = 0x4000;
+}
+
 version (Posix) {
 	version (OSX) {
 		enum SEND_FLAGS = 0;
@@ -117,7 +122,8 @@ final class PosixEventDriverSockets(Loop : PosixEventLoop) : EventDriverSockets 
 	{
 		assert(on_connect !is null);
 
-		auto sockfd = createSocket(address.addressFamily, SOCK_STREAM);
+		// @trusted to escape DIP1000's `scope` check
+		auto sockfd = () @trusted { return createSocket(address.addressFamily, SOCK_STREAM); }();
 		if (sockfd == -1) {
 			on_connect(StreamSocketFD.invalid, ConnectStatus.socketCreateFailure);
 			return StreamSocketFD.invalid;
@@ -221,7 +227,8 @@ final class PosixEventDriverSockets(Loop : PosixEventLoop) : EventDriverSockets 
 	alias listenStream = EventDriverSockets.listenStream;
 	final override StreamListenSocketFD listenStream(scope Address address, StreamListenOptions options, AcceptCallback on_accept)
 	{
-		auto sockfd = createSocket(address.addressFamily, SOCK_STREAM);
+		// @trusted to escape DIP1000's `scope` check
+		auto sockfd = () @trusted { return createSocket(address.addressFamily, SOCK_STREAM); }();
 		if (sockfd == -1) return StreamListenSocketFD.invalid;
 
 		auto succ = () @trusted {
@@ -696,15 +703,42 @@ final class PosixEventDriverSockets(Loop : PosixEventLoop) : EventDriverSockets 
 		m_loop.m_fds[socket].streamSocket.state = shut_read ? shut_write ? ConnectionState.closed : ConnectionState.passiveClose : shut_write ? ConnectionState.activeClose : ConnectionState.connected;
 	}
 
-	final override DatagramSocketFD createDatagramSocket(scope Address bind_address, scope Address target_address)
+	final override DatagramSocketFD createDatagramSocket(scope Address bind_address,
+		scope Address target_address, DatagramCreateOptions options = DatagramCreateOptions.init)
 	{
-		return createDatagramSocketInternal(bind_address, target_address, false);
+		return createDatagramSocketInternal(bind_address, target_address, options, false);
 	}
 
-	package DatagramSocketFD createDatagramSocketInternal(scope Address bind_address, scope Address target_address, bool is_internal = true)
+	package DatagramSocketFD createDatagramSocketInternal(scope Address bind_address,
+		scope Address target_address, DatagramCreateOptions options = DatagramCreateOptions.init,
+		bool is_internal = true)
 	{
-		auto sockfd = createSocket(bind_address.addressFamily, SOCK_DGRAM);
+		// @trusted to escape DIP1000's `scope` check
+		auto sockfd = () @trusted { return createSocket(bind_address.addressFamily, SOCK_DGRAM); }();
 		if (sockfd == -1) return DatagramSocketFD.invalid;
+
+		auto optsucc = () @trusted {
+			int tmp_reuse = 1;
+			// FIXME: error handling!
+			if (options & DatagramCreateOptions.reuseAddress) {
+				if (setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR, &tmp_reuse, tmp_reuse.sizeof) != 0)
+					return false;
+			}
+
+			version (Windows) {}
+			else {
+				if ((options & DatagramCreateOptions.reusePort) && setsockopt(sockfd, SOL_SOCKET, SO_REUSEPORT, &tmp_reuse, tmp_reuse.sizeof) != 0)
+					return false;
+			}
+
+			return true;
+		} ();
+
+		if (!optsucc) {
+			closeSocket(sockfd);
+			return DatagramSocketFD.init;
+		}
+
 
 		if (bind_address && () @trusted { return bind(sockfd, bind_address.name, bind_address.nameLen); } () != 0) {
 			closeSocket(sockfd);
@@ -773,7 +807,8 @@ final class PosixEventDriverSockets(Loop : PosixEventLoop) : EventDriverSockets 
 	{
 		if (!isValid(socket)) return false;
 
-		switch (multicast_address.addressFamily) {
+		// @trusted to escape DIP1000's `scope` check
+		switch (() @trusted { return multicast_address.addressFamily; }()) {
 			default: assert(false, "Multicast only supported for IPv4/IPv6 sockets.");
 			case AddressFamily.INET:
 				struct ip_mreq {
@@ -795,7 +830,13 @@ final class PosixEventDriverSockets(Loop : PosixEventLoop) : EventDriverSockets 
 				auto addr = () @trusted { return cast(sockaddr_in6*)multicast_address.name; } ();
 				ipv6_mreq mreq;
 				mreq.ipv6mr_multiaddr = addr.sin6_addr;
-				mreq.ipv6mr_interface = htonl(interface_index);
+
+				version (Android) {
+					// ipv6mr_interface is defined as ipv6mr_ifindex on android
+					mreq.ipv6mr_ifindex = htonl(interface_index);
+				} else {
+					mreq.ipv6mr_interface = htonl(interface_index);
+				}
 				return () @trusted { return setsockopt(cast(sock_t)socket, IPPROTO_IP, IPV6_JOIN_GROUP, &mreq, ipv6_mreq.sizeof); } () == 0;
 		}
 	}

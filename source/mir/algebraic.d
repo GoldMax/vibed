@@ -226,7 +226,7 @@ struct TaggedType(T, string name)
     static if (!is(T == void) && !is(T == typeof(null)))
         private T payload;
 @safe pure nothrow @nogc const:
-    int opCmp(typeof(this)) { return 0; }
+    int opCmp(ref typeof(this)) { return 0; }
     string toString() { return typeof(this).stringof; }
 }
 
@@ -286,6 +286,18 @@ be arbitrarily complex.
     assert(obj.get!double == 42);
     obj = ["customer": Obj("John"), "paid": Obj(23.95)];
     assert(obj.get!Map["customer"] == "John");
+}
+
+version(mir_core_test) unittest
+{
+   static struct Foo
+   {
+      ~this() @system
+      {
+      }
+   }
+   alias TFoo = TaggedType!(Foo, "foo");
+   TFoo foo;
 }
 
 
@@ -524,9 +536,12 @@ version(mir_core_test) unittest
     JsonValue v;
     assert(v.kind == JsonValue.Kind.null_);
 
-    v = 5;
-    assert(v == 5);
+    v = 1;
     assert(v.kind == JsonValue.Kind.integer);
+    assert(v == 1);
+    v = JsonValue(1);
+    assert(v == 1);
+    v = v.get!(long, double);
 
     v = "Tagged!";
     assert(v.get       !string                  == "Tagged!");
@@ -1040,7 +1055,7 @@ struct Algebraic(_Types...)
 
     /++
     +/
-    bool opEquals()(auto ref const typeof(this) rhs) const
+    bool opEquals()(auto ref const typeof(this) rhs) const @trusted
     {
         static if (AllowedTypes.length == 0)
         {
@@ -1065,7 +1080,7 @@ struct Algebraic(_Types...)
     /++
     +/
     static if (is(AllowedTypes == _Types))
-    auto opCmp()(auto ref const typeof(this) rhs) const
+    auto opCmp()(auto ref const typeof(this) rhs) const @trusted
     {
         static if (AllowedTypes.length == 0)
         {
@@ -1199,7 +1214,7 @@ struct Algebraic(_Types...)
                     static foreach (i, T; AllowedTypes[1 .. $])
                     {
                         {
-                            case i:
+                            case i + 1:
                                 if (!hasElaborateCopyConstructor!T && !__ctfe)
                                     goto default;
                                 ret = this.trustedGet!T;
@@ -1492,6 +1507,8 @@ struct Algebraic(_Types...)
             member != "toHash" &&
             member != "toString" &&
             member != "trustedGet" &&
+            member != "deserializeFromAsdf" &&
+            member != "deserializeFromIon" &&
             !(member.length >= 2 && member[0 .. 2] == "__"))
         static if (allSatisfy!(ApplyRight!(hasMember, member), _ReflectionTypes))
         static if (!anySatisfy!(ApplyRight!(isMemberType, member), _ReflectionTypes))
@@ -1512,6 +1529,17 @@ struct Algebraic(_Types...)
                 mixin(`auto ref ` ~ member ~q{(this This, Args...)(auto ref Args args) { static if (args.length) { import core.lifetime: forward; return this.getMember!member(forward!args); } else return this.getMember!member;  }});
             }
         }
+    }
+
+    ///
+    ref opAssign(RhsTypes...)(Algebraic!RhsTypes rhs) return @trusted
+        if (RhsTypes.length < AllowedTypes.length && allSatisfy!(Contains!AllowedTypes, Algebraic!RhsTypes.AllowedTypes))
+    {
+        import core.lifetime: forward;
+        static if (anySatisfy!(hasElaborateDestructor, AllowedTypes))
+            this.__dtor();
+        __ctor(forward!rhs);
+        return this;
     }
 
     static foreach (int i, T; AllowedTypes)
@@ -1657,9 +1685,10 @@ struct Algebraic(_Types...)
             ///
             ref opAssign(T rhs) return @trusted
             {
+                import core.lifetime: forward;
                 static if (anySatisfy!(hasElaborateDestructor, AllowedTypes))
                     this.__dtor();
-                __ctor(rhs);
+                __ctor(forward!rhs);
                 return this;
             }
 
@@ -1692,6 +1721,76 @@ struct Algebraic(_Types...)
                 else
                     return trustedGet!T < rhs ? -1 :
                         trustedGet!T > rhs ? +1 : 0;
+            }
+
+            static if (is(Unqual!T == bool))
+            {
+                private alias contains = Contains!AllowedTypes;
+                static if (contains!long && !contains!int)
+                {
+                    this(int value)
+                    {
+                        this(long(value));
+                    }
+
+                    this(int value) const
+                    {
+                        this(long(value));
+                    }
+
+                    this(int value) immutable
+                    {
+                        this(long(value));
+                    }
+
+                    ref opAssign(int rhs) return @trusted
+                    {
+                        return opAssign(long(rhs));
+                    }
+
+                    auto opEquals()(int rhs) const
+                    {
+                        return opEquals(long(rhs));
+                    } 
+
+                    auto opCmp()(int rhs) const
+                    {
+                        return opCmp(long(rhs));
+                    }
+                }
+
+                static if (contains!ulong && !contains!uint)
+                {
+                    this(uint value)
+                    {
+                        this(ulong(value));
+                    }
+
+                    this(uint value) const
+                    {
+                        this(ulong(value));
+                    }
+
+                    this(uint value) immutable
+                    {
+                        this(ulong(value));
+                    }
+
+                    ref opAssign(uint rhs) return @trusted
+                    {
+                        return opAssign(ulong(rhs));
+                    }
+
+                    auto opEquals()(uint rhs) const
+                    {
+                        return opEquals(ulong(rhs));
+                    } 
+
+                    auto opCmp()(uint rhs) const
+                    {
+                        return opCmp(ulong(rhs));
+                    }
+                }
             }
         }
     }
@@ -2294,12 +2393,21 @@ unittest
     assertThrown!Exception(collide(oa, es));
     assertThrown!Exception(collide(oa, os));
 
-     // not enough information to deduce the type from (ea, es) pair
-    static assert(is(typeof(collide(ea, es)) == void));
     // can deduce the type based on other return values
     static assert(is(typeof(collide(ea, os)) == string));
     static assert(is(typeof(collide(oa, es)) == string));
     static assert(is(typeof(collide(oa, os)) == string));
+
+    // Also allows newer compilers to detect combinations which always throw an exception
+    static if (is(typeof(collideWith(ea, es)) == noreturn))
+    {
+        static assert(is(typeof(collide(ea, es)) == string));
+    }
+    else
+    {
+        // not enough information to deduce the type from (ea, es) pair
+        static assert(is(typeof(collide(ea, es)) == void));
+    }
 
     // Spaceship-Asteroid
     assert(collide(es, ea) == "s/a");

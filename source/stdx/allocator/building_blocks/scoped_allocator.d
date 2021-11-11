@@ -24,6 +24,7 @@ struct ScopedAllocator(ParentAllocator)
 
     import stdx.allocator.building_blocks.affix_allocator
         : AffixAllocator;
+    import std.traits : hasMember;
     import stdx.allocator.internal : Ternary;
 
     private struct Node
@@ -97,7 +98,7 @@ struct ScopedAllocator(ParentAllocator)
     /**
     Forwards to $(D parent.expand(b, delta)).
     */
-    static if (__traits(hasMember, Allocator, "expand"))
+    static if (hasMember!(Allocator, "expand"))
     bool expand(ref void[] b, size_t delta)
     {
         auto result = parent.expand(b, delta);
@@ -138,7 +139,7 @@ struct ScopedAllocator(ParentAllocator)
     /**
     Forwards to $(D parent.owns(b)).
     */
-    static if (__traits(hasMember, Allocator, "owns"))
+    static if (hasMember!(Allocator, "owns"))
     Ternary owns(void[] b)
     {
         return parent.owns(b);
@@ -147,7 +148,7 @@ struct ScopedAllocator(ParentAllocator)
     /**
     Deallocates $(D b).
     */
-    static if (__traits(hasMember, Allocator, "deallocate"))
+    static if (hasMember!(Allocator, "deallocate"))
     bool deallocate(void[] b)
     {
         // Remove from list
@@ -209,13 +210,12 @@ struct ScopedAllocator(ParentAllocator)
 
 @system unittest // https://issues.dlang.org/show_bug.cgi?id=16046
 {
+    import std.exception;
     import stdx.allocator;
     import stdx.allocator.mallocator;
     ScopedAllocator!Mallocator alloc;
-    auto foo = alloc.make!int(1);
-    auto bar = alloc.make!int(2);
-    assert(foo);
-    assert(bar);
+    auto foo = alloc.make!int(1).enforce;
+    auto bar = alloc.make!int(2).enforce;
     alloc.dispose(foo);
     alloc.dispose(bar); // segfault here
 }

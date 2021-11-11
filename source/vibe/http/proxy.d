@@ -7,6 +7,7 @@
 */
 module vibe.http.proxy;
 
+import vibe.core.core : runTask;
 import vibe.core.log;
 import vibe.http.client;
 import vibe.http.server;
@@ -109,8 +110,16 @@ HTTPServerRequestDelegateS proxyRequest(HTTPProxySettings settings)
 			auto scon = res.connectProxy();
 			assert (scon);
 
-			import vibe.core.core : runTask;
-			runTask({ scon.pipe(ccon); });
+			runTask(() nothrow {
+				try scon.pipe(ccon);
+				catch (Exception e) {
+					logException(e, "Failed to forward proxy data from server to client");
+					try scon.close();
+					catch (Exception e) logException(e, "Failed to close server connection after error");
+					try ccon.close();
+					catch (Exception e) logException(e, "Failed to close client connection after error");
+				}
+			});
 			ccon.pipe(scon);
 			return;
 		}
@@ -157,8 +166,16 @@ HTTPServerRequestDelegateS proxyRequest(HTTPProxySettings settings)
 				auto scon = res.switchProtocol("");
 				auto ccon = cres.switchProtocol("");
 
-				import vibe.core.core : runTask;
-				runTask({ ccon.pipe(scon); });
+				runTask(() nothrow {
+					try ccon.pipe(scon);
+					catch (Exception e) {
+						logException(e, "Failed to forward proxy data from client to server");
+						try scon.close();
+						catch (Exception e) logException(e, "Failed to close server connection after error");
+						try ccon.close();
+						catch (Exception e) logException(e, "Failed to close client connection after error");
+					}
+				});
 
 				scon.pipe(ccon);
 				return;

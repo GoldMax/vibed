@@ -34,7 +34,7 @@ import vibe.utils.string;
 import core.atomic;
 import core.vararg;
 import diet.traits : SafeFilterCallback, dietTraits;
-import std.algorithm : canFind;
+import std.algorithm : canFind, splitter;
 import std.array;
 import std.conv;
 import std.datetime;
@@ -209,7 +209,7 @@ void handleHTTPConnection(TCPConnection connection, HTTPServerContext context)
 	// Set NODELAY to true, to avoid delays caused by sending the response
 	// header and body in separate chunks. Note that to avoid other performance
 	// issues (caused by tiny packets), this requires using an output buffer in
-	// the event driver, which is the case at least for the default libevent
+	// the event driver, which is the case at least for the legacy libevent
 	// based driver.
 	connection.tcpNoDelay = true;
 
@@ -412,10 +412,10 @@ struct DefaultDietFilters {
 
 	static this()
 	{
-		filters["css"] = (input, scope output) { output(filterCss(input)); };
-		filters["javascript"] = (input, scope output) { output(filterJavascript(input)); };
-		filters["markdown"] = (input, scope output) { output(filterMarkdown(() @trusted { return cast(string)input; } ())); };
-		filters["htmlescape"] = (input, scope output) { output(filterHtmlescape(input)); };
+		filters["css"] = (in input, scope output) { output(filterCss(input)); };
+		filters["javascript"] = (in input, scope output) { output(filterJavascript(input)); };
+		filters["markdown"] = (in input, scope output) { output(filterMarkdown(() @trusted { return cast(string)input; } ())); };
+		filters["htmlescape"] = (in input, scope output) { output(filterHtmlescape(input)); };
 	}
 
 	static SafeFilterCallback[string] filters;
@@ -555,16 +555,6 @@ enum TestHTTPResponseMode {
 }
 
 
-private enum HTTPServerOptionImpl {
-	none                      = 0,
-	errorStackTraces          = 1<<7,
-	reusePort                 = 1<<8,
-	distribute                = 1<<9, // deprecated
-	reuseAddress              = 1<<10,
-	defaults                  = reuseAddress
-}
-
-// TODO: Should be turned back into an enum once the deprecated symbols can be removed
 /**
 	Specifies optional features of the HTTP server.
 
@@ -574,8 +564,8 @@ private enum HTTPServerOptionImpl {
 	will also drain the `HTTPServerRequest.bodyReader` stream whenever a request
 	body with form or JSON data is encountered.
 */
-struct HTTPServerOption {
-	static enum none                      = HTTPServerOptionImpl.none;
+enum HTTPServerOption {
+	none                      = 0,
 	/** Enables stack traces (`HTTPServerErrorInfo.debugMessage`).
 
 		Note that generating the stack traces are generally a costly
@@ -584,28 +574,19 @@ struct HTTPServerOption {
 		the application, such as function addresses, which can
 		help an attacker to abuse possible security holes.
 	*/
-	static enum errorStackTraces          = HTTPServerOptionImpl.errorStackTraces;
+	errorStackTraces          = 1<<7,
 	/// Enable port reuse in `listenTCP()`
-	static enum reusePort                 = HTTPServerOptionImpl.reusePort;
+	reusePort                 = 1<<8,
 	/// Enable address reuse in `listenTCP()`
-	static enum reuseAddress              = HTTPServerOptionImpl.reuseAddress;
-
+	reuseAddress              = 1<<10,
 	/** The default set of options.
 
 		Includes all parsing options, as well as the `errorStackTraces`
 		option if the code is compiled in debug mode.
 	*/
-	static enum defaults = () {
-		HTTPServerOptionImpl ops = HTTPServerOptionImpl.defaults;
-		debug ops |= HTTPServerOptionImpl.errorStackTraces;
-		return ops;
-	} ().HTTPServerOption;
+	defaults                  = () { auto ret = reuseAddress; debug ret |= errorStackTraces; return ret; } (),
 
-	deprecated("None has been renamed to none.")
-	static enum None = none;
-
-	HTTPServerOptionImpl x;
-	alias x this;
+	deprecated("None has been renamed to none.") None = none
 }
 
 
@@ -655,7 +636,7 @@ final class HTTPServerSettings {
 		load in case of invalid or unwanted requests (DoS). By default,
 		HTTPServerOption.defaults is used.
 	*/
-	HTTPServerOptionImpl options = HTTPServerOption.defaults;
+	HTTPServerOption options = HTTPServerOption.defaults;
 
 	/** Time of a request after which the connection is closed with an error; not supported yet
 
@@ -1008,7 +989,10 @@ final class HTTPServerRequest : HTTPRequest {
 		*/
 		@property ref Json json() @safe {
 			if (_json.isNull) {
-				if (icmp2(contentType, "application/json") == 0 || icmp2(contentType, "application/vnd.api+json") == 0 ) {
+				auto splitter = contentType.splitter(';');
+				auto ctype = splitter.empty ? "" : splitter.front;
+
+				if (icmp2(ctype, "application/json") == 0 || icmp2(ctype, "application/vnd.api+json") == 0) {
 					auto bodyStr = bodyReader.readAllUTF8();
 					if (!bodyStr.empty) _json = parseJson(bodyStr);
 					else _json = Json.undefined;
@@ -1017,6 +1001,11 @@ final class HTTPServerRequest : HTTPRequest {
 				}
 			}
 			return _json.get;
+		}
+
+		/// Get the json body when there is no content-type header
+		unittest {
+			assert(createTestHTTPServerRequest(URL("http://localhost/")).json.type == Json.Type.undefined);
 		}
 
 		private Nullable!Json _json;
@@ -1431,7 +1420,13 @@ final class HTTPServerResponse : HTTPResponse {
 	@property InterfaceProxy!OutputStream bodyWriter()
 	@safe {
 		assert(!!m_conn);
-		if (m_bodyWriter) return m_bodyWriter;
+		if (m_bodyWriter) {
+			// for test responses, the body writer is pre-set, without headers
+			// being written, so we may need to do that here
+			if (!m_headerWritten) writeHeader();
+
+			return m_bodyWriter;
+		}
 
 		assert(!m_headerWritten, "A void body was already written!");
 		assert(this.statusCode >= 200, "1xx responses can't have body");
@@ -1490,7 +1485,7 @@ final class HTTPServerResponse : HTTPResponse {
 			url = The URL to redirect to
 			status = The HTTP redirect status (3xx) to send - by default this is $(D HTTPStatus.found)
 	*/
-	void redirect(string url, int status = HTTPStatus.Found)
+	void redirect(string url, int status = HTTPStatus.found)
 	@safe {
 		// Disallow any characters that may influence the header parsing
 		enforce(!url.representation.canFind!(ch => ch < 0x20),
@@ -1501,7 +1496,7 @@ final class HTTPServerResponse : HTTPResponse {
 		writeBody("redirecting...");
 	}
 	/// ditto
-	void redirect(URL url, int status = HTTPStatus.Found)
+	void redirect(URL url, int status = HTTPStatus.found)
 	@safe {
 		redirect(url.toString(), status);
 	}
@@ -1537,7 +1532,7 @@ final class HTTPServerResponse : HTTPResponse {
 	*/
 	ConnectionStream switchProtocol(string protocol)
 	@safe {
-		statusCode = HTTPStatus.SwitchingProtocols;
+		statusCode = HTTPStatus.switchingProtocols;
 		if (protocol.length) headers["Upgrade"] = protocol;
 		writeVoidBody();
 		m_requiresConnectionClose = true;
@@ -1547,7 +1542,7 @@ final class HTTPServerResponse : HTTPResponse {
 	/// ditto
 	void switchProtocol(string protocol, scope void delegate(scope ConnectionStream) @safe del)
 	@safe {
-		statusCode = HTTPStatus.SwitchingProtocols;
+		statusCode = HTTPStatus.switchingProtocols;
 		if (protocol.length) headers["Upgrade"] = protocol;
 		writeVoidBody();
 		m_requiresConnectionClose = true;
@@ -1703,7 +1698,7 @@ final class HTTPServerResponse : HTTPResponse {
 		if (m_rawConnection && m_rawConnection.connected) {
 			try if (m_conn) m_conn.flush();
 			catch (Exception e) logDebug("Failed to flush connection after finishing HTTP response: %s", e.msg);
-			if (!isHeadResponse && bytesWritten < headers.get("Content-Length", "0").to!long) {
+			if (!isHeadResponse && bytesWritten < headers.get("Content-Length", "0").to!ulong) {
 				logDebug("HTTP response only written partially before finalization. Terminating connection.");
 				m_requiresConnectionClose = true;
 			}
@@ -1721,7 +1716,7 @@ final class HTTPServerResponse : HTTPResponse {
 	@safe {
 		import vibe.stream.wrapper;
 
-		assert(!m_bodyWriter && !m_headerWritten, "Try to write header after body has already begun.");
+		assert(!m_headerWritten, "Try to write header after body has already begun.");
 		assert(this.httpVersion != HTTPVersion.HTTP_1_0 || this.statusCode >= 200, "Informational status codes aren't supported by HTTP/1.0.");
 
 		// Don't set m_headerWritten for 1xx status codes
@@ -2008,7 +2003,7 @@ private final class TimeoutHTTPInputStream : InputStream {
 	@safe {
 		auto curr = Clock.currStdTime();
 		auto diff = curr - m_timeref;
-		if (diff > m_timeleft) throw new HTTPStatusException(HTTPStatus.RequestTimeout);
+		if (diff > m_timeleft) throw new HTTPStatusException(HTTPStatus.requestTimeout);
 		m_timeleft -= diff;
 		m_timeref = curr;
 	}
@@ -2038,7 +2033,7 @@ private HTTPListener listenHTTPPlain(HTTPServerSettings settings, HTTPServerRequ
 	import vibe.core.core : runWorkerTaskDist;
 	import std.algorithm : canFind, find;
 
-	static TCPListener doListen(HTTPServerContext listen_info, bool dist, bool reusePort, bool reuseAddress, bool is_tls)
+	static TCPListener doListen(HTTPServerContext listen_info, bool reusePort, bool reuseAddress, bool is_tls)
 	@safe {
 		try {
 			TCPListenOptions options = TCPListenOptions.defaults;
@@ -2081,7 +2076,6 @@ private HTTPListener listenHTTPPlain(HTTPServerSettings settings, HTTPServerRequ
 		else {
 			auto li = new HTTPServerContext(addr, settings.port);
 			if (auto tcp_lst = doListen(li,
-					(settings.options & HTTPServerOptionImpl.distribute) != 0,
 					(settings.options & HTTPServerOption.reusePort) != 0,
 					(settings.options & HTTPServerOption.reuseAddress) != 0,
 					settings.tlsContext !is null)) // DMD BUG 2043
@@ -2276,7 +2270,7 @@ private bool handleRequest(InterfaceProxy!Stream http_stream, TCPConnection tcp_
 		if (req.method == HTTPMethod.HEAD) res.m_isHeadResponse = true;
 		if (settings.serverString.length)
 			res.headers["Server"] = settings.serverString;
-		res.headers["Date"] = formatRFC822DateAlloc(request_allocator, reqtime);
+		res.headers["Date"] = formatRFC822DateAlloc(reqtime);
 		if (req.persistent)
 			res.headers["Keep-Alive"] = formatAlloc(
 				request_allocator, "timeout=%d", settings.keepAliveTimeout.total!"seconds"());
@@ -2435,11 +2429,35 @@ shared static this()
 	}
 }
 
-private string formatRFC822DateAlloc(IAllocator alloc, SysTime time)
+private struct CacheTime
+{
+	string cachedDate;
+	SysTime nextUpdate;
+
+	this(SysTime nextUpdate) @safe @nogc pure nothrow
+	{
+		this.nextUpdate = nextUpdate;
+	}
+
+	void update(SysTime time) @safe
+	{
+		this.nextUpdate = time + 1.seconds;
+		this.nextUpdate.fracSecs = nsecs(0);
+	}
+}
+
+private string formatRFC822DateAlloc(SysTime time)
 @safe {
-	auto app = AllocAppender!string(alloc);
-	writeRFC822DateTimeString(app, time);
-	return () @trusted { return app.data; } ();
+	static LAST = CacheTime(SysTime.min());
+
+	if (time > LAST.nextUpdate) {
+		auto app = new FixedAppender!(string, 29);
+		writeRFC822DateTimeString(app, time);
+		LAST.update(time);
+		LAST.cachedDate = () @trusted { return app.data; } ();
+		return () @trusted { return app.data; } ();
+	} else
+		return LAST.cachedDate;
 }
 
 version (VibeDebugCatchAll) private alias UncaughtException = Throwable;

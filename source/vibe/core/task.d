@@ -371,11 +371,15 @@ final package class TaskFiber : Fiber {
 		static size_t ms_flsCounter = 0;
 	}
 
+	package {
+		TaskFuncInfo m_taskFunc;
+		__gshared size_t ms_taskStackSize = defaultTaskStackSize;
+		__gshared debug TaskEventCallback ms_taskEventCallback;
+		__gshared debug TaskCreationCallback ms_taskCreationCallback;
 
-	package TaskFuncInfo m_taskFunc;
-	package __gshared size_t ms_taskStackSize = defaultTaskStackSize;
-	package __gshared debug TaskEventCallback ms_taskEventCallback;
-	package __gshared debug TaskCreationCallback ms_taskCreationCallback;
+		debug (VibeRunningTasks)
+			static string[TaskFiber] s_runningTasks;
+	}
 
 	this()
 	@trusted nothrow {
@@ -436,6 +440,9 @@ final package class TaskFiber : Fiber {
 						taskScheduler.yieldUninterruptible();
 						debug (VibeTaskLog) logTrace("Initial resume of task.");
 					}
+
+					debug (VibeRunningTasks) s_runningTasks[this] = "initial";
+
 					task.call();
 					debug if (ms_taskEventCallback) ms_taskEventCallback(TaskEvent.end, handle);
 
@@ -445,6 +452,8 @@ final package class TaskFiber : Fiber {
 					debug if (ms_taskEventCallback) ms_taskEventCallback(TaskEvent.fail, handle);
 					e.logException!(LogLevel.critical)("Task terminated with uncaught exception");
 				}
+
+				debug (VibeRunningTasks) s_runningTasks.remove(this);
 
 				debug assert(Thread.getThis() is m_thread, "Fiber moved?");
 
@@ -1062,6 +1071,14 @@ package struct TaskScheduler {
 
 	private void doYield(Task task)
 	{
+		debug (VibeRunningTasks) () nothrow {
+			try throw new Exception("");
+			catch (Exception e) {
+				try TaskFiber.s_runningTasks[task.taskFiber] = e.info.toString;
+				catch (Exception e) TaskFiber.s_runningTasks[task.taskFiber] = "(failed to get stack)";
+			}
+		} ();
+
 		assert(() @trusted { return task.taskFiber; } ().m_yieldLockCount == 0, "May not yield while in an active yieldLock()!");
 		debug if (TaskFiber.ms_taskEventCallback) () @trusted { TaskFiber.ms_taskEventCallback(TaskEvent.yield, task); } ();
 		() @trusted { Fiber.yield(); } ();
@@ -1088,7 +1105,7 @@ private struct TaskFiberQueue {
 
 	@property TaskFiber front() { return first; }
 
-	void insertFront(TaskFiber task)
+	void insertFront(TaskFiber task) @trusted
 	{
 		assert(task.m_queue is null, "Task is already scheduled to be resumed!");
 		assert(task.m_prev is null, "Task has m_prev set without being in a queue!?");
@@ -1105,7 +1122,7 @@ private struct TaskFiberQueue {
 		length++;
 	}
 
-	void insertBack(TaskFiber task)
+	void insertBack(TaskFiber task) @trusted
 	{
 		assert(task.m_queue is null, "Task is already scheduled to be resumed!");
 		assert(task.m_prev is null, "Task has m_prev set without being in a queue!?");
@@ -1126,7 +1143,7 @@ private struct TaskFiberQueue {
 	// starting from the back. a maximum of max_skip tasks will be skipped
 	// before the task is inserted regardless of the predicate.
 	void insertBackPred(TaskFiber task, size_t max_skip,
-		scope bool delegate(TaskFiber) @safe nothrow pred)
+		scope bool delegate(TaskFiber) @safe nothrow pred) @trusted
 	{
 		assert(task.m_queue is null, "Task is already scheduled to be resumed!");
 		assert(task.m_prev is null, "Task has m_prev set without being in a queue!?");

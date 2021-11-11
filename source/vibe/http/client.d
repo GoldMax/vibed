@@ -409,9 +409,11 @@ final class HTTPClient {
 	static void setTLSSetupCallback(void function(TLSContext) @safe func) @trusted { ms_tlsSetup = func; }
 
 	/**
-		Connects to a specific server.
+		Sets up this HTTPClient to connect to a specific server.
 
 		This method may only be called if any previous connection has been closed.
+
+		The actual connection is deferred until a request is initiated (using `HTTPClient.request`).
 	*/
 	void connect(string server, ushort port = 80, bool use_tls = false, const(HTTPClientSettings) settings = defaultSettings)
 	{
@@ -508,7 +510,7 @@ final class HTTPClient {
 
 		if (res.headers.get("Proxy-Authenticate", null) !is null){
 			res.dropBody();
-			throw new HTTPStatusException(HTTPStatus.ProxyAuthenticationRequired, "Proxy Authentication Failed.");
+			throw new HTTPStatusException(HTTPStatus.proxyAuthenticationRequired, "Proxy Authentication Failed.");
 		}
 
 	}
@@ -608,7 +610,7 @@ final class HTTPClient {
 
 	private bool doRequestWithRetry(scope void delegate(HTTPClientRequest req) requester, bool confirmed_proxy_auth /* basic only */, out bool close_conn, out SysTime connected_time)
 	{
-		if (m_conn && m_conn.connected && connected_time > m_keepAliveLimit){
+		if (m_conn && m_conn.connected && Clock.currTime(UTC()) > m_keepAliveLimit){
 			logDebug("Disconnected to avoid timeout");
 			disconnect();
 		}
@@ -852,7 +854,7 @@ final class HTTPClientRequest : HTTPRequest {
 	{
 		import vibe.stream.wrapper : streamOutputRange;
 
-		headers["Content-Type"] = "application/json";
+		headers["Content-Type"] = "application/json; charset=UTF-8";
 
 		// set an explicit content-length field if chunked encoding is not allowed
 		if (!allow_chunked) {

@@ -18,6 +18,11 @@ else version (EventcoreLibasyncDriver) alias NativeEventDriver = LibasyncEventDr
 else version (EventcoreSelectDriver) alias NativeEventDriver = SelectEventDriver;
 else alias NativeEventDriver = EventDriver;
 
+/** Returns the event driver associated to the calling thread.
+
+	If no driver has been created, one will be allocated lazily. The return
+	value is guaranteed to be non-null.
+*/
 @property NativeEventDriver eventDriver()
 @safe @nogc nothrow {
 	static if (is(NativeEventDriver == EventDriver))
@@ -30,13 +35,21 @@ else alias NativeEventDriver = EventDriver;
 	return s_driver;
 }
 
+
+/** Returns the event driver associated with the calling thread, if any.
+
+	If no driver has been created, this function will return `null`.
+*/
+NativeEventDriver tryGetEventDriver()
+@safe @nogc nothrow {
+	return s_driver;
+}
+
 static if (!is(NativeEventDriver == EventDriver)) {
 	static this()
 	{
 		if (!s_isMainThread) {
-			if (!s_initCount++) {
-				assert(s_driver is null);
-			}
+			s_initCount++;
 		}
 	}
 

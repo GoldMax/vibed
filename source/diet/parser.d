@@ -56,7 +56,7 @@ version(unittest)
 		The list of parsed root nodes is returned.
 */
 Document parseDiet(alias TR = identity)(string text, string filename = "string")
-	if (is(typeof(TR(string.init)) == string))
+	if (is(typeof(TR(string.init)) == string) || is(typeof(TR(string.init, string.init)) == string))
 {
 	InputFile[1] f;
 	f[0].name = filename;
@@ -66,11 +66,14 @@ Document parseDiet(alias TR = identity)(string text, string filename = "string")
 
 /// Ditto
 Document parseDiet(alias TR = identity)(const(InputFile)[] files)
-	if (is(typeof(TR(string.init)) == string))
+	if (is(typeof(TR(string.init)) == string) || is(typeof(TR(string.init, string.init)) == string))
 {
 	import diet.traits;
 	import std.algorithm.iteration : map;
 	import std.array : array;
+
+	assert(files.length > 0, "Empty set of input files");
+
 	FileInfo[] parsed_files = files.map!(f => FileInfo(f.name, parseDietRaw!TR(f))).array;
 	BlockInfo[] blocks;
 	return new Document(parseDietWithExtensions(parsed_files, 0, blocks, null));
@@ -518,7 +521,7 @@ Document parseDiet(alias TR = identity)(const(InputFile)[] files)
 		new Node(Location("inc.dt", 0), "p", null, null)
 	]));
 	testFail("include main", "Dependency cycle detected for this module.");
-	testFail("include inc2", "Missing include input file: inc2");
+	testFail("include inc2", "Missing include input file: inc2 for main.dt");
 	testFail("include #{p}", "Dynamic includes are not supported.");
 	testFail("include inc\n\tp", "Only 'block' allowed as children of includes.");
 	testFail("p\ninclude inc\n\tp", "Only 'block' allowed as children of includes.");
@@ -669,7 +672,7 @@ Document parseDiet(alias TR = identity)(const(InputFile)[] files)
 
 /** Dummy translation function that returns the input unmodified.
 */
-string identity(string str) nothrow @safe @nogc { return str; }
+string identity(string str, string context = null) nothrow @safe @nogc { return str; }
 
 
 private string parseIdent(in string str, ref size_t start,
@@ -830,8 +833,8 @@ private Node[] parseDietWithExtensions(FileInfo[] files, size_t file_index, ref 
 			if (ret.isNull) ret = [];
 		} else if (n.name == "include") {
 			auto name = extractFilename(n);
-			auto fidx = files.countUntil!(f => matchesName(f.name, name, files[file_index].name));
-			enforcep(fidx >= 0, "Missing include input file: "~name, n.loc);
+			auto fidx = files.countUntil!(f => matchesName(f.name, name, n.loc.file));
+			enforcep(fidx >= 0, "Missing include input file: "~name~" for "~n.loc.file, n.loc);
 
 			if (n.contents.length > 1) {
 				auto dummy = new Node(n.loc, "extends");
@@ -1223,6 +1226,7 @@ private bool parseTag(ref string input, ref size_t idx, ref Node dst, ref bool h
 private void parseTextLine(alias TR, bool translate = true)(ref string input, ref Node dst, ref Location loc)
 {
 	import std.algorithm.comparison : among;
+	import std.path : baseName, stripExtension;
 
 	size_t idx = 0;
 
@@ -1231,7 +1235,10 @@ private void parseTextLine(alias TR, bool translate = true)(ref string input, re
 		auto kln = skipLine(input, idx, loc);
 		input = input[idx .. $];
 		dst.translationKey ~= kln;
-		auto tln = TR(kln);
+		static if (is(typeof(TR(string.init, string.init))))
+			auto tln = TR(kln, loc.file.baseName.stripExtension);
+		else
+			auto tln = TR(kln);
 		parseTextLineRaw(tln, dst, loccopy);
 		return;
 	}

@@ -315,7 +315,7 @@ module vibe.web.rest;
 public import vibe.web.common;
 
 import vibe.core.log;
-import vibe.core.stream : InputStream;
+import vibe.core.stream : InputStream, isInputStream, pipe;
 import vibe.http.router : URLRouter;
 import vibe.http.client : HTTPClientResponse, HTTPClientSettings;
 import vibe.http.common : HTTPMethod;
@@ -328,8 +328,7 @@ import vibe.inet.message : InetHeaderMap;
 import vibe.web.internal.rest.common : RestInterface, Route, SubInterfaceType;
 import vibe.web.auth : AuthInfo, handleAuthentication, handleAuthorization, isAuthenticated;
 
-import std.algorithm : startsWith, endsWith, sort;
-import std.algorithm.searching : count;
+import std.algorithm : count, startsWith, endsWith, sort, splitter;
 import std.array : appender, split;
 import std.meta : AliasSeq;
 import std.range : isOutputRange;
@@ -1083,7 +1082,7 @@ struct Collection(I)
 		foreach (m; __traits(allMembers, I)) {
 			foreach (ovrld; MemberFunctionsTuple!(I, m)) {
 				alias PT = ParameterTypeTuple!ovrld;
-				static if (!matchesAllIDs!ovrld) {
+				static if (!matchesAllIDs!ovrld && !hasUDA!(ovrld, NoRouteAttribute)) {
 					static assert(matchesParentIDs!ovrld,
 						"Collection methods must take all parent IDs as the first parameters."~PT.stringof~"   "~ParentIDs.stringof);
 					ret ~= "auto "~m~"(ARGS...)(ARGS args) { return m_interface."~m~"(m_parentIDs, args); }\n";
@@ -1440,6 +1439,7 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 {
 	import std.meta : AliasSeq;
 	import std.string : format;
+	import std.traits : Unqual;
 	import vibe.http.common : HTTPStatusException, enforceBadRequest;
 	import vibe.utils.string : sanitizeUTF8;
 	import vibe.web.internal.rest.common : ParameterKind;
@@ -1448,7 +1448,8 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 	import vibe.textfilter.urlencode : urlDecode;
 
 	enum Method = __traits(identifier, Func);
-	alias PTypes = ParameterTypeTuple!Func;
+	// We need mutable types for deserialization
+	alias PTypes = staticMap!(Unqual, ParameterTypeTuple!Func);
 	alias PDefaults = ParameterDefaultValueTuple!Func;
 	alias CFuncRaw = derivedMethod!(T, Func);
 	static if (AliasSeq!(CFuncRaw).length > 0) alias CFunc = CFuncRaw;
@@ -1628,6 +1629,12 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 				() @trusted { __traits(getMember, inst, Method)(params); } ();
 				returnHeaders();
 				res.writeBody(cast(ubyte[])null);
+			} else static if (isInputStream!RT) {
+				returnHeaders();
+				auto ret = () @trusted {
+					return evaluateOutputModifiers!CFunc(
+						__traits(getMember, inst, Method)(params), req, res); } ();
+				ret.pipe(res.bodyWriter);
 			} else {
 				// TODO: remove after deprecation period
 				static if (!__traits(compiles, () @safe { evaluateOutputModifiers!Func(RT.init, req, res); } ()))
@@ -1663,7 +1670,7 @@ private HTTPServerRequestDelegate jsonMethodHandler(alias Func, size_t ridx, T)(
 						}();
 						res.writeBody(serialized_output.data, serializer.contentType);
 					}
-				res.statusCode = 406; // HTTP response: Not Acceptable, will trigger RestException on the client side
+				res.statusCode = HTTPStatus.notAcceptable; // will trigger RestException on the client side
 				res.writeBody(cast(ubyte[])null);
 			}
 		} catch (Exception e) {
@@ -1802,6 +1809,16 @@ private string generateRestClientMethods(I)()
 			}.format(i, pnames);
 	}
 
+	// generate stubs for non-route functions
+	static foreach (m; __traits(allMembers, I))
+		foreach (i, fun; MemberFunctionsTuple!(I, m))
+			static if (hasUDA!(fun, NoRouteAttribute))
+				ret ~= q{
+					mixin CloneFunction!(MemberFunctionsTuple!(I, "%s")[%s], q{
+						assert(false);
+					});
+				}.format(m, i);
+
 	return ret;
 }
 
@@ -1929,9 +1946,12 @@ private auto executeClientMethod(I, size_t ridx, ARGS...)
 	auto ret = request(URL(intf.baseURL), request_filter, request_body_filter,
 		sroute.method, url, headers, query.data, body_, reqhdrs, opthdrs,
 		intf.settings.httpClientSettings);
-	scope(exit) ret.dropBody();
 
-	static if (!is(RT == void)) {
+	static if (isInputStream!RT) {
+		return RT(ret.bodyReader);
+	} else static if (!is(RT == void)) {
+		scope(exit) ret.dropBody();
+
 		string content_type;
 		if (const hdr = "Content-Type" in opthdrs)
 			content_type = *hdr;
@@ -1953,7 +1973,7 @@ private auto executeClientMethod(I, size_t ridx, ARGS...)
 			}
 
 		throw new Exception("Unrecognized content type: " ~ content_type);
-	}
+	} else ret.dropBody();
 }
 
 
@@ -1992,6 +2012,7 @@ private HTTPClientResponse request(URL base_url,
 	string body_, ref InetHeaderMap reqReturnHdrs,
 	ref InetHeaderMap optReturnHdrs, in HTTPClientSettings http_settings)
 @safe {
+	import std.uni : sicmp;
 	import vibe.http.client : HTTPClientRequest, HTTPClientResponse, requestHTTP;
 	import vibe.http.common : HTTPStatusException, HTTPStatus, httpMethodString, httpStatusText;
 
@@ -1999,8 +2020,6 @@ private HTTPClientResponse request(URL base_url,
 	url.pathString = path;
 
 	if (query.length) url.queryString = query;
-
-	string ret;
 
 	auto reqdg = (scope HTTPClientRequest req) {
 		req.method = verb;
@@ -2016,7 +2035,7 @@ private HTTPClientResponse request(URL base_url,
 		if (request_filter) request_filter(req);
 
 		if (body_ != "")
-			req.writeBody(cast(const(ubyte)[])body_, hdrs.get("Content-Type", "application/json"));
+			req.writeBody(cast(const(ubyte)[])body_, hdrs.get("Content-Type", "application/json; charset=UTF-8"));
 	};
 
 	HTTPClientResponse client_res;
@@ -2030,7 +2049,7 @@ private HTTPClientResponse request(URL base_url,
 			httpMethodString(verb),
 			url.toString(),
 			client_res.statusCode,
-			ret
+			client_res.statusPhrase
 			);
 
 	// Get required headers - Don't throw yet
@@ -2054,8 +2073,12 @@ private HTTPClientResponse request(URL base_url,
 
 	if (!isSuccessCode(cast(HTTPStatus)client_res.statusCode))
 	{
+		Json msg = Json(["statusMessage": Json(client_res.statusPhrase)]);
+		if (client_res.contentType.length)
+			if (client_res.contentType.splitter(";").front.strip.sicmp("application/json") == 0)
+				msg = client_res.readJson();
 		client_res.dropBody();
-		throw new RestException(client_res.statusCode, ret);
+		throw new RestException(client_res.statusCode, msg);
 	}
 
 	return client_res;
@@ -2213,7 +2236,8 @@ package int get_matching_content_type (T...)(string req_content_types_str) pure 
 	ContentType[] UDA_content_types;
 	foreach (UDA; packed_UDAs)
 	{
-		auto content_type_split = UDA.contentType.toLower().split("/");
+		auto ctype = UDA.contentType.splitter(';').front;
+		auto content_type_split = ctype.toLower().split("/");
 		assert(content_type_split.length == 2);
 		UDA_content_types ~= ContentType(content_type_split[0].strip(), content_type_split[1].strip());
 	}
@@ -2280,7 +2304,7 @@ unittest
 {
 	alias res = ResultSerializersT!(test1);
 	assert(res.length == 1);
-	assert(res[0].contentType == "application/json");
+	assert(res[0].contentType == "application/json; charset=UTF-8");
 
 	assert(get_matching_content_type!(res)("application/json") == 0);
 	assert(get_matching_content_type!(res)("application/*") == 0);
@@ -2695,4 +2719,12 @@ private template GenOrphan(int id) {
 		auto client = new RestInterfaceClient!(IKeys!())("http://127.0.0.1:8080");
 		assert(client.create("Hello", 0) == "4242-4242");
 	}
+}
+
+@safe unittest { // @noRoute support in RestInterfaceClient
+	interface I {
+		void foo();
+		@noRoute int bar(void* someparam);
+	}
+	auto cli = new RestInterfaceClient!I("http://127.0.0.1/");
 }

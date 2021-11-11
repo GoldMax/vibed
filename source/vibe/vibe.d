@@ -58,4 +58,4 @@ public import std.conv : to;
 public import std.datetime;
 public import std.exception : enforce;
 
-public string VIBED_VERSION = "0.8.3";
+public string VIBED_VERSION = "0.9.4";
