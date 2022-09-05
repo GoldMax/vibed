@@ -31,66 +31,28 @@ import core.thread;
 
 import deimos.openssl.bio;
 import deimos.openssl.err;
+import deimos.openssl.opensslv;
 import deimos.openssl.rand;
 import deimos.openssl.ssl;
 import deimos.openssl.stack;
 import deimos.openssl.x509v3;
-
-// auto-detect OpenSSL 1.1.0
-version (VibeUseOpenSSL11)
-	enum OPENSSL_VERSION = "1.1.0";
-else version (VibeUseOpenSSL10)
-	enum OPENSSL_VERSION = "1.0.0";
-else version (Botan)
-	enum OPENSSL_VERSION = "0.0.0";
-else
-{
-	// Only use the openssl_version file if it has been generated
-	static if (__traits(compiles, {import openssl_version; }))
-		mixin("public import openssl_version : OPENSSL_VERSION;");
-	else
-		// try 1.1.0 as softfallback if old other means failed
-		enum OPENSSL_VERSION = "1.1.0";
-}
 
 version (VibePragmaLib) {
 	pragma(lib, "ssl");
 	version (Windows) pragma(lib, "eay");
 }
 
-private enum haveECDH = OPENSSL_VERSION_NUMBER >= 0x10001000;
 version(VibeForceALPN) enum alpn_forced = true;
 else enum alpn_forced = false;
 enum haveALPN = OPENSSL_VERSION_NUMBER >= 0x10200000 || alpn_forced;
 
 // openssl/1.1.0 hack: provides a 1.0.x API in terms of the 1.1.x API
-static if (OPENSSL_VERSION.startsWith("1.1")) {
+static if (OPENSSL_VERSION_AT_LEAST(1, 1, 0)) {
 	extern(C) const(SSL_METHOD)* TLS_client_method();
 	alias SSLv23_client_method = TLS_client_method;
 
 	extern(C) const(SSL_METHOD)* TLS_server_method();
 	alias SSLv23_server_method = TLS_server_method;
-
-	// this does nothing in > openssl 1.1.0
-	void SSL_load_error_strings() {}
-
-	extern(C)  int OPENSSL_init_ssl(ulong opts, const void* settings);
-
-	// # define SSL_library_init() OPENSSL_init_ssl(0, NULL)
-	int SSL_library_init() {
-		return OPENSSL_init_ssl(0, null);
-	}
-
-	//#  define CRYPTO_num_locks()            (1)
-	int CRYPTO_num_locks() {
-		return 1;
-	}
-
-	void CRYPTO_set_id_callback(T)(T t) {
-	}
-
-	void CRYPTO_set_locking_callback(T)(T t) {
-	}
 
 	// #define SSL_get_ex_new_index(l, p, newf, dupf, freef) \
 	//    CRYPTO_get_ex_new_index(CRYPTO_EX_INDEX_SSL, l, p, newf, dupf, freef)
@@ -123,6 +85,13 @@ static if (OPENSSL_VERSION.startsWith("1.1")) {
 	{
 		extern(C) void *OPENSSL_sk_value(const void *, int);
 		extern(C) void* sk_value(const(_STACK)* p, int i) { return OPENSSL_sk_value(p, i); }
+	}
+
+	static if (!is(typeof(OPENSSL_sk_free)))
+	{
+		// Version v1.x.x of the bindings don't have this,
+		// but it's been available since v1.1.0
+		private extern(C) void *OPENSSL_sk_free(const void *);
 	}
 
 	private enum SSL_CTRL_SET_MIN_PROTO_VERSION = 123;
@@ -165,8 +134,17 @@ static if (OPENSSL_VERSION.startsWith("1.1")) {
 		int BIO_meth_set_ctrl(BIO_METHOD* biom, BIOMethCtrlCallback cb);
 		int BIO_meth_set_create(BIO_METHOD* biom, BIOMethCreateCallback cb);
 		int BIO_meth_set_destroy(BIO_METHOD* biom, BIOMethDestroyCallback cb);
+	}
 
-		c_ulong SSL_CTX_set_options(SSL_CTX *ctx, c_ulong op);
+	static if (OPENSSL_VERSION_AT_LEAST(3, 0, 0)) {
+		extern (C) nothrow {
+			X509 *SSL_get1_peer_certificate(const SSL *ssl);
+			void ERR_new();
+			void ERR_set_debug(const char *file, int line, const char *func);
+			void ERR_set_error(int lib, int reason, const char *fmt, ...);
+		}
+
+		alias SSL_get_peer_certificate = SSL_get1_peer_certificate;
 	}
 } else {
 	private void BIO_set_init(BIO* b, int init_) @safe nothrow {
@@ -196,6 +174,114 @@ static if (OPENSSL_VERSION.startsWith("1.1")) {
 	private void BIO_set_flags(BIO *b, int flags) @safe nothrow {
 		b.flags |= flags;
 	}
+
+	// OpenSSL 1.1 renamed `sk_*` to OpenSSL_sk_*`
+	private alias OPENSSL_sk_free = sk_free;
+
+	// Temporary hack: Deimos OpenSSL v3.0.1 is missing bindings for OpenSSL v1.0.x
+	// Until it's updated, we have duplicates here, see:
+	// https://github.com/vibe-d/vibe.d/pull/2658
+	// https://github.com/vibe-d/vibe.d/pull/2661
+	extern(C) const(SSL_METHOD)* SSLv23_client_method();
+	extern(C) const(SSL_METHOD)* SSLv23_server_method();
+
+	extern(C) int CRYPTO_num_locks();
+	extern(C) void CRYPTO_set_locking_callback(
+		void function(int mode, int type, const(char)* file, int line) func);
+}
+
+// Copied from https://github.com/D-Programming-Deimos/openssl/pull/69
+// Remove once we are depending on >= v3.0.2
+static if (OPENSSL_VERSION_AT_LEAST(3, 0, 0))
+{
+	 // The argument type for `SSL_[CTX_][gs]et_options was changed between 1.1.1
+	 // and 3.0.0, from `c_long` to `uint64_t`. See below commit.
+	 // https://github.com/openssl/openssl/commit/56bd17830f2d5855b533d923d4e0649d3ed61d11
+
+	extern(C) nothrow {
+		ulong SSL_CTX_get_options(const SSL_CTX* ctx);
+		ulong SSL_get_options(const SSL* ssl);
+		ulong SSL_CTX_clear_options(SSL_CTX* ctx, ulong op);
+		ulong SSL_clear_options(SSL* ssl, ulong op);
+		ulong SSL_CTX_set_options(SSL_CTX* ctx, ulong op);
+		ulong SSL_set_options(SSL* ssl, ulong op);
+	}
+}
+else static if (OPENSSL_VERSION_AT_LEAST(1, 1, 0))
+{
+	// Note: Despite the manuals listing the return type (as well as parameter)
+	// as 'long', the `.h` was `unsigned long`.
+
+	extern(C) nothrow {
+		c_ulong SSL_CTX_get_options(const SSL_CTX* ctx);
+		c_ulong SSL_get_options(const SSL* ssl);
+		c_ulong SSL_CTX_clear_options(SSL_CTX* ctx, c_ulong op);
+		c_ulong SSL_clear_options(SSL* ssl, c_ulong op);
+		c_ulong SSL_CTX_set_options(SSL_CTX* ctx, c_ulong op);
+		c_ulong SSL_set_options(SSL* ssl, c_ulong op);
+	}
+}
+else
+{
+	// Before v1.1.0, those were macros. See below commit.
+	// https://github.com/openssl/openssl/commit/8106cb8b6d706079cbcabd4631f05e4526a316e1
+
+	extern(C) nothrow {
+		c_ulong SSL_CTX_set_options()(SSL_CTX* ctx, c_ulong op) {
+			return SSL_CTX_ctrl(ctx, SSL_CTRL_OPTIONS, op, null);
+		}
+		c_ulong SSL_CTX_clear_options()(SSL_CTX* ctx, c_ulong op) {
+			return SSL_CTX_ctrl(ctx, SSL_CTRL_CLEAR_OPTIONS, op, null);
+		}
+		c_ulong SSL_CTX_get_options()(SSL_CTX* ctx) {
+			return SSL_CTX_ctrl(ctx, SSL_CTRL_OPTIONS, 0, null);
+		}
+		c_ulong SSL_set_options()(SSL* ssl,op) {
+			return SSL_ctrl(ssl, SSL_CTRL_OPTIONS, op, null);
+		}
+		c_ulong SSL_clear_options()(SSL* ssl, c_long op) {
+			return SSL_ctrl(ssl, SSL_CTRL_CLEAR_OPTIONS, op, null);
+		}
+		c_ulong SSL_get_options()(SSL* ssl) {
+			return SSL_ctrl(ssl, SSL_CTRL_OPTIONS, 0, null);
+		}
+	}
+
+	// The need for calling `CRYPTO_set_id_callback` / `CRYPTO_set_locking_callback`
+	// was removed in OpenSSL 1.1.0, which are the only users of those callbacks
+	// and mutexes.
+	private __gshared InterruptibleTaskMutex[] g_cryptoMutexes;
+
+	private extern(C) c_ulong onCryptoGetThreadID() nothrow @safe
+	{
+		try {
+			return cast(c_ulong)(cast(size_t)() @trusted { return cast(void*)Thread.getThis(); } () * 0x35d2c57);
+		} catch (Exception e) {
+			logWarn("OpenSSL: failed to get current thread ID: %s", e.msg);
+			return 0;
+		}
+	}
+
+	private extern(C) void onCryptoLock(int mode, int n, const(char)* file, int line) nothrow @safe
+	{
+		try {
+			enforce(n >= 0 && n < () @trusted { return g_cryptoMutexes; } ().length, "Mutex index out of range.");
+			auto mutex = () @trusted { return g_cryptoMutexes[n]; } ();
+			assert(mutex !is null);
+			if (mode & CRYPTO_LOCK) mutex.lock();
+			else mutex.unlock();
+		} catch (Exception e) {
+			logWarn("OpenSSL: failed to lock/unlock mutex: %s", e.msg);
+		}
+	}
+}
+
+// Deimos had an incorrect translation for this define prior to 2.0.2+1.1.0h
+// See https://github.com/D-Programming-Deimos/openssl/issues/63#issuecomment-840266138
+static if (!is(typeof(GEN_DNS)))
+{
+	private enum GEN_DNS = GENERAL_NAME.GEN_DNS;
+	private enum GEN_IPADD = GENERAL_NAME.GEN_IPADD;
 }
 
 private int SSL_set_tlsext_host_name(ssl_st* s, const(char)* c) @trusted {
@@ -237,7 +323,7 @@ final class OpenSSLStream : TLSStream {
 			m_tls = null;
 		}
 
-		static if (OPENSSL_VERSION.startsWith("1.1")) {
+		static if (OPENSSL_VERSION_AT_LEAST(1, 1, 0)) {
 			if (!s_bio_methods) initBioMethods();
 
 			m_bio = () @trusted { return BIO_new(s_bio_methods); } ();
@@ -286,7 +372,7 @@ final class OpenSSLStream : TLSStream {
 				readPeerCertInfo();
 				auto result = () @trusted { return SSL_get_verify_result(m_tls); } ();
 				if (result == X509_V_OK && (ctx.peerValidationMode & TLSPeerValidationMode.checkPeer)) {
-					if (!verifyCertName(m_peerCertificate, GENERAL_NAME.GEN_DNS, vdata.peerName)) {
+					if (!verifyCertName(m_peerCertificate, GEN_DNS, vdata.peerName)) {
 						version(Windows) import core.sys.windows.winsock2;
 						else import core.sys.posix.netinet.in_;
 
@@ -305,7 +391,7 @@ final class OpenSSLStream : TLSStream {
 								break;
 						}
 
-						if (!verifyCertName(m_peerCertificate, GENERAL_NAME.GEN_IPADD, () @trusted { return addr[0 .. addrlen]; } ())) {
+						if (!verifyCertName(m_peerCertificate, GEN_IPADD, () @trusted { return addr[0 .. addrlen]; } ())) {
 							logDiagnostic("Error validating TLS peer address");
 							result = X509_V_ERR_APPLICATION_VERIFICATION;
 						}
@@ -596,6 +682,7 @@ final class OpenSSLContext : TLSContext {
 
 	private {
 		TLSContextKind m_kind;
+		TLSVersion m_version;
 		ssl_ctx_st* m_ctx;
 		TLSPeerValidationCallback m_peerValidationCallback;
 		TLSPeerValidationMode m_validationMode;
@@ -608,12 +695,12 @@ final class OpenSSLContext : TLSContext {
 	this(TLSContextKind kind, TLSVersion ver = TLSVersion.any)
 	{
 		m_kind = kind;
+		m_version = ver;
 
 		const(SSL_METHOD)* method;
 		c_ulong veroptions = SSL_OP_NO_SSLv2;
 		c_ulong options = SSL_OP_NO_COMPRESSION;
-		static if (OPENSSL_VERSION.startsWith("1.1")) {}
-		else
+		static if (OPENSSL_VERSION_BEFORE(1, 1, 0))
 			options |= SSL_OP_SINGLE_DH_USE|SSL_OP_SINGLE_ECDH_USE; // There are always enabled in OpenSSL 1.1.0.
 		int minver = TLS1_VERSION;
 		int maxver = TLS1_2_VERSION;
@@ -623,10 +710,8 @@ final class OpenSSLContext : TLSContext {
 			case TLSContextKind.client:
 				final switch (ver) {
 					case TLSVersion.any: method = SSLv23_client_method(); veroptions |= SSL_OP_NO_SSLv3; break;
-					case TLSVersion.ssl3: method = SSLv23_client_method(); veroptions |= SSL_OP_NO_TLSv1_1|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_2; minver = SSL3_VERSION; maxver = SSL3_VERSION; break;
-					case TLSVersion.tls1: method = TLSv1_client_method(); veroptions |= SSL_OP_NO_SSLv3; break;
-					//case TLSVersion.tls1_1: method = TLSv1_1_client_method(); break;
-					//case TLSVersion.tls1_2: method = TLSv1_2_client_method(); break;
+					case TLSVersion.ssl3: throw new Exception("SSLv3 is not supported anymore");
+					case TLSVersion.tls1: method = SSLv23_client_method(); veroptions |= SSL_OP_NO_SSLv3|SSL_OP_NO_TLSv1_1|SSL_OP_NO_TLSv1_2; maxver = TLS1_VERSION; break;
 					case TLSVersion.tls1_1: method = SSLv23_client_method(); veroptions |= SSL_OP_NO_SSLv3|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_2; minver = TLS1_1_VERSION; maxver = TLS1_1_VERSION; break;
 					case TLSVersion.tls1_2: method = SSLv23_client_method(); veroptions |= SSL_OP_NO_SSLv3|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_1; minver = TLS1_2_VERSION; break;
 					case TLSVersion.dtls1: method = DTLSv1_client_method(); minver = DTLS1_VERSION; maxver = DTLS1_VERSION; break;
@@ -636,12 +721,10 @@ final class OpenSSLContext : TLSContext {
 			case TLSContextKind.serverSNI:
 				final switch (ver) {
 					case TLSVersion.any: method = SSLv23_server_method(); veroptions |= SSL_OP_NO_SSLv3; break;
-					case TLSVersion.ssl3: method = SSLv23_server_method(); veroptions |= SSL_OP_NO_TLSv1_1|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_2; minver = SSL3_VERSION; maxver = SSL3_VERSION; break;
-					case TLSVersion.tls1: method = TLSv1_server_method(); veroptions |= SSL_OP_NO_SSLv3; break;
+					case TLSVersion.ssl3: throw new Exception("SSLv3 is not supported anymore");
+					case TLSVersion.tls1: method = SSLv23_server_method(); veroptions |= SSL_OP_NO_SSLv3|SSL_OP_NO_TLSv1_1|SSL_OP_NO_TLSv1_2; maxver = TLS1_VERSION; break;
 					case TLSVersion.tls1_1: method = SSLv23_server_method(); veroptions |= SSL_OP_NO_SSLv3|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_2; minver = TLS1_1_VERSION; maxver = TLS1_1_VERSION; break;
 					case TLSVersion.tls1_2: method = SSLv23_server_method(); veroptions |= SSL_OP_NO_SSLv3|SSL_OP_NO_TLSv1|SSL_OP_NO_TLSv1_1; minver = TLS1_2_VERSION; break;
-					//case TLSVersion.tls1_1: method = TLSv1_1_server_method(); break;
-					//case TLSVersion.tls1_2: method = TLSv1_2_server_method(); break;
 					case TLSVersion.dtls1: method = DTLSv1_server_method(); minver = DTLS1_VERSION; maxver = DTLS1_VERSION; break;
 				}
 				options |= SSL_OP_CIPHER_SERVER_PREFERENCE;
@@ -655,7 +738,7 @@ final class OpenSSLContext : TLSContext {
 			assert(false);
 		}
 
-		static if (OPENSSL_VERSION.startsWith("1.1")) {
+		static if (OPENSSL_VERSION_AT_LEAST(1, 1, 0)) {
 			() @trusted { return SSL_CTX_set_min_proto_version(m_ctx, minver); }()
 				.enforceSSL("Failed setting minimum protocol version");
 			() @trusted { return SSL_CTX_set_max_proto_version(m_ctx, maxver); }()
@@ -670,7 +753,7 @@ final class OpenSSLContext : TLSContext {
 
 		if (kind == TLSContextKind.server) {
 			setDHParams();
-			static if (haveECDH) setECDHCurve();
+			setECDHCurve();
 			guessSessionIDContext();
 		}
 
@@ -859,17 +942,39 @@ final class OpenSSLContext : TLSContext {
 		specifications as accepted by OpenSSL. Calling this function
 		without argument will restore the default.
 
+		The default is derived from $(LINK https://wiki.mozilla.org/Security/Server_Side_TLS),
+		using the "intermediate" list for TLSv1.2+ server contexts or using the
+		"old compatibility" list otherwise.
+
 		See_also: $(LINK https://www.openssl.org/docs/apps/ciphers.html#CIPHER_LIST_FORMAT)
 	*/
 	void setCipherList(string list = null)
 		@trusted
 	{
-		if (list is null)
-			SSL_CTX_set_cipher_list(m_ctx,
-				"ECDH+AESGCM:DH+AESGCM:ECDH+AES256:DH+AES256:ECDH+AES128:DH+AES:"
-				~ "RSA+AESGCM:RSA+AES:RSA+3DES:!aNULL:!MD5:!DSS").enforceSSL("Setting cipher list");
-		else
-			SSL_CTX_set_cipher_list(m_ctx, toStringz(list)).enforceSSL("Setting cipher list");
+		if (list is null) {
+			if (m_kind == TLSContextKind.server && m_version == TLSVersion.tls1_2) {
+				list = "TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:"
+					~ "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
+					~ "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
+					~ "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:"
+					~ "DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384";
+			} else {
+				list =
+					"TLS_AES_128_GCM_SHA256:TLS_AES_256_GCM_SHA384:TLS_CHACHA20_POLY1305_SHA256:"
+					~ "ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:"
+					~ "ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:"
+					~ "ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:"
+					~ "DHE-RSA-AES128-GCM-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-CHACHA20-POLY1305:"
+					~ "ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256:ECDHE-ECDSA-AES128-SHA:"
+					~ "ECDHE-RSA-AES128-SHA:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384:"
+					~ "ECDHE-ECDSA-AES256-SHA:ECDHE-RSA-AES256-SHA:DHE-RSA-AES128-SHA256:"
+					~ "DHE-RSA-AES256-SHA256:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:"
+					~ "AES256-SHA256:AES128-SHA:AES256-SHA:DES-CBC3-SHA";
+			}
+		}
+
+		SSL_CTX_set_cipher_list(m_ctx, toStringz(list))
+			.enforceSSL("Setting cipher list");
 	}
 
 	/** Make up a context ID to assign to the SSL context.
@@ -928,27 +1033,29 @@ final class OpenSSLContext : TLSContext {
 	 */
 	void setECDHCurve(string curve = null)
 	@trusted {
-		static if (haveECDH) {
-			static if (OPENSSL_VERSION_NUMBER >= 0x10200000) {
-				// use automatic ecdh curve selection by default
-				if (curve is null) {
-					SSL_CTX_set_ecdh_auto(m_ctx, true);
-					return;
-				}
-				// but disable it when an explicit curve is given
-				SSL_CTX_set_ecdh_auto(m_ctx, false);
+		// `SSL_CTX_set_ecdh_auto` are no longer available in v1.1.0,
+		// as it is always enabled by default.
+		// https://github.com/openssl/openssl/issues/1437
+		// https://github.com/openssl/openssl/commit/2ecb9f2d18614fb7b7b42830a358b7163ed43221
+		static if (OPENSSL_VERSION_NUMBER >= 0x10200000 && OPENSSL_VERSION_NUMBER < OPENSSL_MAKE_VERSION(1, 1, 0, 0)) {
+			// use automatic ecdh curve selection by default
+			if (curve is null) {
+				SSL_CTX_set_ecdh_auto(m_ctx, true);
+				return;
 			}
+			// but disable it when an explicit curve is given
+			SSL_CTX_set_ecdh_auto(m_ctx, false);
+		}
 
-			int nid;
-			if (curve is null)
-				nid = NID_X9_62_prime256v1;
-			else
-				nid = enforce(OBJ_sn2nid(toStringz(curve)), "Unknown ECDH curve '"~curve~"'.");
+		int nid;
+		if (curve is null)
+			nid = NID_X9_62_prime256v1;
+		else
+			nid = enforce(OBJ_sn2nid(toStringz(curve)), "Unknown ECDH curve '"~curve~"'.");
 
-			auto ecdh = enforce(EC_KEY_new_by_curve_name(nid), "Unable to create ECDH curve.");
-			SSL_CTX_set_tmp_ecdh(m_ctx, ecdh);
-			EC_KEY_free(ecdh);
-		} else assert(false, "ECDH curve selection not available for old versions of OpenSSL");
+		auto ecdh = enforce(EC_KEY_new_by_curve_name(nid), "Unable to create ECDH curve.");
+		SSL_CTX_set_tmp_ecdh(m_ctx, ecdh);
+		EC_KEY_free(ecdh);
 	}
 
 	/// Sets a certificate file to use for authenticating to the remote peer
@@ -1090,30 +1197,35 @@ alias SSLState = ssl_st*;
 /**************************************************************************************************/
 
 private {
-	__gshared InterruptibleTaskMutex[] g_cryptoMutexes;
 	__gshared int gs_verifyDataIndex;
 }
 
 shared static this()
 {
-	logDebug("Initializing OpenSSL...");
-	SSL_load_error_strings();
-	SSL_library_init();
+	static if (OPENSSL_VERSION_BEFORE(1, 1, 0))
+	{
+		logDebug("Initializing OpenSSL...");
+		// Not required as of OpenSSL 1.1.0, see:
+		// https://wiki.openssl.org/index.php/Library_Initialization
+		SSL_load_error_strings();
+		SSL_library_init();
 
-	g_cryptoMutexes.length = CRYPTO_num_locks();
-	// TODO: investigate if a normal Mutex is enough - not sure if BIO is called in a locked state
-	foreach (i; 0 .. g_cryptoMutexes.length)
-		g_cryptoMutexes[i] = new InterruptibleTaskMutex;
-	foreach (ref m; g_cryptoMutexes) {
-		assert(m !is null);
+		g_cryptoMutexes.length = CRYPTO_num_locks();
+		// TODO: investigate if a normal Mutex is enough - not sure if BIO is called in a locked state
+		foreach (i; 0 .. g_cryptoMutexes.length)
+			g_cryptoMutexes[i] = new InterruptibleTaskMutex;
+		foreach (ref m; g_cryptoMutexes) {
+			assert(m !is null);
+		}
+
+		// Those two were removed in v1.1.0, see:
+		// https://github.com/openssl/openssl/issues/1260
+		CRYPTO_set_id_callback(&onCryptoGetThreadID);
+		CRYPTO_set_locking_callback(&onCryptoLock);
+		logDebug("... done.");
 	}
 
-	CRYPTO_set_id_callback(&onCryptoGetThreadID);
-	CRYPTO_set_locking_callback(&onCryptoLock);
-
 	enforce(RAND_poll(), "Fatal: failed to initialize random number generator entropy (RAND_poll).");
-	logDebug("... done.");
-
 	gs_verifyDataIndex = SSL_get_ex_new_index(0, cast(void*)"VerifyData".ptr, null, null, null);
 }
 
@@ -1140,12 +1252,12 @@ private bool verifyCertName(X509* cert, int field, in char[] value, bool allow_w
 	int cnid;
 	int alt_type;
 	final switch (field) {
-		case GENERAL_NAME.GEN_DNS:
+		case GEN_DNS:
 			cnid = NID_commonName;
 			alt_type = V_ASN1_IA5STRING;
 			str_match = allow_wildcards ? (in s) => matchWildcard(value, s) : (in s) => s.icmp(value) == 0;
 			break;
-		case GENERAL_NAME.GEN_IPADD:
+		case GEN_IPADD:
 			cnid = 0;
 			alt_type = V_ASN1_OCTET_STRING;
 			str_match = (in s) => s == value;
@@ -1153,12 +1265,17 @@ private bool verifyCertName(X509* cert, int field, in char[] value, bool allow_w
 	}
 
 	if (auto gens = cast(STACK_OF!GENERAL_NAME*)X509_get_ext_d2i(cert, NID_subject_alt_name, null, null)) {
-		scope(exit) GENERAL_NAMES_free(gens);
+		// Somehow Deimos' bindings don't allow us to call `sk_GENERAL_NAMES_free`,
+		// as it takes a `stack_st_GENERAL_NAME*` which in C is just what
+		// `STACK_OF(GENERAL_NAME)` aliases to, but not in D (STACK_OF is a template).
+		// Since under the hood all stack APIs are untyped, just use `OPENSSL_sk_free`
+		// directly, see: https://man.openbsd.org/OPENSSL_sk_new.3
+		scope(exit) OPENSSL_sk_free(cast(_STACK*) gens);
 
 		foreach (i; 0 .. sk_GENERAL_NAME_num(gens)) {
 			auto gen = sk_GENERAL_NAME_value(gens, i);
 			if (gen.type != field) continue;
-			ASN1_STRING *cstr = field == GENERAL_NAME.GEN_DNS ? gen.d.dNSName : gen.d.iPAddress;
+			ASN1_STRING *cstr = field == GEN_DNS ? gen.d.dNSName : gen.d.iPAddress;
 			if (check_value(cstr, alt_type)) return true;
 		}
 		if (!cnid) return false;
@@ -1267,29 +1384,6 @@ private nothrow @safe extern(C)
 		return 0;
 	}
 
-	c_ulong onCryptoGetThreadID()
-	{
-		try {
-			return cast(c_ulong)(cast(size_t)() @trusted { return cast(void*)Thread.getThis(); } () * 0x35d2c57);
-		} catch (Exception e) {
-			logWarn("OpenSSL: failed to get current thread ID: %s", e.msg);
-			return 0;
-		}
-	}
-
-	void onCryptoLock(int mode, int n, const(char)* file, int line)
-	{
-		try {
-			enforce(n >= 0 && n < () @trusted { return g_cryptoMutexes; } ().length, "Mutex index out of range.");
-			auto mutex = () @trusted { return g_cryptoMutexes[n]; } ();
-			assert(mutex !is null);
-			if (mode & CRYPTO_LOCK) mutex.lock();
-			else mutex.unlock();
-		} catch (Exception e) {
-			logWarn("OpenSSL: failed to lock/unlock mutex: %s", e.msg);
-		}
-	}
-
 	int onBioNew(BIO *b) nothrow
 	{
 		BIO_set_init(b, 0);
@@ -1377,11 +1471,17 @@ private nothrow @safe extern(C)
 private void setSSLError(string msg, string submsg, int line = __LINE__, string file = __FILE__)
 @trusted nothrow {
 	import std.string : toStringz;
-	ERR_put_error(ERR_LIB_USER, 0, 1, file.toStringz, line);
+	static if (is(typeof(ERR_new))) {
+		ERR_new();
+		ERR_set_debug(file.toStringz, line, "");
+		ERR_set_error(ERR_LIB_USER, 1, null);
+	} else {
+		ERR_put_error(ERR_LIB_USER, 0, 1, file.toStringz, line);
+	}
 	ERR_add_error_data(3, msg.toStringz, ": ".ptr, submsg.toStringz);
 }
 
-static if (OPENSSL_VERSION.startsWith("1.1")) {
+static if (OPENSSL_VERSION_AT_LEAST(1, 1, 0)) {
 	private BIO_METHOD* s_bio_methods;
 
 	private void initBioMethods()
@@ -1395,6 +1495,8 @@ static if (OPENSSL_VERSION.startsWith("1.1")) {
 		BIO_meth_set_destroy(s_bio_methods, &onBioFree);
 	}
 } else {
+	// OpenSSL 1.1.0 made BIO opaque, this is for older versions
+	//https://github.com/openssl/openssl/commit/a146ae55ba479a5c7aa2a6afba1b2b93102a152c
 	private BIO_METHOD s_bio_methods = {
 		57, "SslStream",
 		&onBioWrite,

@@ -13,11 +13,50 @@ import vibe.textfilter.urlencode;
 import vibe.utils.string;
 
 import std.array;
+import std.algorithm;
 import std.conv;
 import std.exception;
 import std.string;
 import std.traits : isInstanceOf;
-import std.ascii : isAlpha;
+import std.ascii : isAlpha, isASCII, toLower;
+import std.uri: decode, encode;
+
+import core.checkedint : addu;
+
+
+/** Parses a user-provided URL with relaxed rules.
+
+	Unlike `URL.parse`, this allows the URL to use special characters as part of
+	the host name and path, automatically employing puny code or percent-encoding
+	to convert this to a valid URL.
+
+	Params:
+		url = String representation of the URL
+		default_schema = If `url` does not contain a schema name, the URL parser
+			may choose to use this schema instead. A browser might use "http" or
+			"https", for example.
+*/
+URL parseUserURL(string url, string default_schema)
+{
+	return URL(url, false).normalized;
+}
+
+unittest {
+	// special characters in path
+	auto url = parseUserURL("http://example.com/hello-🌍", "foo");
+	assert(url.pathString == "/hello-%F0%9F%8C%8D");
+	url = parseUserURL("http://example.com/안녕하세요-세계", "foo");
+	assert(url.pathString == "/%EC%95%88%EB%85%95%ED%95%98%EC%84%B8%EC%9A%94-%EC%84%B8%EA%B3%84");
+	// special characters in host name
+	url = parseUserURL("http://hello-🌍.com/", "foo");
+	assert(url.host == "xn--hello--8k34e.com");
+	url = parseUserURL("http://hello-🌍.com:8080/", "foo");
+	assert(url.host == "xn--hello--8k34e.com");
+	url = parseUserURL("http://i-❤-이모티콘.io", "foo");
+	assert(url.host == "xn--i---5r6aq903fubqabumj4g.io");
+	url = parseUserURL("https://hello🌍.i-❤-이모티콘.com", "foo");
+	assert(url.host == "xn--hello-oe93d.xn--i---5r6aq903fubqabumj4g.com");
+}
 
 
 /**
@@ -141,6 +180,11 @@ struct URL {
 	*/
 	this(string url_string)
 	{
+		this(url_string, true);
+	}
+
+	private this(string url_string, bool encoded)
+	{
 		auto str = url_string;
 		enforce(str.length > 0, "Empty URL.");
 		if( str[0] != '/' ){
@@ -153,9 +197,8 @@ struct URL {
 			str = str[idx+1 .. $];
 			bool requires_host = false;
 
-			if (isCommonInternetSchema(m_schema)) {
+			if (str.startsWith("//")) {
 				// proto://server/path style
-				enforce(str.startsWith("//"), "URL must start with proto://...");
 				requires_host = true;
 				str = str[2 .. $];
 			}
@@ -200,6 +243,8 @@ struct URL {
 				if(pi > 0) {
 					m_host = m_host[0 .. pi];
 				}
+				if (!encoded)
+					m_host = m_host.splitter('.').map!(punyEncode).join('.');
 			}
 
 			enforce(!requires_host || m_schema == "file" || m_host.length > 0,
@@ -207,7 +252,7 @@ struct URL {
 			str = str[si .. $];
 		}
 
-		this.localURI = str;
+		this.localURI = (encoded) ? str : str.encode;
 	}
 	/// ditto
 	static URL parse(string url_string)
@@ -262,15 +307,21 @@ struct URL {
 	/// Get the default port for the given schema or 0
 	static ushort defaultPort(string schema)
 	nothrow {
-		switch (schema) {
-			default:
-			case "file": return 0;
-			case "http": return 80;
-			case "https": return 443;
-			case "ftp": return 21;
-			case "spdy": return 443;
-			case "sftp": return 22;
-		}
+		import core.atomic : atomicLoad;
+		import std.uni : toLower;
+
+		string lowerschema;
+
+		try
+			lowerschema = schema.toLower();
+		catch (Exception e)
+			assert(false, e.msg);
+		
+		if (auto set = atomicLoad(map_commonInternetSchemas))
+			if (set.contains(lowerschema))
+				return set.get(lowerschema);
+
+		return 0;
 	}
 	/// ditto
 	ushort defaultPort()
@@ -345,16 +396,26 @@ struct URL {
 	/// Converts this URL object to its string representation.
 	string toString()
 	const nothrow {
-		import std.format;
 		auto dst = appender!string();
+		try this.toString(dst);
+		catch (Exception e) assert(false, e.msg);
+		return dst.data;
+	}
+
+	/// Ditto
+	void toString(OutputRange) (ref OutputRange dst) const {
+		import std.format;
 		dst.put(schema);
 		dst.put(":");
 		if (isCommonInternetSchema(schema))
 			dst.put("//");
 		if (m_username.length || m_password.length) {
 			dst.put(username);
-			dst.put(':');
-			dst.put(password);
+			if (m_password.length)
+			{
+				dst.put(':');
+				dst.put(password);
+			}
 			dst.put('@');
 		}
 
@@ -365,13 +426,10 @@ struct URL {
 		dst.put(host);
 		if ( ipv6 ) dst.put(']');
 
-		if (m_port > 0) {
-			try formattedWrite(dst, ":%d", m_port);
-			catch (Exception e) assert(false, e.msg);
-		}
+		if (m_port > 0)
+			formattedWrite(dst, ":%d", m_port);
 
 		dst.put(localURI);
-		return dst.data;
 	}
 
 	/** Converts a "file" URL back to a native file system path.
@@ -405,6 +463,99 @@ struct URL {
 		return cast(NativePath)this.path;
 	}
 
+	/// Decode percent encoded triplets for unreserved or convert to uppercase
+	private string normalize_percent_encoding(scope const(char)[] input)
+	{
+		auto normalized = appender!string;
+		normalized.reserve(input.length);
+
+		for (size_t i = 0; i < input.length; i++)
+		{
+			const char c = input[i];
+			if (c == '%')
+			{
+				if (input.length < i + 3)
+					assert(false, "Invalid percent encoding");
+				
+				char conv = cast(char) input[i + 1 .. i + 3].to!ubyte(16);
+				switch (conv)
+				{
+					case 'A': .. case 'Z':
+					case 'a': .. case 'z':
+					case '0': .. case '9':
+					case '-': case '.': case '_': case '~':
+						normalized ~= conv; // Decode unreserved
+						break;
+					default:
+						normalized ~= input[i .. i + 3].toUpper(); // Uppercase HEX
+						break;
+				}
+
+				i += 2;
+			}
+			else
+				normalized ~= c;
+		}
+
+		return normalized.data;
+	}
+
+	/**
+	  * Normalize the content of this `URL` in place
+	  *
+	  * Normalization can be used to create a more consistent and human-friendly
+	  * string representation of the `URL`.
+	  * The list of transformations applied in the process of normalization is as follows:
+			- Converting schema and host to lowercase
+			- Removing port if it is the default port for schema
+			- Removing dot segments in path
+			- Converting percent-encoded triplets to uppercase
+			- Adding slash when path is empty
+			- Adding slash to path when path represents a directory
+			- Decoding percent encoded triplets for unreserved characters
+				A-Z a-z 0-9 - . _ ~ 
+
+		Params:
+			isDirectory = Path of the URL represents a directory, if one is 
+			not already present, a trailing slash will be appended when `true`
+	*/
+	void normalize(bool isDirectory = false)
+	{
+		import std.uni : toLower;
+		
+		// Lowercase host and schema
+		this.m_schema = this.m_schema.toLower();
+		this.m_host = this.m_host.toLower();
+
+		// Remove default port
+		if (this.m_port == URL.defaultPort(this.m_schema))
+			this.m_port = 0;
+
+		// Normalize percent encoding, decode unreserved or uppercase hex
+		this.m_queryString = normalize_percent_encoding(this.m_queryString);
+		this.m_anchor = normalize_percent_encoding(this.m_anchor);
+
+		// Normalize path (first remove dot segments then normalize path segments)
+		this.m_path = InetPath(this.m_path.normalized.bySegment2.map!(
+				n => InetPath.Segment2.fromTrustedEncodedString(normalize_percent_encoding(n.encodedName))
+			).array);
+
+		// Add trailing slash to empty path
+		if (this.m_path.empty || isDirectory)
+			this.m_path.endsWithSlash = true;		
+	}
+
+	/** Returns the normalized form of the URL.
+
+		See `normalize` for a full description.
+	*/
+	URL normalized()
+	const {
+		URL ret = this;
+		ret.normalize();
+		return ret;
+	}
+
 	bool startsWith(const URL rhs)
 	const nothrow {
 		if( m_schema != rhs.m_schema ) return false;
@@ -430,6 +581,7 @@ struct URL {
 		if (m_schema != rhs.m_schema) return false;
 		if (m_host != rhs.m_host) return false;
 		if (m_path != rhs.m_path) return false;
+		if (m_port != rhs.m_port) return false;
 		return true;
 	}
 	/// ditto
@@ -451,6 +603,7 @@ bool isValidSchema(string schema)
 		switch (ch) {
 			default: return false;
 			case 'a': .. case 'z': break;
+			case 'A': .. case 'Z': break;
 			case '0': .. case '9': break;
 			case '+', '.', '-': break;
 		}
@@ -463,6 +616,7 @@ unittest {
 	assert(isValidSchema("http+ssh"));
 	assert(isValidSchema("http"));
 	assert(!isValidSchema("http/ssh"));
+	assert(isValidSchema("HTtp"));
 }
 
 
@@ -504,27 +658,66 @@ unittest {
 
 private enum isAnyPath(P) = is(P == InetPath) || is(P == PosixPath) || is(P == WindowsPath);
 
-private shared immutable(StringSet)* st_commonInternetSchemas;
+private shared immutable(SchemaDefaultPortMap)* map_commonInternetSchemas;
 
+shared static this() {
+	auto initial_schemas = new SchemaDefaultPortMap;
+	initial_schemas.add("file", 0);
+	initial_schemas.add("tcp", 0);
+	initial_schemas.add("ftp", 21);
+	initial_schemas.add("sftp", 22);
+	initial_schemas.add("http", 80);
+	initial_schemas.add("https", 443);
+	initial_schemas.add("http+unix", 80);
+	initial_schemas.add("https+unix", 443);
+	initial_schemas.add("spdy", 443);
+	initial_schemas.add("ws", 80);
+	initial_schemas.add("wss", 443);
+	initial_schemas.add("redis", 6379);
+	initial_schemas.add("rtsp", 554);
+	initial_schemas.add("rtsps", 322);
+
+	map_commonInternetSchemas = cast(immutable)initial_schemas;
+}
+
+deprecated("Use the overload that accepts a `ushort port` as second argument")
+void registerCommonInternetSchema(string schema)
+{
+    registerCommonInternetSchema(schema, 0);
+}
 
 /** Adds the name of a schema to be treated as double-slash style.
 
+	Params:
+		schema = Name of the schema
+		port = Default port for the schema
+
 	See_also: `isCommonInternetSchema`, RFC 1738 Section 3.1
 */
-void registerCommonInternetSchema(string schema)
+void registerCommonInternetSchema(string schema, ushort port)
 @trusted nothrow {
 	import core.atomic : atomicLoad, cas;
+	import std.uni : toLower;
+
+	string lowerschema;
+	try {
+		lowerschema = schema.toLower();
+	} catch (Exception e) {
+		assert(false, e.msg);
+	}
+
+	assert(lowerschema.length < 128, "Only schemas with less than 128 characters are supported");
 
 	while (true) {
-		auto olds = atomicLoad(st_commonInternetSchemas);
-		auto news = olds ? olds.dup : new StringSet;
-		news.add(schema);
+		auto olds = atomicLoad(map_commonInternetSchemas);
+		auto news = olds ? olds.dup : new SchemaDefaultPortMap;
+		news.add(lowerschema, port);
 		static if (__VERSION__ < 2094) {
 			// work around bogus shared violation error on earlier versions of Druntime
-			if (cas(cast(shared(StringSet*)*)&st_commonInternetSchemas, cast(shared(StringSet)*)olds, cast(shared(StringSet)*)news))
+			if (cas(cast(shared(SchemaDefaultPortMap*)*)&map_commonInternetSchemas, cast(shared(SchemaDefaultPortMap)*)olds, cast(shared(SchemaDefaultPortMap)*)news))
 				break;
 		} else {
-			if (cas(&st_commonInternetSchemas, olds, cast(immutable)news))
+			if (cas(&map_commonInternetSchemas, olds, cast(immutable)news))
 				break;
 		}
 	}
@@ -546,38 +739,190 @@ void registerCommonInternetSchema(string schema)
 bool isCommonInternetSchema(string schema)
 @safe nothrow @nogc {
 	import core.atomic : atomicLoad;
+	char[128] buffer;
 
-	switch (schema) {
-		case "ftp", "http", "https", "http+unix", "https+unix":
-		case "spdy", "sftp", "ws", "wss", "file", "redis", "tcp":
-		case "rtsp", "rtsps":
-			return true;
-		default:
-			auto set = atomicLoad(st_commonInternetSchemas);
-			return set ? set.contains(schema) : false;
+	if (schema.length >= 128) return false;
+
+	foreach (ix, char c; schema)
+	{
+		if (!isASCII(c)) return false;
+		buffer[ix] = toLower(c);
 	}
+
+	scope lowerschema = buffer[0 .. schema.length];
+
+	return () @trusted {
+		auto set = atomicLoad(map_commonInternetSchemas);
+		return set ? set.contains(cast(string) lowerschema) : false;
+	} ();
 }
 
 unittest {
 	assert(isCommonInternetSchema("http"));
+	assert(isCommonInternetSchema("HTtP"));
+	assert(URL.defaultPort("http") == 80);
 	assert(!isCommonInternetSchema("foobar"));
-	registerCommonInternetSchema("foobar");
+	registerCommonInternetSchema("fooBar", 2522);
 	assert(isCommonInternetSchema("foobar"));
+	assert(isCommonInternetSchema("fOObAR"));
+	assert(URL.defaultPort("foobar") == 2522);
+	assert(URL.defaultPort("fOObar") == 2522);
+
+	assert(URL.defaultPort("unregistered") == 0);
 }
 
 
-private struct StringSet {
-	bool[string] m_data;
+private struct SchemaDefaultPortMap {
+	ushort[string] m_data;
 
-	void add(string str) @safe nothrow { m_data[str] = true; }
+	void add(string str, ushort port) @safe nothrow { m_data[str] = port; }
 	bool contains(string str) const @safe nothrow @nogc { return !!(str in m_data); }
-	StringSet* dup() const @safe nothrow {
-		auto ret = new StringSet;
-		foreach (k; m_data.byKey) ret.add(k);
+	ushort get(string str) const @safe nothrow { return m_data[str]; }
+	SchemaDefaultPortMap* dup() const @safe nothrow {
+		auto ret = new SchemaDefaultPortMap;
+		foreach (s; m_data.byKeyValue) ret.add(s.key, s.value);
 		return ret;
 	}
 }
 
+// Puny encoding
+private {
+	/** Bootstring parameters for Punycode
+		These parameters are designed for Unicode
+
+		See also: RFC 3492 Section 5
+	*/
+	enum uint base = 36;
+	enum uint tmin = 1;
+	enum uint tmax = 26;
+	enum uint skew = 38;
+	enum uint damp = 700;
+	enum uint initial_bias = 72;
+	enum uint initial_n = 128;
+
+	/*	Bias adaptation
+
+		See also: RFC 3492 Section 6.1
+	*/
+	uint punyAdapt (uint pdelta, int numpoints, bool firsttime)
+	@safe @nogc nothrow pure {
+		uint delta = firsttime ? pdelta / damp : pdelta / 2;
+		delta += delta / numpoints;
+		uint k = 0;
+
+		while (delta > ((base - tmin) * tmax) / 2)
+		{
+			delta /= (base - tmin);
+			k += base;
+		}
+
+		return k + (((base - tmin + 1) * delta) / (delta + skew));
+	}
+
+	/*	Converts puny digit-codes to code point
+
+		See also: RFC 3492 Section 5
+	*/
+	dchar punyDigitToCP (uint digit)
+	@safe @nogc nothrow pure {
+		return cast(dchar) (digit + 22 + 75 * (digit < 26));
+	}
+
+	/*	Encodes `input` with puny encoding
+		
+		If input is all characters below `initial_n`
+		input is returned as is.
+
+		See also: RFC 3492 Section 6.3
+	*/
+	string punyEncode (in string input)
+	@safe {
+		uint n = initial_n;
+		uint delta = 0;
+		uint bias = initial_bias;
+		uint h;
+		uint b;
+		dchar m = dchar.max; // minchar
+		bool delta_overflow;
+		
+		uint input_len = 0;
+		auto output = appender!string();
+		
+		output.put("xn--");
+
+		foreach (dchar cp; input)
+		{
+			if (cp <= initial_n)
+			{
+				output.put(cast(char) cp);
+				h += 1;
+			}
+			// Count length of input as code points, `input.length` counts bytes
+			input_len += 1;
+		}
+
+		b = h;
+		if (b == input_len)
+			return input; // No need to puny encode
+
+		if (b > 0)
+			output.put('-');
+
+		while (h < input_len)
+		{
+			m = dchar.max;
+			foreach (dchar cp; input)
+			{
+				if (n <= cp && cp < m)
+					m = cp;
+			}
+
+			assert(m != dchar.max, "Punyencoding failed, cannot find code point");
+
+			delta = addu(delta, ((m - n) * (h + 1)), delta_overflow);
+			assert(!delta_overflow, "Punyencoding failed, delta overflow");
+
+			n = m;
+
+			foreach (dchar cp; input)
+			{
+				if (cp < n)
+					delta += 1;
+
+				if (cp == n)
+				{
+					uint q = delta;
+					uint k = base;
+
+					while (true)
+					{
+						uint t;
+						if (k <= bias /* + tmin */)
+							t = tmin;
+						else if (k >=  bias + tmax)
+							t = tmax;
+						else
+							t = k - bias;
+
+						if (q < t) break;
+
+						output.put(punyDigitToCP(t + ((q - t) % (base - t))));
+						q = (q - t) / (base - t);
+						k += base;
+					}
+					output.put(punyDigitToCP(q));
+					bias = punyAdapt(delta, h + 1, h == b);
+					delta = 0;
+					h += 1;
+				}
+			}
+			delta += 1;
+			n += 1;
+		}
+
+		return output.data;
+	}
+}
 
 unittest { // IPv6
 	auto urlstr = "http://[2003:46:1a7b:6c01:64b:80ff:fe80:8003]:8091/abc";
@@ -674,6 +1019,14 @@ unittest {
 }
 
 unittest {
+	URL url = URL("http://user:password@example.com");
+	assert(url.toString() == "http://user:password@example.com");
+
+	url = URL("http://user@example.com");
+	assert(url.toString() == "http://user@example.com");
+}
+
+unittest {
 	auto url = URL("http://example.com/some%2bpath");
 	assert((cast(PosixPath)url.path).toString() == "/some+path", url.path.toString());
 }
@@ -740,6 +1093,33 @@ unittest { // native path <-> URL conversion
 
 	assertThrown(URL("http://example.org/").toNativePath);
 	assertThrown(URL(NativePath("foo/bar")));
+}
+
+unittest { // URL Normalization
+	auto url = URL.parse("http://example.com/foo%2a");
+	assert(url.normalized.toString() == "http://example.com/foo%2A");
+
+	url = URL.parse("HTTP://User@Example.COM/Foo");
+	assert(url.normalized.toString() == "http://User@example.com/Foo");
+	
+	url = URL.parse("http://example.com/%7Efoo");
+	assert(url.normalized.toString() == "http://example.com/~foo");
+	
+	url = URL.parse("http://example.com/foo/./bar/baz/../qux");
+	assert(url.normalized.toString() == "http://example.com/foo/bar/qux");
+	
+	url = URL.parse("http://example.com");
+	assert(url.normalized.toString() == "http://example.com/");
+	
+	url = URL.parse("http://example.com:80/");
+	assert(url.normalized.toString() == "http://example.com/");
+
+	url = URL.parse("hTTPs://examPLe.COM:443/my/path");
+	assert(url.normalized.toString() == "https://example.com/my/path");
+
+	url = URL.parse("http://example.com/foo");
+	url.normalize(true);
+	assert(url.toString() == "http://example.com/foo/");
 }
 
 version (Windows) unittest { // Windows drive letter paths

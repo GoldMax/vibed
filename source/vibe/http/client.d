@@ -77,11 +77,7 @@ HTTPClientResponse requestHTTP(string url, scope void delegate(scope HTTPClientR
 /// ditto
 HTTPClientResponse requestHTTP(URL url, scope void delegate(scope HTTPClientRequest req) requester = null, const(HTTPClientSettings) settings = defaultSettings)
 {
-	import std.algorithm.searching : canFind;
-
-	bool use_tls = isTLSRequired(url, settings);
-
-	auto cli = connectHTTP(url.getFilteredHost, url.port, use_tls, settings);
+	auto cli = connectHTTP(url, settings);
 	auto res = cli.request(
 		(scope req){ httpRequesterDg(req, url, settings, requester); },
 	);
@@ -100,9 +96,7 @@ void requestHTTP(string url, scope void delegate(scope HTTPClientRequest req) re
 /// ditto
 void requestHTTP(URL url, scope void delegate(scope HTTPClientRequest req) requester, scope void delegate(scope HTTPClientResponse req) responder, const(HTTPClientSettings) settings = defaultSettings)
 {
-	bool use_tls = isTLSRequired(url, settings);
-
-	auto cli = connectHTTP(url.getFilteredHost, url.port, use_tls, settings);
+	auto cli = connectHTTP(url, settings);
 	cli.request(
 		(scope req){ httpRequesterDg(req, url, settings, requester); },
 		responder
@@ -197,7 +191,7 @@ auto connectHTTP(string host, ushort port = 0, bool use_tls = false, const(HTTPC
 	auto sttngs = settings ? settings : defaultSettings;
 
 	if (port == 0) port = use_tls ? 443 : 80;
-	auto ckey = ConnInfo(host, port, use_tls, sttngs.proxyURL.host, sttngs.proxyURL.port, sttngs.networkInterface);
+	auto ckey = ConnInfo(host, sttngs.tlsPeerName, port, use_tls, sttngs.proxyURL.host, sttngs.proxyURL.port, sttngs.networkInterface);
 
 	ConnectionPool!HTTPClient pool;
 	s_connections.opApply((ref c) @safe {
@@ -207,7 +201,7 @@ auto connectHTTP(string host, ushort port = 0, bool use_tls = false, const(HTTPC
 	});
 
 	if (!pool) {
-		logDebug("Create HTTP client pool %s:%s %s proxy %s:%d", host, port, use_tls, sttngs.proxyURL.host, sttngs.proxyURL.port);
+		logDebug("Create HTTP client pool %s(%s):%s %s proxy %s:%d", host, sttngs.tlsPeerName, port, use_tls, sttngs.proxyURL.host, sttngs.proxyURL.port);
 		pool = new ConnectionPool!HTTPClient({
 				auto ret = new HTTPClient;
 				ret.connect(host, port, use_tls, sttngs);
@@ -220,6 +214,13 @@ auto connectHTTP(string host, ushort port = 0, bool use_tls = false, const(HTTPC
 	return pool.lockConnection();
 }
 
+/// Ditto
+auto connectHTTP(URL url, const(HTTPClientSettings) settings = null)
+{
+	const use_tls = isTLSRequired(url, settings);
+	return connectHTTP(url.getFilteredHost, url.port, use_tls, settings);
+}
+
 static ~this()
 {
 	foreach (ci; s_connections) {
@@ -229,7 +230,7 @@ static ~this()
 	}
 }
 
-private struct ConnInfo { string host; ushort port; bool useTLS; string proxyIP; ushort proxyPort; NetworkAddress bind_addr; }
+private struct ConnInfo { string host; string tlsPeerName; ushort port; bool useTLS; string proxyIP; ushort proxyPort; NetworkAddress bind_addr; }
 private static vibe.utils.array.FixedRingBuffer!(Tuple!(ConnInfo, ConnectionPool!HTTPClient), 16) s_connections;
 
 
@@ -268,6 +269,13 @@ class HTTPClientSettings {
 	*/
 	void delegate(TLSContext ctx) @safe nothrow tlsContextSetup;
 
+	/**
+		TLS Peer name override. 
+
+		Allows to customize the tls peer name sent to server during the TLS connection setup (SNI)
+	*/
+	string tlsPeerName;
+
 	@property HTTPClientSettings dup()
 	const @safe {
 		auto ret = new HTTPClientSettings;
@@ -277,6 +285,7 @@ class HTTPClientSettings {
 		ret.networkInterface = this.networkInterface;
 		ret.dnsAddressFamily = this.dnsAddressFamily;
 		ret.tlsContextSetup = this.tlsContextSetup;
+		ret.tlsPeerName = this.tlsPeerName;
 		return ret;
 	}
 }
@@ -377,6 +386,7 @@ final class HTTPClient {
 	private {
 		Rebindable!(const(HTTPClientSettings)) m_settings;
 		string m_server;
+		string m_tlsPeerName;
 		ushort m_port;
 		bool m_useTLS;
 		TCPConnection m_conn;
@@ -425,6 +435,7 @@ final class HTTPClient {
 		m_keepAliveTimeout = settings.defaultKeepAliveTimeout;
 		m_keepAliveLimit = Clock.currTime(UTC()) + m_keepAliveTimeout;
 		m_server = server;
+		m_tlsPeerName = settings.tlsPeerName.length ? settings.tlsPeerName : server;
 		m_port = port;
 		m_useTLS = use_tls;
 		if (use_tls) {
@@ -721,7 +732,7 @@ final class HTTPClient {
 
 			m_stream = m_conn;
 			if (m_useTLS) {
-				try m_tlsStream = createTLSStream(m_conn, m_tls, TLSStreamState.connecting, m_server, m_conn.remoteAddress);
+				try m_tlsStream = createTLSStream(m_conn, m_tls, TLSStreamState.connecting, m_tlsPeerName, m_conn.remoteAddress);
 				catch (Exception e) {
 					m_conn.close();
 					m_conn = TCPConnection.init;
@@ -1284,7 +1295,7 @@ package auto getFilteredHost(URL url)
 
 // This object is a placeholder and should to never be modified.
 package @property const(HTTPClientSettings) defaultSettings()
-@trusted {
+@trusted nothrow {
 	__gshared HTTPClientSettings ret = new HTTPClientSettings;
 	return ret;
 }

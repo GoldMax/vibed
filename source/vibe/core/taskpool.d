@@ -15,7 +15,6 @@ import vibe.core.sync : ManualEvent, VibeSyncMonitor = Monitor, createSharedManu
 import vibe.core.task : Task, TaskFuncInfo, TaskSettings, callWithMove;
 import core.sync.mutex : Mutex;
 import core.thread : Thread;
-import std.concurrency : prioritySend, receiveOnly;
 import std.traits : isFunctionPointer;
 
 
@@ -157,7 +156,7 @@ shared final class TaskPool {
 		// workaround for runWorkerTaskH to work when called outside of a task
 		if (Task.getThis() == Task.init) {
 			Task ret;
-			.runTask(() nothrow { ret = doRunTaskH(TaskSettings.init, func, args); }).joinUninterruptible();
+			.runTask((FT func, ARGS args) nothrow { ret = doRunTaskH(TaskSettings.init, func, args); }, func, args).joinUninterruptible();
 			return ret;
 		} else return doRunTaskH(TaskSettings.init, func, args);
 	}
@@ -179,7 +178,7 @@ shared final class TaskPool {
 		// workaround for runWorkerTaskH to work when called outside of a task
 		if (Task.getThis() == Task.init) {
 			Task ret;
-			.runTask(() nothrow { ret = doRunTaskH(settings, func, args); }).joinUninterruptible();
+			.runTask((TaskSettings settings, FT func, ARGS args) nothrow { ret = doRunTaskH(settings, func, args); }, settings, func, args).joinUninterruptible();
 			return ret;
 		} else return doRunTaskH(settings, func, args);
 	}
@@ -247,21 +246,26 @@ shared final class TaskPool {
 		if (isFunctionPointer!FT)
 	{
 		import std.typecons : Typedef;
+		import vibe.core.channel : Channel, createChannel;
 
 		foreach (T; ARGS) static assert(isWeaklyIsolated!T, "Argument type "~T.stringof~" is not safe to pass between threads.");
 
 		alias PrivateTask = Typedef!(Task, Task.init, __PRETTY_FUNCTION__);
-		Task caller = Task.getThis();
 
-		assert(caller != Task.init, "runWorkderTaskH can currently only be called from within a task.");
-		static void taskFun(Task caller, FT func, ARGS args) {
-			PrivateTask callee = Task.getThis();
-			caller.tid.prioritySend(callee);
+		auto ch = createChannel!Task();
+
+		static void taskFun(Channel!Task ch, FT func, ARGS args) {
+			try ch.put(Task.getThis());
+			catch (Exception e) assert(false, e.msg);
 			mixin(callWithMove!ARGS("func", "args"));
 		}
-		runTask_unsafe(settings, &taskFun, caller, func, args);
-		try return cast(Task)() @trusted { return receiveOnly!PrivateTask(); } ();
+		runTask_unsafe(settings, &taskFun, ch, func, args);
+
+		Task ret;
+		try ret = ch.consumeOne();
 		catch (Exception e) assert(false, "Failed to reveice task handle: " ~ e.msg);
+		ch.close();
+		return ret;
 	}
 
 
@@ -357,31 +361,22 @@ shared final class TaskPool {
 	/// ditto
 	void runTaskDistH(HCB, FT, ARGS...)(TaskSettings settings, scope HCB on_handle, FT func, auto ref ARGS args)
 	{
+		import vibe.core.channel : Channel, createChannel;
+
 		// TODO: support non-copyable argument types using .move
-		import std.concurrency : send, receiveOnly;
+		auto ch = createChannel!Task;
 
-		auto caller = Task.getThis();
-
-		// workaround to work when called outside of a task
-		if (caller == Task.init) {
-			Exception ex;
-			.runTask(() {
-				try runTaskDistH(on_handle, func, args);
-				catch (Exception e) ex = e;
-			}).joinUninterruptible();
-			if (ex) throw ex;
-			return;
-		}
-
-		static void call(Task t, FT func, ARGS args) {
-			try t.tid.send(Task.getThis());
+		static void call(Channel!Task ch, FT func, ARGS args) {
+			try ch.put(Task.getThis());
 			catch (Exception e) assert(false, e.msg);
 			func(args);
 		}
-		runTaskDist(settings, &call, caller, func, args);
+		runTaskDist(settings, &call, ch, func, args);
 
 		foreach (i; 0 .. this.threadCount)
-			on_handle(receiveOnly!Task);
+			on_handle(ch.consumeOne());
+
+		ch.close();
 	}
 
 	private void runTask_unsafe(CALLABLE, ARGS...)(TaskSettings settings, CALLABLE callable, ref ARGS args)
