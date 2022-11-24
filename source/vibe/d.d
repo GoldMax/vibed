@@ -15,3 +15,4 @@
 module vibe.d;
 
 public import vibe.vibe;
+
