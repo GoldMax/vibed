@@ -30,9 +30,9 @@ import deimos.openssl._d_util;
 /* Version macros for compile-time API version detection */
 enum
 {
-    OPENSSL_VERSION_MAJOR   = 1,
-    OPENSSL_VERSION_MINOR   = 1,
-    OPENSSL_VERSION_PATCH   = 0,
+    OPENSSL_VERSION_MAJOR   = 3,
+				OPENSSL_VERSION_MINOR   = 0,
+				OPENSSL_VERSION_PATCH   = 2,
     OPENSSL_VERSION_BUILD   = 'h' - '`'
 }
 

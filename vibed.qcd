@@ -1,11 +1,18 @@
 [General]
 CompilePriority=1000
-ExtraArgs="-version=EventcoreEpollDriver -version=VibeNoSSL"
+ExtraArgs="-version=EventcoreEpollDriver -version=Have_openssl"
 Includes=
-Libs=
+Libs=ssl crypto
 SourceRoot=source
 
 [Files]
+source\deimos\openssl\bio.d=0
+source\deimos\openssl\err.d=0
+source\deimos\openssl\opensslv.d=0
+source\deimos\openssl\rand.d=0
+source\deimos\openssl\ssl.d=0
+source\deimos\openssl\stack.d=0
+source\deimos\openssl\x509v3.d=0
 source\diet\defs.d=0
 source\diet\dom.d=0
 source\diet\html.d=0
